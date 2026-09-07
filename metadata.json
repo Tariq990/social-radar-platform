@@ -1,0 +1,6 @@
+{
+  "name": "MR SCRAP - Social Radar",
+  "description": "AI-powered social watchlist for Facebook and Instagram. Watch what matters, ignore the rest.",
+  "requestFramePermissions": ["notifications"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
