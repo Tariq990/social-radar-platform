@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en" dir="ltr" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>MR SCRAP - Social Radar | Watch What Matters</title>
+    <meta name="description" content="AI-powered social watchlist for Facebook and Instagram. Watch what matters, ignore the rest." />
+    <meta property="og:title" content="MR SCRAP - Social Radar" />
+    <meta property="og:description" content="AI-powered social watchlist for Facebook and Instagram. Watch what matters, ignore the rest." />
+    <meta property="og:type" content="website" />
+    <meta id="theme-color-meta" name="theme-color" content="#020617" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="manifest" href="/manifest.json" />
+    <!-- Immediate theme initializer script to avoid flash -->
+    <script>
+      (function() {
+        try {
+          var savedTheme = localStorage.getItem('mrscrap_theme_v1') || 'dark';
+          var root = document.documentElement;
+          if (savedTheme === 'light') {
+            root.classList.remove('dark');
+            root.classList.add('light');
+            var meta = document.getElementById('theme-color-meta');
+            if (meta) meta.setAttribute('content', '#f8fafc');
+          } else {
+            root.classList.remove('light');
+            root.classList.add('dark');
+          }
+          var savedLocale = localStorage.getItem('mrscrap_locale_v1') || 'en';
+          root.lang = savedLocale;
+          root.dir = savedLocale === 'ar' ? 'rtl' : 'ltr';
+        } catch(e) {}
+      })();
+    </script>
+    <!-- Fonts: Inter & Cairo for Arabic RTL rendering -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  </head>
+  <body class="bg-slate-950 text-slate-100 antialiased selection:bg-cyan-500/20 selection:text-cyan-400 min-h-screen transition-colors duration-200">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

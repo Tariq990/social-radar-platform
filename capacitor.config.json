@@ -1,0 +1,18 @@
+{
+  "appId": "com.mrscrap.socialradar",
+  "appName": "MR SCRAP",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https",
+    "cleartext": true
+  },
+  "plugins": {
+    "PushNotifications": {
+      "presentationOptions": ["badge", "sound", "alert"]
+    },
+    "App": {
+      "deepLinks": ["mrscrap://", "https://mrscrap.app"]
+    }
+  }
+}
