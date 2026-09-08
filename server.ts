@@ -11,6 +11,7 @@ import { evaluatePostAgainstRule } from './server/ai/ruleEvaluator';
 import { aiService } from './server/ai/aiService';
 import { getAIConfigurationStatus, testConfiguredAIProvider } from './server/ai/providerFactory';
 import { strictCors } from './server/http/cors';
+import { registerDevice, requireDeviceAuth } from './server/auth/deviceAuth';
 
 dotenv.config();
 
@@ -100,6 +101,15 @@ app.get('/api/config', (_req, res) => {
     monitoringMode: sourceConnectorManager.getPrimaryMonitoringMode(),
     optionalPublicProviderConfigured: sourceConnectorManager.isApifyConfigured()
   });
+});
+
+app.post('/api/auth/device/register', rateLimiter(8, 60_000), async (req, res) => {
+  try {
+    const registration = await registerDevice(req.body?.platform);
+    res.status(201).json(registration);
+  } catch (error) {
+    res.status(503).json({ error: safeError(error) });
+  }
 });
 
 app.get('/api/internal/ai/health', rateLimiter(5, 60_000), async (_req, res) => {
@@ -289,7 +299,7 @@ app.post('/api/alerts/scan', rateLimiter(15, 60_000), async (req, res) => {
   }
 });
 
-app.post('/api/device/ingest', rateLimiter(30, 60_000), async (req, res) => {
+app.post('/api/device/ingest', rateLimiter(30, 60_000), requireDeviceAuth, async (req, res) => {
   try {
     const { sourceId, posts, locale } = req.body || {};
     if (typeof sourceId !== 'string' || !sourceId.trim()) return res.status(400).json({ error: 'sourceId is required' });
@@ -299,7 +309,7 @@ app.post('/api/device/ingest', rateLimiter(30, 60_000), async (req, res) => {
     const result = await ingestDevicePosts(
       sourceId,
       posts,
-      'user_default',
+      res.locals.userId || 'user_default',
       locale === 'ar' ? 'ar' : 'en'
     );
     res.json(result);
