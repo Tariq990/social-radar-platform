@@ -1,0 +1,88 @@
+name: Meta Comment Feature Gate V6
+
+on:
+  push:
+    branches:
+      - test/meta-comment-dom-20260909
+    paths:
+      - .github/workflows/meta-comment-feature-gate-v6.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: meta-comment-feature-gate-v6
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: self-hosted
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Use persistent Node 22 toolchain
+        shell: bash
+        run: |
+          NODE_BIN="$HOME/actions-runnerr/_work/_tool/node/22.23.2/x64/bin"
+          test -x "$NODE_BIN/npm"
+          echo "$NODE_BIN" >> "$GITHUB_PATH"
+      - name: Apply feature patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          python3 scripts/apply-comment-grab-feature.py > /tmp/comment-patch.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/comment-patch.log
+          if [[ $status -ne 0 ]] && ! grep -q 'SmartGrabPanel.tsx: expected exactly one match, got 0' /tmp/comment-patch.log; then exit "$status"; fi
+          python3 scripts/finish-comment-grab-feature.py
+          sed -i 's/readFileSync(/read(/g' server/tests/architectureRegression.test.ts
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('server/tests/architectureRegression.test.ts')
+          p.write_text(p.read_text().rstrip()+'\n')
+          PY
+          git diff --check
+      - name: Live Facebook comment/media parity
+        shell: bash
+        run: |
+          curl -fsS --connect-timeout 3 http://127.0.0.1:9222/json/version >/dev/null
+          node scripts/live-comment-parity.mjs
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Typecheck
+        run: npm run lint
+      - name: Unit and architecture tests
+        run: npm test
+      - name: Build production web bundle
+        env:
+          VITE_API_BASE_URL: https://mr-scrap-api-live.onrender.com
+          APP_MODE: production
+        run: npm run build
+      - name: Sync Capacitor Android
+        run: npx cap sync android
+      - name: Compile Android debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="$HOME/.android/sdk"
+          printf 'sdk.dir=%s\n' "$SDK" > android/local.properties
+          export ANDROID_HOME="$SDK" ANDROID_SDK_ROOT="$SDK"
+          JAVA_CANDIDATE="$HOME/actions-runnerr/_work/_tool/Java_Temurin-Hotspot_jdk/21.0.12-101.0.LTS/x64"
+          if [[ -d "$JAVA_CANDIDATE" ]]; then export JAVA_HOME="$JAVA_CANDIDATE"; export PATH="$JAVA_HOME/bin:$PATH"; fi
+          chmod +x android/gradlew
+          ./android/gradlew -p android :app:assembleDebug --stacktrace
+      - name: Commit validated temp implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add android/app/src/main/res/raw/mrscrap_post_detail_extractor.js android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedPostDetailCollector.java android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSocialSessionPlugin.java src/types/index.ts src/connectors/deviceSessionConnector.ts src/services/explore.ts src/components/SmartGrabPanel.tsx server/worker/deviceExplore.ts server/ai/aiService.ts server/tests/architectureRegression.test.ts
+          git diff --cached --check
+          test -n "$(git diff --cached --name-only)"
+          git commit -m 'feat: add authenticated comment and media grab'
+          git push origin HEAD:test/meta-comment-dom-20260909
