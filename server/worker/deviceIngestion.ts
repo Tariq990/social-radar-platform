@@ -17,16 +17,31 @@ export interface DeviceNormalizedPostInput {
 export interface DeviceIngestionResult {
   accepted: number;
   duplicates: number;
+  rejected: number;
   matchesCreated: DbMatch[];
   evaluationErrors: { postId: string; ruleId: string; error: string }[];
 }
 
+function safeHttpUrl(value: unknown, maxLength: number = 4096): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  try {
+    const parsed = new URL(value.trim());
+    if (!['http:', 'https:'].includes(parsed.protocol)) return undefined;
+    return parsed.toString().slice(0, maxLength);
+  } catch {
+    return undefined;
+  }
+}
+
 function sanitizeMedia(value: unknown): { type: 'image' | 'video'; url: string }[] {
   if (!Array.isArray(value)) return [];
-  return value
-    .filter((item: any) => item && (item.type === 'image' || item.type === 'video') && typeof item.url === 'string')
-    .slice(0, 20)
-    .map((item: any) => ({ type: item.type, url: item.url.slice(0, 4096) }));
+  const result: { type: 'image' | 'video'; url: string }[] = [];
+  for (const item of value.slice(0, 20)) {
+    if (!item || (item.type !== 'image' && item.type !== 'video')) continue;
+    const url = safeHttpUrl(item.url);
+    if (url) result.push({ type: item.type, url });
+  }
+  return result;
 }
 
 function sanitizeMetadata(value: unknown): Record<string, unknown> {
@@ -41,6 +56,15 @@ function sanitizeMetadata(value: unknown): Record<string, unknown> {
     else if (typeof entry === 'number' || typeof entry === 'boolean' || entry === null) result[key] = entry;
   }
   return result;
+}
+
+function sanitizePublishedAt(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  const millis = Date.parse(value);
+  if (!Number.isFinite(millis)) return undefined;
+  // Reject clearly corrupt timestamps far in the future while allowing clock skew.
+  if (millis > Date.now() + 24 * 60 * 60 * 1000) return undefined;
+  return new Date(millis).toISOString();
 }
 
 function isAllowedPostUrl(raw: string, platform: 'facebook' | 'instagram'): boolean {
@@ -71,6 +95,7 @@ export async function ingestDevicePosts(
   const result: DeviceIngestionResult = {
     accepted: 0,
     duplicates: 0,
+    rejected: 0,
     matchesCreated: [],
     evaluationErrors: []
   };
@@ -90,12 +115,20 @@ export async function ingestDevicePosts(
 
   for (const raw of posts.slice(0, 50)) {
     const originalUrl = typeof raw.originalUrl === 'string' ? raw.originalUrl.trim() : '';
-    if (!originalUrl || !isAllowedPostUrl(originalUrl, source.platform)) continue;
+    if (!originalUrl || !isAllowedPostUrl(originalUrl, source.platform)) {
+      result.rejected++;
+      continue;
+    }
 
     const canonicalUrl = canonicalizeSocialUrl(originalUrl);
     const text = typeof raw.text === 'string' ? raw.text.slice(0, 100_000) : '';
-    const externalId = typeof raw.externalPostId === 'string' ? raw.externalPostId.slice(0, 512) : undefined;
-    const fingerprint = computePostFingerprint(source.platform, externalId, canonicalUrl, text);
+    const externalId = typeof raw.externalPostId === 'string' && raw.externalPostId.trim()
+      ? raw.externalPostId.trim().slice(0, 512)
+      : undefined;
+    const contentFingerprint = computePostFingerprint(source.platform, externalId, canonicalUrl, text);
+    // Database fingerprint uniqueness is atomic; prefixing sourceId prevents a post monitored by
+    // two different users/sources from suppressing one another.
+    const fingerprint = `${source.id}:${contentFingerprint}`.slice(0, 255);
 
     if (await db.hasPostFingerprint(fingerprint)) {
       result.duplicates++;
@@ -110,10 +143,10 @@ export async function ingestDevicePosts(
       external_id: externalId,
       canonical_url: canonicalUrl,
       author_name: typeof raw.authorName === 'string' ? raw.authorName.slice(0, 255) : source.name,
-      author_avatar: typeof raw.authorAvatar === 'string' ? raw.authorAvatar.slice(0, 4096) : source.avatar_url,
+      author_avatar: safeHttpUrl(raw.authorAvatar) || source.avatar_url,
       text,
       media: sanitizeMedia(raw.media),
-      published_at: raw.publishedAt || new Date().toISOString(),
+      published_at: sanitizePublishedAt(raw.publishedAt),
       fingerprint,
       metadata: {
         ...sanitizeMetadata(raw.metadata),
@@ -122,8 +155,6 @@ export async function ingestDevicePosts(
     });
 
     // A concurrent worker can win the fingerprint insert after our preflight check.
-    // PostgreSQL createPost returns the already-persisted row in that case; never evaluate
-    // or notify the same social post twice.
     if (savedPost.id !== candidatePostId) {
       result.duplicates++;
       continue;
@@ -152,8 +183,6 @@ export async function ingestDevicePosts(
           is_saved: false
         });
 
-        // createMatch is idempotent on (rule_id, post_id). If another worker created the
-        // match first, do not emit a second push/notification for the same rule and post.
         if (match.id !== candidateMatchId) continue;
 
         match.source_name = source.name;
@@ -179,7 +208,7 @@ export async function ingestDevicePosts(
     source.id,
     'device_ingest',
     'success',
-    `Accepted ${result.accepted} new posts; ignored ${result.duplicates} duplicates from authenticated Android device.`
+    `Accepted ${result.accepted} new posts; ignored ${result.duplicates} duplicates; rejected ${result.rejected} invalid records.`
   );
 
   return result;
