@@ -83,14 +83,17 @@ CREATE TABLE IF NOT EXISTS posts (
   text TEXT NOT NULL,
   media JSONB DEFAULT '[]'::jsonb,
   published_at TIMESTAMP WITH TIME ZONE,
-  fingerprint VARCHAR(255) NOT NULL UNIQUE,
+  fingerprint VARCHAR(255) NOT NULL,
   metadata JSONB DEFAULT '{}'::jsonb,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Forward-compatible migration for databases created before posts.updated_at existed.
+-- Forward-compatible migrations for databases created by earlier prototypes.
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();
+-- Older schema versions made fingerprint globally unique. That would incorrectly dedupe the
+-- same public post across different users/sources. Dedupe must be scoped to one source.
+ALTER TABLE posts DROP CONSTRAINT IF EXISTS posts_fingerprint_key;
 
 -- 7. Matches Table (AI / Rule Matches)
 CREATE TABLE IF NOT EXISTS matches (
@@ -143,7 +146,8 @@ CREATE INDEX IF NOT EXISTS idx_rules_user ON rules(user_id);
 CREATE INDEX IF NOT EXISTS idx_rule_sources_rule ON rule_sources(rule_id);
 CREATE INDEX IF NOT EXISTS idx_rule_sources_source ON rule_sources(source_id);
 CREATE INDEX IF NOT EXISTS idx_posts_source ON posts(source_id);
-CREATE INDEX IF NOT EXISTS idx_posts_fingerprint ON posts(fingerprint);
+DROP INDEX IF EXISTS idx_posts_fingerprint;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_posts_source_fingerprint ON posts(source_id, fingerprint);
 CREATE INDEX IF NOT EXISTS idx_posts_published ON posts(published_at DESC);
 CREATE INDEX IF NOT EXISTS idx_matches_user ON matches(user_id);
 CREATE INDEX IF NOT EXISTS idx_matches_source ON matches(source_id);
