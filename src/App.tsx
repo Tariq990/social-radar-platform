@@ -14,6 +14,7 @@ import { AlertDetailModal } from './components/AlertDetailModal';
 import { DigestModal } from './components/DigestModal';
 import { PaywallModal } from './components/PaywallModal';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { ForceUpdateGate } from './components/ForceUpdateGate';
 import { apiGetAuthSession } from './services/api';
 
 const RadarAppContent: React.FC = () => {
@@ -168,9 +169,11 @@ const RadarAppContent: React.FC = () => {
 export default function App() {
   return (
     <ErrorBoundary>
-      <RadarProvider>
-        <RadarAppContent />
-      </RadarProvider>
+      <ForceUpdateGate>
+        <RadarProvider>
+          <RadarAppContent />
+        </RadarProvider>
+      </ForceUpdateGate>
     </ErrorBoundary>
   );
 }
