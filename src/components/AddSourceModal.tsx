@@ -4,13 +4,12 @@ import {
   Link as LinkIcon,
   Check,
   Sparkles,
-  ShieldCheck,
   AlertCircle,
   ArrowRight,
   ArrowLeft,
   CheckCircle2,
-  Lock,
-  Radar
+  Radar,
+  LogIn
 } from 'lucide-react';
 import { useRadar } from '../context/RadarContext';
 import { DeviceSessionConnector } from '../connectors/deviceSessionConnector';
@@ -74,7 +73,7 @@ function platformFromUrl(value: string): 'facebook' | 'instagram' | null {
     if (host === 'instagram.com' || host.endsWith('.instagram.com') || host === 'instagr.am' || host.endsWith('.instagr.am')) return 'instagram';
     if (host === 'facebook.com' || host.endsWith('.facebook.com') || host === 'fb.com' || host.endsWith('.fb.com') || host === 'fb.watch') return 'facebook';
   } catch {
-    // Invalid input is handled by isSupportedSocialUrl.
+    // Invalid input is handled elsewhere.
   }
   return null;
 }
@@ -91,7 +90,6 @@ function deriveHandle(value: string): string {
     if (firstLower === 'profile.php') return (parsed.searchParams.get('id') || '').trim();
     if (firstLower === 'groups' && parts[1]) return parts[1].replace(/^@/, '').trim();
     if (first && !GENERIC_PATHS.has(firstLower)) return first.replace(/^@/, '').trim();
-
     return (parsed.searchParams.get('id') || '').trim();
   } catch {
     return '';
@@ -102,7 +100,7 @@ function normalizeIdentity(value: string | undefined): string {
   return (value || '').trim().replace(/^@/, '').toLowerCase();
 }
 
-function sourceIdentityTokens(source: Pick<Source, 'externalId' | 'handle' | 'url'> | ResolvedSource): Set<string> {
+function identityTokens(source: Pick<Source, 'externalId' | 'handle' | 'url'> | ResolvedSource): Set<string> {
   const tokens = new Set<string>();
   const externalId = normalizeIdentity(source.externalId);
   const handle = normalizeIdentity(source.handle);
@@ -113,46 +111,34 @@ function sourceIdentityTokens(source: Pick<Source, 'externalId' | 'handle' | 'ur
   return tokens;
 }
 
+function normalizedComparableUrl(value: string): string {
+  try {
+    const parsed = new URL(value);
+    parsed.hash = '';
+    parsed.hostname = parsed.hostname.toLowerCase().replace(/^(?:www\.|m\.|mobile\.|web\.)/, '');
+    return `${parsed.hostname}${parsed.pathname.replace(/\/+$/, '')}${parsed.search}`.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
 function findExistingSource(sources: Source[], requestedUrl: string, resolved?: ResolvedSource): Source | null {
-  const requestedPlatform = resolved?.platform === 'facebook' || resolved?.platform === 'instagram'
+  const platform = resolved?.platform === 'facebook' || resolved?.platform === 'instagram'
     ? resolved.platform
     : platformFromUrl(requestedUrl);
-  if (!requestedPlatform) return null;
+  if (!platform) return null;
 
   const candidateTokens = resolved
-    ? sourceIdentityTokens(resolved)
+    ? identityTokens(resolved)
     : new Set([normalizeIdentity(deriveHandle(requestedUrl))].filter(Boolean));
-
-  let exactRequested = '';
-  try {
-    const parsed = new URL(requestedUrl);
-    parsed.hash = '';
-    parsed.hostname = parsed.hostname.toLowerCase()
-      .replace(/^(?:www\.|m\.|mobile\.|web\.)/, '');
-    exactRequested = `${parsed.hostname}${parsed.pathname.replace(/\/+$/, '')}${parsed.search}`.toLowerCase();
-  } catch {
-    // Token matching still works for valid supported inputs.
-  }
+  const requestedComparable = normalizedComparableUrl(requestedUrl);
 
   for (const source of sources) {
-    if (source.platform !== requestedPlatform) continue;
-    const existingTokens = sourceIdentityTokens(source);
+    if (source.platform !== platform) continue;
+    const existingTokens = identityTokens(source);
     if ([...candidateTokens].some(token => existingTokens.has(token))) return source;
-
-    if (exactRequested) {
-      try {
-        const parsed = new URL(source.url);
-        parsed.hash = '';
-        parsed.hostname = parsed.hostname.toLowerCase()
-          .replace(/^(?:www\.|m\.|mobile\.|web\.)/, '');
-        const existingUrl = `${parsed.hostname}${parsed.pathname.replace(/\/+$/, '')}${parsed.search}`.toLowerCase();
-        if (existingUrl === exactRequested) return source;
-      } catch {
-        // Ignore malformed legacy URLs.
-      }
-    }
+    if (requestedComparable && normalizedComparableUrl(source.url) === requestedComparable) return source;
   }
-
   return null;
 }
 
@@ -167,28 +153,22 @@ function normalizeResolvedSource(resolved: ResolvedSource, requestedUrl: string)
   const finalUrl = isSupportedSocialUrl(returned) ? returned : requested;
   if (!isSupportedSocialUrl(finalUrl)) throw new Error('INVALID_SOCIAL_URL');
 
-  const handle = !isBlankMetadata(resolved.handle) ? resolved.handle!.trim().replace(/^@/, '') : deriveHandle(finalUrl);
+  const handle = !isBlankMetadata(resolved.handle)
+    ? resolved.handle!.trim().replace(/^@/, '')
+    : deriveHandle(finalUrl);
   const displayName = !isBlankMetadata(resolved.displayName)
     ? resolved.displayName.trim()
-    : handle
-      ? `@${handle}`
-      : '';
+    : handle ? `@${handle}` : '';
   const externalId = !isBlankMetadata(resolved.externalId)
     ? resolved.externalId.trim()
     : handle;
 
   if (!displayName || !externalId) throw new Error('UNRESOLVED_SOURCE_METADATA');
 
-  return {
-    ...resolved,
-    url: finalUrl,
-    displayName,
-    externalId,
-    handle
-  };
+  return { ...resolved, url: finalUrl, displayName, externalId, handle };
 }
 
-function makeUrlDerivedSource(url: string, connected: boolean): ResolvedSource | null {
+function urlDerivedSource(url: string, connected: boolean): ResolvedSource | null {
   const platform = platformFromUrl(url);
   const handle = deriveHandle(url);
   if (!platform || !handle) return null;
@@ -207,13 +187,6 @@ function makeUrlDerivedSource(url: string, connected: boolean): ResolvedSource |
   };
 }
 
-function sameResolvedIdentity(a: ResolvedSource, b: ResolvedSource): boolean {
-  if (a.platform !== b.platform) return false;
-  const left = sourceIdentityTokens(a);
-  const right = sourceIdentityTokens(b);
-  return [...left].some(token => right.has(token));
-}
-
 function isGenericDisplayName(value: string, handle?: string): boolean {
   const normalized = value.trim().toLowerCase();
   const normalizedHandle = normalizeIdentity(handle);
@@ -221,69 +194,68 @@ function isGenericDisplayName(value: string, handle?: string): boolean {
     normalized === 'page' || normalized === `@${normalizedHandle}` || normalized === normalizedHandle;
 }
 
+function sameIdentity(a: ResolvedSource, b: ResolvedSource): boolean {
+  if (a.platform !== b.platform) return false;
+  const left = identityTokens(a);
+  const right = identityTokens(b);
+  return [...left].some(token => right.has(token));
+}
+
 function firstSuccessful<T>(promises: Promise<T>[]): Promise<T> {
   return new Promise((resolve, reject) => {
-    if (promises.length === 0) {
-      reject(new Error('No source resolver is available'));
-      return;
-    }
+    if (promises.length === 0) return reject(new Error('NO_RESOLVER'));
     let pending = promises.length;
-    let lastError: unknown = new Error('Could not resolve source');
-    for (const promise of promises) {
+    let lastError: unknown = new Error('RESOLVE_FAILED');
+    promises.forEach(promise => {
       promise.then(resolve).catch(error => {
         lastError = error;
         pending -= 1;
         if (pending === 0) reject(lastError);
       });
-    }
+    });
   });
 }
 
+function timeoutAfter(ms: number): Promise<never> {
+  return new Promise((_, reject) => window.setTimeout(() => reject(new Error('RESOLVE_TIMEOUT')), ms));
+}
+
 function localizedSuggestions(locale: Locale): string[] {
-  if (locale === 'ar') {
-    return [
-      'نبهني عند نزول آخر بوست جديد',
-      'نبهني عند الإعلان عن خصم أو عرض محدود',
-      'نبهني عند إطلاق منتج أو خدمة جديدة',
-      'نبهني عند تغيير الأسعار أو الباقات'
-    ];
-  }
-  return [
-    'Notify me about the latest new post',
-    'Notify me when they announce a discount or limited offer',
-    'Alert me when a major new product or service launches',
-    'Tell me when they publish an important price change'
-  ];
+  return locale === 'ar'
+    ? [
+        'نبهني عند نزول آخر بوست جديد',
+        'نبهني عند الإعلان عن خصم أو عرض محدود',
+        'نبهني عند إطلاق منتج أو خدمة جديدة',
+        'نبهني عند تغيير الأسعار أو الباقات'
+      ]
+    : [
+        'Notify me about the latest new post',
+        'Notify me when they announce a discount or limited offer',
+        'Alert me when a major new product or service launches',
+        'Tell me when they publish an important price change'
+      ];
 }
 
 function friendlyError(error: unknown, locale: Locale): string {
   const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+  const lower = message.toLowerCase();
+
   if (locale === 'en') {
-    if (message === 'UNRESOLVED_SOURCE_METADATA') return 'We could not read a reliable name or account ID for this source. Open the link in Facebook or Instagram, then try again.';
     if (message === 'INVALID_SOCIAL_URL') return 'Paste a valid Facebook or Instagram URL.';
-    return message || 'Could not complete this action. Please try again.';
+    if (lower.includes('session') || lower.includes('login') || lower.includes('relogin')) return 'Facebook needs to be connected before this source can be monitored.';
+    return 'Could not verify this source. Please try again.';
   }
 
-  const lower = message.toLowerCase();
   if (
-    message === 'INVALID_SOCIAL_URL' ||
-    lower.includes('invalid url') ||
-    lower.includes('only http') ||
-    lower.includes('only facebook') ||
-    lower.includes('unsupported or invalid social url')
+    message === 'INVALID_SOCIAL_URL' || lower.includes('invalid url') || lower.includes('only http') ||
+    lower.includes('only facebook') || lower.includes('unsupported or invalid social url')
   ) {
-    return 'الرابط غير صالح. الصق رابطًا من Facebook أو Instagram ثم أعد المحاولة.';
-  }
-  if (message === 'UNRESOLVED_SOURCE_METADATA' || lower.includes('metadata') || lower.includes('page content')) {
-    return 'تعذر قراءة اسم أو معرّف موثوق لهذا المصدر. افتح الرابط في Facebook أو Instagram وتأكد أنه يعمل ثم أعد المحاولة.';
+    return 'الرابط غير صالح. الصق رابط Facebook أو Instagram صحيحًا.';
   }
   if (lower.includes('session') || lower.includes('login') || lower.includes('relogin')) {
-    return 'جلسة Facebook غير مكتملة. سجّل الدخول على هذا الجهاز ثم أعد المحاولة.';
+    return 'يلزم ربط Facebook قبل مراقبة هذا المصدر.';
   }
-  if (lower.includes('timed out') || lower.includes('timeout')) {
-    return 'استغرق فتح المصدر وقتًا أطول من المتوقع. تحقق من الاتصال ثم أعد المحاولة.';
-  }
-  return 'تعذر إكمال العملية الآن. أعد المحاولة بعد لحظات.';
+  return 'تعذر التحقق من المصدر الآن. أعد المحاولة.';
 }
 
 export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onClose }) => {
@@ -306,44 +278,35 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onCl
   const [existingSource, setExistingSource] = useState<Source | null>(null);
   const [resolveError, setResolveError] = useState<string | null>(null);
   const [pasteHint, setPasteHint] = useState<string | null>(null);
-  const [requiresDeviceLogin, setRequiresDeviceLogin] = useState(false);
+  const [sessionConnected, setSessionConnected] = useState<boolean | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [ruleText, setRuleText] = useState('');
   const [ruleName, setRuleName] = useState('');
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  useEffect(() => {
-    if (initialUrl && initialUrl.trim()) {
-      const clean = normalizeSocialInput(initialUrl);
-      setUrl(clean);
-      void handleResolve(clean);
-    }
-  }, [initialUrl]);
-
-  const prepareResolvedSource = (candidate: ResolvedSource, requestedUrl: string) => {
+  const prepareResolvedSource = (candidate: ResolvedSource, requestedUrl: string, connected: boolean) => {
     const resolved = normalizeResolvedSource(candidate, requestedUrl);
     const duplicate = findExistingSource(sources, requestedUrl, resolved);
     if (duplicate) {
       setExistingSource(duplicate);
-      setResolveError(null);
       setResolvedSource(null);
+      setResolveError(null);
       setStep(1);
-      return false;
+      return;
     }
 
     const nextSuggestions = localizedSuggestions(locale);
     setExistingSource(null);
     setResolvedSource(resolved);
+    setSessionConnected(connected);
     setRuleName(locale === 'ar' ? `${resolved.displayName} — مراقبة` : `${resolved.displayName} Watch`);
-    setRequiresDeviceLogin(resolved.connectorType === 'device_session' && resolved.connectorStatus !== 'authenticated_monitoring');
     setSuggestions(nextSuggestions);
     if (!ruleText.trim()) setRuleText(nextSuggestions[0] || '');
     setStep(3);
-    return true;
   };
 
-  const enrichResolvedSource = (candidate: ResolvedSource, requestedUrl: string, generation: number) => {
+  const enrichSource = (candidate: ResolvedSource, requestedUrl: string, generation: number) => {
     if (generation !== resolveGeneration.current) return;
     let normalized: ResolvedSource;
     try {
@@ -361,12 +324,15 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onCl
     }
 
     setResolvedSource(current => {
-      if (!current || !sameResolvedIdentity(current, normalized)) return current;
-      const useCandidateName = isGenericDisplayName(current.displayName, current.handle) &&
+      if (!current || !sameIdentity(current, normalized)) return current;
+      const betterName = isGenericDisplayName(current.displayName, current.handle) &&
         !isGenericDisplayName(normalized.displayName, normalized.handle);
+      if (betterName) {
+        setRuleName(locale === 'ar' ? `${normalized.displayName} — مراقبة` : `${normalized.displayName} Watch`);
+      }
       return {
         ...current,
-        displayName: useCandidateName ? normalized.displayName : current.displayName,
+        displayName: betterName ? normalized.displayName : current.displayName,
         handle: current.handle || normalized.handle,
         externalId: current.externalId || normalized.externalId,
         avatarUrl: current.avatarUrl || normalized.avatarUrl,
@@ -376,7 +342,8 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onCl
           : current.connectorStatus
       };
     });
-    if (normalized.connectorStatus === 'authenticated_monitoring') setRequiresDeviceLogin(false);
+
+    if (normalized.connectorStatus === 'authenticated_monitoring') setSessionConnected(true);
   };
 
   const handleResolve = async (targetUrl: string) => {
@@ -384,6 +351,7 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onCl
     const generation = ++resolveGeneration.current;
     setPasteHint(null);
     setExistingSource(null);
+    setResolveError(null);
 
     if (!clean || !isSupportedSocialUrl(clean)) {
       setResolveError(friendlyError('INVALID_SOCIAL_URL', locale));
@@ -391,73 +359,61 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onCl
       return;
     }
 
-    const immediateDuplicate = findExistingSource(sources, clean);
-    if (immediateDuplicate) {
+    const duplicate = findExistingSource(sources, clean);
+    if (duplicate) {
       setUrl(clean);
-      setExistingSource(immediateDuplicate);
-      setResolveError(null);
+      setExistingSource(duplicate);
       setStep(1);
       return;
     }
 
     setUrl(clean);
     setStep(2);
-    setResolveError(null);
-    setRequiresDeviceLogin(false);
 
-    const serverPromise: Promise<ResolvedSource> = apiResolveSource(clean, isDemoMode).then(serverResolved => {
-      if (serverResolved.requiresAuthentication) setRequiresDeviceLogin(true);
-      if (!serverResolved.valid) throw new Error(serverResolved.error || 'Could not resolve this source.');
+    const nativeAvailable = !isDemoMode && DeviceSessionConnector.isNativeAvailable();
+    let connected = false;
+    if (nativeAvailable) {
+      try { connected = await refreshDeviceSession(); } catch { connected = false; }
+    }
+    setSessionConnected(connected);
+
+    const serverPromise: Promise<ResolvedSource> = apiResolveSource(clean, isDemoMode).then(result => {
+      if (!result.valid) throw new Error(result.error || 'RESOLVE_FAILED');
       return normalizeResolvedSource({
-        platform: serverResolved.platform === 'instagram' ? 'instagram' : 'facebook',
-        externalId: serverResolved.externalId,
-        url: serverResolved.url || clean,
-        displayName: serverResolved.name,
-        handle: serverResolved.handle || '',
-        avatarUrl: serverResolved.avatarUrl || '',
+        platform: result.platform === 'instagram' ? 'instagram' : 'facebook',
+        externalId: result.externalId,
+        url: result.url || clean,
+        displayName: result.name,
+        handle: result.handle || '',
+        avatarUrl: result.avatarUrl || '',
         bio: '',
-        visibilityType: serverResolved.visibilityType,
-        connectorType: serverResolved.connectorType,
-        connectorStatus: serverResolved.requiresAuthentication ? 'needs_relogin' : 'connected',
+        visibilityType: result.visibilityType,
+        connectorType: result.connectorType,
+        connectorStatus: connected && nativeAvailable ? 'authenticated_monitoring' : (result.requiresAuthentication ? 'needs_relogin' : 'connected'),
         samplePosts: []
       }, clean);
     });
-
-    let connected = false;
-    try {
-      if (!isDemoMode && DeviceSessionConnector.isNativeAvailable()) {
-        connected = await refreshDeviceSession();
-      }
-    } catch {
-      connected = false;
-    }
 
     const nativePromise: Promise<ResolvedSource> | null = connected
       ? deviceConnector.resolveSource({ url: clean }).then(candidate => normalizeResolvedSource(candidate, clean))
       : null;
 
-    const provisional = makeUrlDerivedSource(clean, connected);
-    const quickFallback = new Promise<ResolvedSource>((resolve, reject) => {
-      window.setTimeout(() => {
-        if (provisional) resolve(provisional);
-        else reject(new Error('Source metadata is still loading'));
-      }, 1200);
-    });
+    serverPromise.then(candidate => enrichSource(candidate, clean, generation)).catch(() => {});
+    nativePromise?.then(candidate => enrichSource(candidate, clean, generation)).catch(() => {});
 
-    const resolvers = [serverPromise, quickFallback];
-    if (nativePromise) resolvers.push(nativePromise);
-
-    // Both real metadata resolvers continue in the background. The 1.2s URL-derived fallback
-    // only avoids trapping the user on a spinner; it never fabricates a profile name or image.
-    serverPromise.then(candidate => enrichResolvedSource(candidate, clean, generation)).catch(() => {});
-    nativePromise?.then(candidate => enrichResolvedSource(candidate, clean, generation)).catch(error => {
-      console.warn('[AddSource] Authenticated source enrichment did not complete', error);
-    });
+    const realResolvers = nativePromise ? [nativePromise, serverPromise] : [serverPromise];
+    const provisional = urlDerivedSource(clean, connected);
 
     try {
-      const winner = await firstSuccessful(resolvers);
+      let winner: ResolvedSource;
+      try {
+        winner = await Promise.race([firstSuccessful(realResolvers), timeoutAfter(2200)]);
+      } catch (error) {
+        if (!provisional) throw error;
+        winner = provisional;
+      }
       if (generation !== resolveGeneration.current) return;
-      prepareResolvedSource(winner, clean);
+      prepareResolvedSource(winner, clean, connected);
     } catch (error) {
       if (generation !== resolveGeneration.current) return;
       setResolveError(friendlyError(error, locale));
@@ -465,17 +421,23 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onCl
     }
   };
 
+  useEffect(() => {
+    if (!initialUrl?.trim()) return;
+    const clean = normalizeSocialInput(initialUrl);
+    setUrl(clean);
+    void handleResolve(clean);
+    // initialUrl is intentionally the only trigger for incoming-share auto resolution.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialUrl]);
+
   const handleConnectAndRetry = async () => {
     setConnecting(true);
     setResolveError(null);
-    setPasteHint(null);
     try {
       await connectFacebookSession();
-      if (await refreshDeviceSession()) {
-        await handleResolve(url);
-      } else {
-        setResolveError(friendlyError('Facebook login is not complete yet.', locale));
-      }
+      const connected = await refreshDeviceSession();
+      setSessionConnected(connected);
+      if (connected) await handleResolve(url);
     } catch (error) {
       setResolveError(friendlyError(error, locale));
     } finally {
@@ -489,21 +451,26 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onCl
     const duplicate = findExistingSource(sources, resolvedSource.url, resolvedSource);
     if (duplicate) {
       setExistingSource(duplicate);
-      setResolveError(null);
+      setResolvedSource(null);
       setStep(1);
       return;
+    }
+
+    if (resolvedSource.connectorType === 'device_session' && DeviceSessionConnector.isNativeAvailable() && !isDemoMode) {
+      let connected = sessionConnected === true;
+      if (!connected) {
+        try { connected = await refreshDeviceSession(); } catch { connected = false; }
+        setSessionConnected(connected);
+      }
+      if (!connected) {
+        setResolveError(locale === 'ar' ? 'يلزم ربط Facebook قبل بدء المراقبة.' : 'Connect Facebook before starting monitoring.');
+        return;
+      }
     }
 
     setIsSubmitting(true);
     setResolveError(null);
     try {
-      if (resolvedSource.connectorType === 'device_session' && !isDemoMode && DeviceSessionConnector.isNativeAvailable()) {
-        const connected = await refreshDeviceSession();
-        if (!connected) {
-          setResolveError(friendlyError('Facebook session is not connected.', locale));
-          return;
-        }
-      }
       await addSourceWithRule({
         platform: resolvedSource.platform,
         externalId: resolvedSource.externalId,
@@ -517,7 +484,7 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onCl
         connectorStatus: resolvedSource.connectorStatus
       }, ruleText, ruleName);
       setStep(4);
-      window.setTimeout(onClose, 1200);
+      window.setTimeout(onClose, 900);
     } catch (error) {
       setResolveError(friendlyError(error, locale));
     } finally {
@@ -531,37 +498,30 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onCl
     setPasteHint(null);
     try {
       let clip = '';
-
-      if (DeviceSessionConnector.isNativeAvailable()) {
-        clip = await DeviceSessionConnector.readClipboardText();
-      }
-      if (!clip && navigator.clipboard?.readText) {
-        clip = await navigator.clipboard.readText();
-      }
+      if (DeviceSessionConnector.isNativeAvailable()) clip = await DeviceSessionConnector.readClipboardText();
+      if (!clip && navigator.clipboard?.readText) clip = await navigator.clipboard.readText();
 
       const clean = normalizeSocialInput(clip);
       if (!clean) {
         setPasteHint(locale === 'ar' ? 'الحافظة لا تحتوي على رابط.' : 'The clipboard does not contain a link.');
         return;
       }
-
       setUrl(clean);
-      if (isSupportedSocialUrl(clean)) {
-        await handleResolve(clean);
-      } else {
-        setPasteHint(locale === 'ar' ? 'الحافظة لا تحتوي على رابط Facebook أو Instagram صالح.' : 'The clipboard does not contain a valid Facebook or Instagram URL.');
-      }
+      if (isSupportedSocialUrl(clean)) await handleResolve(clean);
+      else setPasteHint(locale === 'ar' ? 'الصق رابط Facebook أو Instagram صحيحًا.' : 'Paste a valid Facebook or Instagram URL.');
     } catch {
       inputRef.current?.focus();
-      setPasteHint(locale === 'ar'
-        ? 'تعذر قراءة الحافظة. اضغط مطولًا داخل الحقل واختر «لصق».'
-        : 'Could not read the clipboard. Long-press the field and choose Paste.');
+      setPasteHint(locale === 'ar' ? 'اضغط مطولًا داخل الحقل واختر «لصق».' : 'Long-press the field and choose Paste.');
     }
   };
 
-  const sourceBadge = resolvedSource?.connectorType === 'device_session'
-    ? (locale === 'ar' ? 'جلسة الجهاز' : 'Device session')
-    : (locale === 'ar' ? 'مصدر عام' : 'Public source');
+  const needsFacebookConnection = Boolean(
+    resolvedSource &&
+    resolvedSource.connectorType === 'device_session' &&
+    DeviceSessionConnector.isNativeAvailable() &&
+    !isDemoMode &&
+    sessionConnected === false
+  );
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-slate-950/75 backdrop-blur-md">
@@ -571,9 +531,9 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onCl
             <span className="w-2 h-2 rounded-full bg-cyan-400 flex-none" />
             <h2 className="text-base sm:text-lg font-bold text-slate-100 truncate">
               {step === 1 && t.addSourceTitle}
-              {step === 2 && (locale === 'ar' ? 'جاري التحقق من المصدر' : 'Resolving source')}
+              {step === 2 && (locale === 'ar' ? 'جاري التحقق...' : 'Checking source...')}
               {step === 3 && t.ruleComposerTitle}
-              {step === 4 && (locale === 'ar' ? 'تم تفعيل الرادار' : 'Radar active')}
+              {step === 4 && (locale === 'ar' ? 'تمت الإضافة' : 'Added')}
             </h2>
           </div>
           <button type="button" onClick={onClose} aria-label={t.close} className="w-9 h-9 flex items-center justify-center text-slate-400 hover:text-slate-100 rounded-xl hover:bg-slate-800 transition-colors flex-none">
@@ -589,9 +549,7 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onCl
                 : <div className="w-10 h-10 rounded-xl bg-slate-800 flex items-center justify-center flex-none"><Radar className="w-4 h-4 text-amber-300" /></div>}
               <div className="min-w-0">
                 <p className="text-sm font-bold truncate">{existingSource.displayName || existingSource.handle || existingSource.externalId}</p>
-                <p className="text-xs text-amber-300/80 mt-0.5">
-                  {locale === 'ar' ? 'هذا المصدر موجود أصلًا في قائمة المراقبة، لذلك لن نضيف نسخة ثانية.' : 'This source is already in your watchlist, so MR SCRAP will not add a duplicate.'}
-                </p>
+                <p className="text-xs text-amber-300/80 mt-0.5">{locale === 'ar' ? 'هذا المصدر موجود أصلًا.' : 'This source is already in your watchlist.'}</p>
               </div>
             </div>
           )}
@@ -606,7 +564,6 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onCl
           {step === 1 && (
             <div className="space-y-4">
               <p className="text-sm leading-6 text-slate-400">{t.addSourceSub}</p>
-
               <div className="space-y-2">
                 <div className="flex gap-2" dir="ltr">
                   <div className="relative flex-1 min-w-0">
@@ -638,40 +595,17 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onCl
                 {pasteHint && <p className="text-[11px] sm:text-xs leading-5 text-slate-500">{pasteHint}</p>}
               </div>
 
-              {requiresDeviceLogin && DeviceSessionConnector.isNativeAvailable() && (
-                <button type="button" onClick={handleConnectAndRetry} disabled={connecting} className="w-full p-3.5 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 text-sm font-semibold flex items-center justify-center gap-2 disabled:opacity-50">
-                  <Lock className="w-4 h-4" />
-                  {connecting ? (locale === 'ar' ? 'بانتظار تسجيل الدخول...' : 'Waiting for Facebook login...') : (locale === 'ar' ? 'تسجيل الدخول إلى Facebook على هذا الجهاز' : 'Sign in to Facebook on this device')}
-                </button>
-              )}
-
-              <div className="p-3.5 rounded-2xl bg-cyan-500/5 border border-cyan-500/15 text-xs leading-5 text-cyan-300/90 flex items-start gap-2.5">
-                <ShieldCheck className="w-4 h-4 flex-shrink-0 mt-0.5" />
-                <span>{DeviceSessionConnector.isNativeAvailable()
-                  ? (locale === 'ar'
-                    ? 'المحتوى الذي يحتاج تسجيل دخول يُفتح بجلسة Facebook المحلية على جهازك. كلمة المرور وملفات الارتباط لا تُرسل إلى خادم MR SCRAP.'
-                    : 'Login-required content uses the local Facebook session on this device. Passwords and raw cookies are not sent to the MR SCRAP backend.')
-                  : (locale === 'ar'
-                    ? 'يمكنك إدارة المصادر من الويب. المصادر التي تحتاج جلسة Facebook موثقة تتطلب جهاز Android متصلًا.'
-                    : 'You can manage sources on the web. Sources requiring an authenticated Facebook session need a connected Android device.')}</span>
-              </div>
-
               <button id="btn-confirm-resolve" type="button" onClick={() => void handleResolve(url)} disabled={!url.trim()} className="w-full px-5 py-3 rounded-2xl bg-cyan-500 hover:bg-cyan-400 disabled:opacity-45 text-slate-950 text-sm font-bold flex items-center justify-center gap-2 transition-colors">
-                <span>{locale === 'ar' ? 'فحص المصدر' : 'Resolve source'}</span>
+                <span>{locale === 'ar' ? 'متابعة' : 'Continue'}</span>
                 {locale === 'ar' ? <ArrowLeft className="w-4 h-4" /> : <ArrowRight className="w-4 h-4" />}
               </button>
             </div>
           )}
 
           {step === 2 && (
-            <div className="py-10 text-center space-y-4">
+            <div className="py-12 text-center space-y-4">
               <div className="w-12 h-12 mx-auto rounded-full border-2 border-cyan-500/20 border-t-cyan-400 animate-spin" aria-hidden="true" />
-              <div className="space-y-1.5">
-                <p className="text-sm font-semibold text-slate-200">{locale === 'ar' ? 'نجلب اسم المصدر وصورته' : 'Reading source name and profile image'}</p>
-                <p className="text-xs leading-5 text-slate-500">{locale === 'ar'
-                  ? 'إذا تأخرت المنصة، سنفتح الخطوة التالية خلال لحظة ثم نحدّث الاسم والصورة تلقائيًا عند وصولهما.'
-                  : 'If the platform is slow, the next step opens quickly and the real name/image are enriched when available.'}</p>
-              </div>
+              <p className="text-sm font-semibold text-slate-300">{locale === 'ar' ? 'جاري التحقق...' : 'Checking source...'}</p>
             </div>
           )}
 
@@ -690,18 +624,12 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onCl
                     <p dir="ltr" className="mt-1 text-xs text-left text-slate-400 truncate">{resolvedSource.handle ? `@${resolvedSource.handle.replace(/^@/, '')}` : resolvedSource.url}</p>
                   </div>
                 </div>
-                <div className="mt-3 pt-3 border-t border-slate-800 flex items-center justify-between gap-3">
-                  <span className={`text-[11px] px-2.5 py-1 rounded-full ${resolvedSource.connectorType === 'device_session' ? 'bg-cyan-500/10 text-cyan-300' : 'bg-emerald-500/10 text-emerald-300'}`}>{sourceBadge}</span>
-                  <span className="text-[11px] text-slate-500">{resolvedSource.avatarUrl || !isGenericDisplayName(resolvedSource.displayName, resolvedSource.handle)
-                    ? (locale === 'ar' ? 'تم جلب بيانات المصدر' : 'Source metadata loaded')
-                    : (locale === 'ar' ? 'الرابط جاهز — نحدّث بيانات الحساب بالخلفية' : 'Link ready — enriching account metadata')}</span>
-                </div>
               </div>
 
-              {requiresDeviceLogin && DeviceSessionConnector.isNativeAvailable() && (
+              {needsFacebookConnection && (
                 <button type="button" onClick={handleConnectAndRetry} disabled={connecting} className="w-full p-3 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 text-sm font-semibold flex items-center justify-center gap-2 disabled:opacity-50">
-                  <Lock className="w-4 h-4" />
-                  {connecting ? (locale === 'ar' ? 'بانتظار تسجيل الدخول...' : 'Waiting for Facebook login...') : (locale === 'ar' ? 'اتصل بـ Facebook ثم أكمل' : 'Connect Facebook to monitor this source')}
+                  <LogIn className="w-4 h-4" />
+                  {connecting ? (locale === 'ar' ? 'جاري الربط...' : 'Connecting...') : (locale === 'ar' ? 'ربط Facebook' : 'Connect Facebook')}
                 </button>
               )}
 
@@ -736,13 +664,6 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onCl
                 </div>
               )}
 
-              <div className="p-3.5 rounded-2xl bg-slate-950/70 border border-slate-800 flex items-start gap-2.5">
-                <ShieldCheck className="w-4 h-4 text-cyan-400 mt-0.5 flex-none" />
-                <p className="text-xs leading-5 text-slate-500">{locale === 'ar'
-                  ? 'لن نعرض بيانات تجريبية على أنها منشور حقيقي. بعد بدء المراقبة، تظهر التنبيهات فقط عند وجود محتوى فعلي يطابق قاعدتك.'
-                  : 'Sample data is never presented as a real post. After monitoring starts, alerts appear only for real content that matches your rule.'}</p>
-              </div>
-
               <div className="flex gap-3 pt-1">
                 <button type="button" onClick={() => { resolveGeneration.current += 1; setStep(1); setResolveError(null); }} className="px-4 py-3 rounded-2xl bg-slate-800 text-slate-300 text-sm font-semibold">{t.back}</button>
                 <button id="btn-start-watching-submit" type="button" onClick={handleFinish} disabled={isSubmitting || !ruleText.trim()} className="flex-1 px-5 py-3 rounded-2xl bg-cyan-500 text-slate-950 text-sm font-bold flex items-center justify-center gap-2 disabled:opacity-50">
@@ -756,8 +677,8 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onCl
             <div className="py-12 text-center space-y-4">
               <div className="w-16 h-16 rounded-full bg-emerald-500/15 text-emerald-400 mx-auto flex items-center justify-center"><CheckCircle2 className="w-9 h-9" /></div>
               <div>
-                <h3 className="text-base font-bold text-slate-100">{locale === 'ar' ? 'تم تفعيل المراقبة' : 'Monitoring is active'}</h3>
-                <p className="text-xs leading-5 text-slate-400 mt-1">{locale === 'ar' ? 'تم حفظ المصدر والقاعدة بنجاح.' : 'The source and rule were saved successfully.'}</p>
+                <h3 className="text-base font-bold text-slate-100">{locale === 'ar' ? 'تمت الإضافة' : 'Added successfully'}</h3>
+                <p className="text-xs leading-5 text-slate-400 mt-1">{locale === 'ar' ? 'بدأت المراقبة.' : 'Monitoring has started.'}</p>
               </div>
             </div>
           )}
