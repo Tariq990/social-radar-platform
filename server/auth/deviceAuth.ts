@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import type { Request, Response, NextFunction } from 'express';
 import pg from 'pg';
+import { postgresSsl } from '../db/pgSsl';
 
 const { Pool } = pg;
 
@@ -44,7 +45,7 @@ function getPool(): pg.Pool {
   if (!dbUrl) throw new Error('Device authentication requires DATABASE_URL in production.');
   authPool = new Pool({
     connectionString: dbUrl,
-    ssl: dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1') ? false : { rejectUnauthorized: false }
+    ssl: postgresSsl(dbUrl)
   });
   return authPool;
 }
@@ -99,7 +100,11 @@ export async function authenticateDeviceToken(rawToken: unknown): Promise<Device
   const row = result.rows[0];
   if (!row) return null;
 
-  await pool.query('UPDATE devices SET last_active = NOW() WHERE id = $1', [row.id]);
+  await pool.query(
+    `UPDATE devices SET last_active = NOW()
+      WHERE id = $1 AND last_active < NOW() - INTERVAL '5 minutes'`,
+    [row.id]
+  );
   return {
     userId: row.user_id,
     deviceId: row.id,
