@@ -182,6 +182,8 @@ public class InstagramSessionActivity extends Activity {
     protected void onDestroy() {
         if (webView != null) {
             webView.stopLoading();
+            android.view.ViewParent parent = webView.getParent();
+            if (parent instanceof ViewGroup) ((ViewGroup) parent).removeView(webView);
             webView.removeAllViews();
             webView.destroy();
             webView = null;

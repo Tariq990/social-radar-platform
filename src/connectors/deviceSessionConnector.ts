@@ -50,7 +50,7 @@ interface AuthenticatedSocialSessionPlugin {
   clearBackendAuth(): Promise<{ cleared: boolean }>;
   resolveSource(options: { url: string }): Promise<NativeResolvedSource>;
   collectSource(options: { sourceId: string; url: string; platform: string; limit?: number }): Promise<{ posts: NativeCollectedPost[]; checkedAt: string; requestedLimit?: number }>;
-  scheduleSource(options: { sourceId: string; url: string; platform: string; backendBaseUrl: string }): Promise<{ scheduled: boolean; minimumIntervalMinutes: number }>;
+  scheduleSource(options: { sourceId: string; url: string; platform: string; backendBaseUrl: string; locale: 'ar' | 'en' }): Promise<{ scheduled: boolean; minimumIntervalMinutes: number }>;
   cancelSource(options: { sourceId: string }): Promise<{ cancelled: boolean }>;
 }
 
@@ -140,11 +140,15 @@ export class DeviceSessionConnector implements SourceConnector {
     await NativeSession.disconnect();
   }
 
-  static async scheduleBackgroundSource(source: { id: string; url: string; platform: SourcePlatform }, backendBaseUrl: string): Promise<void> {
+  static async scheduleBackgroundSource(
+    source: { id: string; url: string; platform: SourcePlatform },
+    backendBaseUrl: string,
+    locale: 'ar' | 'en' = 'en'
+  ): Promise<void> {
     if (!isAndroidNative()) throw new Error('Background authenticated monitoring requires the Android app.');
     const auth = await ensureApiDeviceAuth();
     await NativeSession.saveBackendAuth({ userId: auth.userId, deviceId: auth.deviceId, token: auth.token, platform: auth.platform });
-    await NativeSession.scheduleSource({ sourceId: source.id, url: source.url, platform: source.platform, backendBaseUrl });
+    await NativeSession.scheduleSource({ sourceId: source.id, url: source.url, platform: source.platform, backendBaseUrl, locale });
   }
 
   static async cancelBackgroundSource(sourceId: string): Promise<void> {

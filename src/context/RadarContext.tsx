@@ -143,6 +143,19 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       deviceSessionAccount: connectedAccountLabel(status),
       deviceSessionLastChecked: status.lastCheckedAt || status.connectedAt || undefined
     }));
+    // Backend source health describes the last ingest. The Android CookieManager is authoritative
+    // for whether a device-owned session is usable right now, so reconcile cards after every
+    // local session refresh instead of showing a stale server-side "connected" state.
+    if (status.available) {
+      setSources(previous => previous.map(source => source.connectorType === 'device_session'
+        ? {
+            ...source,
+            connectorStatus: DeviceSessionConnector.isPlatformConnected(status, source.platform)
+              ? 'authenticated_monitoring'
+              : 'needs_relogin'
+          }
+        : source));
+    }
     return connected;
   };
 
@@ -171,8 +184,6 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const hydratedSources = dbSources.map(source => ({
         ...source,
         activeRulesCount: dbRules.filter(rule => rule.enabled && (rule.sourceIds.length === 0 || rule.sourceIds.includes(source.id))).length,
-        // Backend now returns the exact persisted post count. Keep alert-derived count only as a
-        // defensive lower bound for older backends during rolling deployments.
         recentPostsCount: Math.max(Number(source.recentPostsCount || 0), uniqueMatchedPosts.get(source.id)?.size || 0)
       }));
       setSources(hydratedSources);
@@ -200,8 +211,13 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   useEffect(() => {
     localStorage.removeItem(STORAGE_KEYS.DEMO_MODE);
-    void loadDatabaseState();
-    void refreshDeviceSession().catch(() => {});
+    // Load persisted rows first, then reconcile every device-session source against the local
+    // CookieManager state. This avoids a race where a late database response overwrote the local
+    // needs-relogin/authenticated status.
+    void (async () => {
+      await loadDatabaseState();
+      await refreshDeviceSession().catch(() => false);
+    })();
   }, []);
 
   useEffect(() => {
@@ -266,13 +282,13 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         void (async () => {
           try {
             const backendBaseUrl = getApiBaseUrl();
-            if (backendBaseUrl) await DeviceSessionConnector.scheduleBackgroundSource(persistedSource, backendBaseUrl);
+            if (backendBaseUrl) await DeviceSessionConnector.scheduleBackgroundSource(persistedSource, backendBaseUrl, locale);
             const status = await DeviceSessionConnector.getLocalSession();
             applyDeviceStatus(status);
             if (!DeviceSessionConnector.isPlatformConnected(status, persistedSource.platform)) return;
             const posts = await deviceConnector.fetchLatest(persistedSource, 10);
-            // Empty is still a successful authenticated scan. Ingest it so the backend marks the
-            // source connected instead of leaving a valid new source stuck at needs_relogin.
+            // Empty is still a successful authenticated scan. Ingest it so the server persists
+            // healthy connector state instead of leaving a valid source at needs_relogin.
             const ingest = await apiIngestDevicePosts(persistedSource.id, posts, locale);
             if (ingest.matchesCreated.length > 0) setMatches(previous => [...ingest.matchesCreated, ...previous]);
             setSources(previous => previous.map(source => source.id === persistedSource.id
@@ -305,7 +321,7 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         if (nextPaused) await DeviceSessionConnector.cancelBackgroundSource(sourceId);
         else {
           const backendBaseUrl = getApiBaseUrl();
-          if (backendBaseUrl) await DeviceSessionConnector.scheduleBackgroundSource(source, backendBaseUrl);
+          if (backendBaseUrl) await DeviceSessionConnector.scheduleBackgroundSource(source, backendBaseUrl, locale);
         }
       }
     } catch (error) {
@@ -453,12 +469,17 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const connected = await DeviceSessionConnector.connectFacebook();
     await refreshDeviceSession().catch(() => false);
     if (!connected) throw new Error('Facebook login is not complete yet.');
+    const backendBaseUrl = getApiBaseUrl();
+    if (backendBaseUrl) {
+      await Promise.allSettled(sources.filter(source => source.connectorType === 'device_session' && source.platform === 'facebook' && !source.isPaused)
+        .map(source => DeviceSessionConnector.scheduleBackgroundSource(source, backendBaseUrl, locale)));
+    }
   };
   const disconnectFacebookSession = async () => {
+    await Promise.allSettled(sources.filter(source => source.connectorType === 'device_session' && source.platform === 'facebook')
+      .map(source => DeviceSessionConnector.cancelBackgroundSource(source.id)));
     await DeviceSessionConnector.disconnectFacebook();
     await refreshDeviceSession();
-    setSources(previous => previous.map(source => source.connectorType === 'device_session' && source.platform === 'facebook'
-      ? { ...source, connectorStatus: 'needs_relogin' } : source));
   };
 
   return (

@@ -25,6 +25,7 @@ public class AuthenticatedSourceWorker extends Worker {
     public static final String KEY_SOURCE_URL = "sourceUrl";
     public static final String KEY_PLATFORM = "platform";
     public static final String KEY_BACKEND_BASE_URL = "backendBaseUrl";
+    public static final String KEY_LOCALE = "locale";
 
     public AuthenticatedSourceWorker(@NonNull Context context, @NonNull WorkerParameters params) {
         super(context, params);
@@ -37,6 +38,7 @@ public class AuthenticatedSourceWorker extends Worker {
         String sourceUrl = getInputData().getString(KEY_SOURCE_URL);
         String platform = getInputData().getString(KEY_PLATFORM);
         String backendBaseUrl = getInputData().getString(KEY_BACKEND_BASE_URL);
+        String locale = "ar".equalsIgnoreCase(getInputData().getString(KEY_LOCALE)) ? "ar" : "en";
         String authToken = DeviceCredentialStore.token(getApplicationContext());
 
         if (sourceId == null || sourceUrl == null || backendBaseUrl == null) {
@@ -76,6 +78,7 @@ public class AuthenticatedSourceWorker extends Worker {
             JSONObject payload = new JSONObject();
             payload.put("sourceId", sourceId);
             payload.put("posts", posts);
+            payload.put("locale", locale);
 
             int status = postNormalizedData(backendBaseUrl, authToken, payload);
             if (status >= 200 && status < 300) {

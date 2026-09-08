@@ -60,3 +60,45 @@ test('a successful empty initial device scan still updates source health', () =>
   assert.doesNotMatch(radar, /if \(posts\.length === 0\) return;/);
   assert.match(radar, /apiIngestDevicePosts\(persistedSource\.id, posts, locale\)/);
 });
+
+test('device session status is reconciled after persisted source hydration', () => {
+  const radar = read('src/context/RadarContext.tsx');
+  assert.match(radar, /await loadDatabaseState\(\);\s*await refreshDeviceSession\(\)/s);
+  assert.match(radar, /DeviceSessionConnector\.isPlatformConnected\(status, source\.platform\)/);
+  assert.match(radar, /connectorStatus:[\s\S]*'authenticated_monitoring'[\s\S]*'needs_relogin'/);
+});
+
+test('PostgreSQL match conflicts return the persisted winner instead of the losing candidate', () => {
+  const database = read('server/db/database.ts');
+  assert.match(database, /ON CONFLICT \(rule_id, post_id\) DO NOTHING RETURNING \*/);
+  assert.match(database, /SELECT \* FROM matches WHERE rule_id = \$1 AND post_id = \$2 LIMIT 1/);
+  assert.match(database, /Match conflict occurred but the persisted match could not be loaded/);
+});
+
+test('background device ingestion preserves app locale end to end', () => {
+  const connector = read('src/connectors/deviceSessionConnector.ts');
+  const plugin = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSocialSessionPlugin.java');
+  const worker = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSourceWorker.java');
+  const radar = read('src/context/RadarContext.tsx');
+  assert.match(connector, /locale: 'ar' \| 'en'/);
+  assert.match(plugin, /KEY_LOCALE/);
+  assert.match(worker, /public static final String KEY_LOCALE = "locale"/);
+  assert.match(worker, /payload\.put\("locale", locale\)/);
+  assert.match(radar, /scheduleBackgroundSource\(persistedSource, backendBaseUrl, locale\)/);
+});
+
+test('intentional platform disconnect cancels scheduled source work and reconnect reschedules it', () => {
+  const settings = read('src/screens/SettingsScreen.tsx');
+  assert.match(settings, /cancelPlatformSources\(platform\)/);
+  assert.match(settings, /schedulePlatformSources\(platform\)/);
+  assert.match(settings, /Promise\.allSettled/);
+});
+
+test('Meta login WebViews detach from their parent before destroy', () => {
+  for (const file of ['FacebookSessionActivity.java', 'InstagramSessionActivity.java']) {
+    const activity = read(`android/app/src/main/java/com/mrscrap/socialradar/${file}`);
+    const removeIndex = activity.indexOf('removeView(webView)');
+    const destroyIndex = activity.indexOf('webView.destroy()');
+    assert.ok(removeIndex >= 0 && destroyIndex > removeIndex, `${file} must detach before destroy`);
+  }
+});
