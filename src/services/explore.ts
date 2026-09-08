@@ -60,16 +60,37 @@ function normalizePost(raw: any): NormalizedPost {
   };
 }
 
+/**
+ * One Smart Grab can contain 100 posts and Express intentionally keeps a 1 MB JSON limit.
+ * Preserve both ends of long posts (offers/CTAs are often near the end) while keeping even
+ * Arabic-heavy UTF-8 payloads comfortably below that ceiling.
+ */
+function compactText(value: string): string {
+  const text = value || '';
+  if (text.length <= 1700) return text;
+  return `${text.slice(0, 1200)}\n[…]\n${text.slice(-450)}`;
+}
+
+function compactMedia(media: NormalizedPost['media']): NormalizedPost['media'] {
+  if (!Array.isArray(media)) return [];
+  for (const item of media) {
+    if (!item || (item.type !== 'image' && item.type !== 'video') || typeof item.url !== 'string') continue;
+    // Extremely long signed CDN URLs are not useful enough to risk overflowing the request.
+    if (!/^https?:\/\//i.test(item.url) || item.url.length > 1000) continue;
+    return [{ type: item.type, url: item.url }];
+  }
+  return [];
+}
+
 function payloadPost(post: NormalizedPost) {
   const metadata = post.metadata && typeof post.metadata === 'object' ? post.metadata : {};
   return {
     externalPostId: post.externalPostId,
     originalUrl: post.originalUrl,
     authorName: post.authorName,
-    authorAvatar: post.authorAvatar,
-    // Up to 100 posts can be sent in one batch. Keep the request below Express' 1 MB limit.
-    text: (post.text || '').slice(0, 4000),
-    media: (post.media || []).slice(0, 4),
+    // Backend already knows the source avatar, so do not repeat the same long CDN URL 100 times.
+    text: compactText(post.text || ''),
+    media: compactMedia(post.media || []),
     publishedAt: post.publishedAt,
     metadata: {
       collector: typeof metadata.collector === 'string' ? metadata.collector : undefined,
