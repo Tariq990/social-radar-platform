@@ -71,17 +71,18 @@ export class NotificationService {
       }
     };
 
-    // Always create a durable notification record. Until a real delivery adapter is wired,
-    // it stays pending and remains available to the in-app Alerts UI.
+    // The match is immediately available through the in-app Alerts channel, so this specific
+    // in_app delivery is accurately marked sent. This says nothing about FCM/Web Push: those
+    // adapters remain unconfigured and cannot report success until real delivery exists.
     return await db.createNotification({
       id: `notif_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       user_id: match.user_id,
       match_id: match.id,
       channel: 'in_app',
-      status: 'pending',
+      status: 'sent',
       payload,
-      sent_at: undefined,
-      error: 'External push delivery is not configured yet; alert is available in-app.'
+      sent_at: new Date().toISOString(),
+      error: undefined
     });
   }
 
