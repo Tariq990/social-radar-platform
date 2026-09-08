@@ -1,0 +1,100 @@
+name: Finalize Validated Meta Surface Fix
+
+on:
+  push:
+    branches:
+      - tmp/meta-surface-fix-20260908
+    paths:
+      - .github/workflows/meta-surface-finalize.yml
+
+permissions:
+  contents: write
+
+jobs:
+  compile-and-commit:
+    runs-on: self-hosted
+    timeout-minutes: 15
+    steps:
+      - name: Checkout temporary branch
+        uses: actions/checkout@v4
+        with:
+          ref: tmp/meta-surface-fix-20260908
+          fetch-depth: 0
+
+      - name: Reapply the exact live-validated transform
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          workflow = Path('.github/workflows/meta-surface-apply.yml').read_text().splitlines()
+          start = next(i for i, line in enumerate(workflow) if "python3 <<'PY'" in line) + 1
+          end = next(i for i in range(start, len(workflow)) if workflow[i].strip() == 'PY')
+          block = workflow[start:end]
+          nonblank = [line for line in block if line.strip()]
+          indent = min(len(line) - len(line.lstrip()) for line in nonblank)
+          code = '\n'.join(line[indent:] if len(line) >= indent else '' for line in block)
+          exec(compile(code, 'meta-surface-transform', 'exec'), {})
+          PY
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Prepare Capacitor Android project
+        run: |
+          npm install --no-audit --no-fund
+          npx cap sync android
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Configure existing Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk=""
+          for candidate in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" "$HOME/Android/Sdk" "$HOME/Android/sdk" "$HOME/.android/sdk" "/opt/android-sdk" "/usr/local/lib/android/sdk"; do
+            if [[ -n "$candidate" && -d "$candidate" ]]; then
+              sdk="$(realpath "$candidate")"
+              break
+            fi
+          done
+          if [[ -z "$sdk" ]]; then
+            platform_tools="$(find "$HOME" /opt /usr/local -maxdepth 6 -type d -name platform-tools -print -quit 2>/dev/null || true)"
+            if [[ -n "$platform_tools" ]]; then
+              sdk="$(realpath "$(dirname "$platform_tools")")"
+            fi
+          fi
+          if [[ -z "$sdk" || ! -d "$sdk" ]]; then
+            echo "Android SDK not found on self-hosted runner"
+            exit 1
+          fi
+          echo "Resolved Android SDK: $sdk"
+          echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$sdk" >> "$GITHUB_ENV"
+          printf 'sdk.dir=%s\n' "$sdk" > android/local.properties
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Compile Android collector
+        run: gradle -p android :app:assembleDebug --stacktrace
+
+      - name: Commit only the validated production changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          git rm .github/workflows/meta-surface-apply.yml .github/workflows/meta-surface-finalize.yml
+          git add android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedWebCollector.java server/tests/architectureRegression.test.ts
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix: prefer validated Facebook desktop surface"
+          git push origin HEAD:tmp/meta-surface-fix-20260908
