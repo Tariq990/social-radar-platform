@@ -6,38 +6,42 @@ MR SCRAP monitors selected Facebook/Instagram sources and alerts the user only w
 
 ## Current status
 
-This repository is in **alpha / production-architecture implementation**. The current integration branch is:
+This repository is in **alpha / production-architecture implementation**. The active integration branch is:
 
 `work/real-session-ai-provider`
 
-The branch is intentionally kept behind Draft PR #1 until the physical Android acceptance flow and remaining production blockers are closed.
+Draft PR #1 remains intentionally unmerged until the physical Android acceptance flow and final launch gates are closed.
 
 ### What is real now
 
 - React/Vite application UI.
-- Capacitor Android project builds successfully in CI.
-- Android Share Target receives shared text/URLs.
+- MR SCRAP application signup/login with email/password.
+- Passwords hashed with scrypt and random salt.
+- Opaque application sessions with hash-only server persistence and HttpOnly cookies.
+- Tenant-isolated sources, rules, alerts, scans and device registration.
+- Cross-tenant integration tests proving user B cannot access or mutate user A resources.
+- Capacitor Android project and Android Share Target.
 - Dedicated Facebook WebView login surface.
 - Facebook WebView cookies remain local to Android's `CookieManager`.
 - Android authenticated collector extracts normalized post metadata.
 - WorkManager schedules best-effort background checks.
-- Backend device ingestion requires a bearer credential; only its SHA-256 digest is stored server-side.
-- Android stores its backend bearer credential with an AndroidKeyStore-backed AES-GCM store instead of WorkManager job data/localStorage.
-- PostgreSQL persistence for sources, rules, posts, matches, notifications, connector events and devices.
-- Deterministic, race-safe post/match deduplication.
+- Backend device ingestion uses a user-bound bearer credential; only its SHA-256 digest is stored server-side.
+- Android stores the backend device bearer using AndroidKeyStore-backed AES-GCM.
+- PostgreSQL persistence for users, app sessions, devices, sources, rules, posts, matches, notifications and connector events.
+- Deterministic, race-safe source-scoped post/match deduplication.
 - Provider-neutral AI architecture controlled by the application operator.
 - Production mode does not silently fall back to fake posts/matches/local JSON persistence.
-- CI typechecks, tests, bundles web/server, syncs Capacitor and compiles Android APK.
+- CI typechecks, runs unit/integration tests, bundles web/server, syncs Capacitor and compiles an Android APK.
 
 ### Not production-ready yet
 
-- Full end-user authentication and tenant isolation are not implemented; CRUD still uses `user_default`.
-- Device registration is not yet bound to an authenticated user account.
-- Real FCM/Web Push delivery is not finished.
 - Facebook WebView login + collector still requires acceptance testing on physical Android hardware.
+- Real FCM/Web Push delivery is not finished; alerts are currently in-app only.
 - Instagram authenticated-session behavior is not independently validated.
 - Meta DOM changes can break local extraction and require maintenance.
+- Email verification/password reset are not implemented yet.
 - Play Store release signing, store metadata/privacy declarations and production release configuration remain outstanding.
+- Production distributed rate limiting/observability is still follow-up work before horizontal scale.
 
 See [`PRODUCTION_STATUS.md`](./PRODUCTION_STATUS.md) for the launch gate and [`docs/SECURITY.md`](./docs/SECURITY.md) for trust boundaries.
 
@@ -46,6 +50,15 @@ See [`PRODUCTION_STATUS.md`](./PRODUCTION_STATUS.md) for the launch gate and [`d
 ## Architecture
 
 ```text
+MR SCRAP account
+        │
+        │ authenticated application session
+        ▼
+Tenant-scoped backend APIs
+        │
+        ├─ user-bound Android device credential
+        │
+        ▼
 Facebook / Instagram
         │
         │ user-authenticated WebView session (Android only)
@@ -69,7 +82,7 @@ Match
         └─ future FCM/Web Push delivery
 ```
 
-Raw Facebook passwords and raw Facebook cookies are not part of the backend ingestion contract.
+The MR SCRAP application session, MR SCRAP backend device bearer and Facebook WebView session are three separate credential boundaries. Raw Facebook passwords and raw Facebook cookies are not part of the backend ingestion contract.
 
 Detailed design: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
 
@@ -114,11 +127,13 @@ CORS_ALLOWED_ORIGINS=
 ADMIN_API_TOKEN=<long-random-operator-secret>
 ```
 
-For Android builds, also compile in the public backend origin:
+For Android builds, compile in the public backend origin:
 
 ```env
 VITE_API_BASE_URL=https://api.example.com
 ```
+
+The production Capacitor topology uses an HttpOnly Secure application-session cookie between the bundled `https://localhost` origin and the explicitly allowed hosted HTTPS API origin.
 
 See [`.env.example`](./.env.example).
 
@@ -180,7 +195,7 @@ Physical-device test checklist: [`docs/ANDROID_ACCEPTANCE_TEST.md`](./docs/ANDRO
 
 ### CI artifact
 
-Every PR verification run compiles a debug APK and uploads it as a short-lived GitHub Actions artifact.
+Every PR verification run compiles a debug APK and uploads it as a short-lived GitHub Actions artifact when the workflow is green.
 
 ### Android Alpha Release
 
@@ -198,7 +213,7 @@ The release contains:
 - `MR-SCRAP-android-alpha.apk.sha256`
 - `COMMIT_SHA.txt`
 
-For automatic branch publishing, configure the GitHub repository variable:
+For automatic branch publishing, configure:
 
 `ALPHA_API_BASE_URL=https://your-real-backend.example`
 
@@ -212,12 +227,16 @@ Release process: [`docs/RELEASES.md`](./docs/RELEASES.md).
 
 Authenticated Android sources use WorkManager. Android controls scheduling; this is best-effort periodic monitoring, not guaranteed exact real-time delivery. The minimum current periodic interval is 15 minutes.
 
-A future foreground-service mode can reduce latency but would require a persistent notification and higher battery usage.
+A future foreground-service mode could reduce latency but would require a persistent notification and higher battery usage.
 
 ---
 
 ## Security summary
 
+- MR SCRAP application passwords are scrypt-hashed; plaintext passwords are not persisted.
+- Application sessions use opaque random tokens with hash-only server persistence and HttpOnly cookies.
+- Private CRUD is tenant-scoped and cross-tenant negative tests are part of CI.
+- Android backend device credentials are bound to the authenticated MR SCRAP user.
 - Facebook credentials are entered only into Facebook's real WebView page.
 - Raw Facebook cookies do not leave the Android device.
 - Backend device tokens are hashed server-side.
@@ -228,7 +247,7 @@ A future foreground-service mode can reduce latency but would require a persiste
 - Internal AI health/probe routes are protected with `ADMIN_API_TOKEN` in production.
 - The app does not claim to bypass CAPTCHA, access controls or platform restrictions.
 
-Important: full user authentication/tenant isolation is still a P0 blocker before external production use.
+The remaining P0 gate is physical Android acceptance of the application-session, Facebook WebView and live collector flows.
 
 ---
 
