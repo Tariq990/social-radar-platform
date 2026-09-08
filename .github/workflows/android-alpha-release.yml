@@ -190,7 +190,7 @@ jobs:
           curl --fail-with-body --retry 18 --retry-delay 10 --retry-all-errors \
             --connect-timeout 10 --max-time 120 \
             -X PUT \
-            -H "Authorization: Bearer ${OIDIDC_TOKEN:-$OIDC_TOKEN}" \
+            -H "Authorization: Bearer ${OIDC_TOKEN}" \
             -H "Content-Type: application/vnd.android.package-archive" \
             -H "X-MR-SCRAP-Version-Code: ${ANDROID_VERSION_CODE}" \
             -H "X-MR-SCRAP-Version-Name: ${ANDROID_VERSION_NAME}" \
@@ -211,10 +211,17 @@ jobs:
 
       - name: Create or update Android Alpha prerelease
         env:
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
+
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          UPLOADS="https://uploads.github.com/repos/${GITHUB_REPOSITORY}"
+          AUTH_HEADER="Authorization: Bearer ${GITHUB_TOKEN}"
+          ACCEPT_HEADER="Accept: application/vnd.github+json"
+          VERSION_HEADER="X-GitHub-Api-Version: 2022-11-28"
+
           NOTES=$(cat <<EOF
           ## MR SCRAP Android Alpha
 
@@ -227,15 +234,103 @@ jobs:
           - Facebook and Instagram authenticated monitoring remain subject to physical-device acceptance testing and Meta DOM/login behavior.
           EOF
           )
-          if gh release view android-alpha >/dev/null 2>&1; then
-            gh release edit android-alpha --title "MR SCRAP Android Alpha" --prerelease --notes "$NOTES"
+          export NOTES
+
+          release_response="$(mktemp)"
+          status="$(curl -sS -o "$release_response" -w '%{http_code}' \
+            -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$VERSION_HEADER" \
+            "$API/releases/tags/android-alpha")"
+
+          if [[ "$status" == "200" ]]; then
+            release_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$release_response")"
+            payload="$(python3 -c 'import json,os; print(json.dumps({"name":"MR SCRAP Android Alpha","body":os.environ["NOTES"],"prerelease":True,"draft":False}))')"
+            curl --fail-with-body -sS \
+              -X PATCH \
+              -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$VERSION_HEADER" \
+              -H 'Content-Type: application/json' \
+              -d "$payload" \
+              "$API/releases/$release_id" >/dev/null
+          elif [[ "$status" == "404" ]]; then
+            payload="$(python3 -c 'import json,os; print(json.dumps({"tag_name":"android-alpha","target_commitish":os.environ["GITHUB_SHA"],"name":"MR SCRAP Android Alpha","body":os.environ["NOTES"],"prerelease":True,"draft":False}))')"
+            release_id="$(curl --fail-with-body -sS \
+              -X POST \
+              -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$VERSION_HEADER" \
+              -H 'Content-Type: application/json' \
+              -d "$payload" \
+              "$API/releases" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
           else
-            gh release create android-alpha --target "$GITHUB_SHA" --title "MR SCRAP Android Alpha" --prerelease --notes "$NOTES"
+            cat "$release_response"
+            echo "Unexpected GitHub release lookup status: $status"
+            exit 1
           fi
-          gh release upload android-alpha \
-            release/MR-SCRAP-android-alpha.apk \
-            release/MR-SCRAP-android-alpha.apk.sha256 \
-            release/COMMIT_SHA.txt \
-            release/VERSION_CODE.txt \
-            release/VERSION_NAME.txt \
-            --clobber
+          rm -f "$release_response"
+
+          assets_json="$(mktemp)"
+          curl --fail-with-body -sS \
+            -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$VERSION_HEADER" \
+            "$API/releases/$release_id/assets?per_page=100" > "$assets_json"
+
+          for name in \
+            MR-SCRAP-android-alpha.apk \
+            MR-SCRAP-android-alpha.apk.sha256 \
+            COMMIT_SHA.txt \
+            VERSION_CODE.txt \
+            VERSION_NAME.txt
+          do
+            asset_id="$(python3 -c 'import json,sys; name=sys.argv[2]; print(next((str(a["id"]) for a in json.load(open(sys.argv[1])) if a["name"] == name), ""))' "$assets_json" "$name")"
+            if [[ -n "$asset_id" ]]; then
+              curl --fail-with-body -sS \
+                -X DELETE \
+                -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$VERSION_HEADER" \
+                "$API/releases/assets/$asset_id" >/dev/null
+            fi
+          done
+          rm -f "$assets_json"
+
+          upload_asset() {
+            local path="$1"
+            local content_type="$2"
+            local name
+            name="$(basename "$path")"
+            curl --fail-with-body -sS \
+              -X POST \
+              -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$VERSION_HEADER" \
+              -H "Content-Type: $content_type" \
+              --data-binary "@$path" \
+              "$UPLOADS/releases/$release_id/assets?name=$name" >/dev/null
+          }
+
+          upload_asset release/MR-SCRAP-android-alpha.apk application/vnd.android.package-archive
+          upload_asset release/MR-SCRAP-android-alpha.apk.sha256 text/plain
+          upload_asset release/COMMIT_SHA.txt text/plain
+          upload_asset release/VERSION_CODE.txt text/plain
+          upload_asset release/VERSION_NAME.txt text/plain
+
+          expected_apk_size="$(stat -c%s release/MR-SCRAP-android-alpha.apk)"
+          verify_json="$(mktemp)"
+          curl --fail-with-body -sS \
+            -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$VERSION_HEADER" \
+            "$API/releases/$release_id/assets?per_page=100" > "$verify_json"
+
+          python3 - "$verify_json" "$expected_apk_size" <<'PY'
+          import json
+          import sys
+
+          assets = json.load(open(sys.argv[1]))
+          expected_size = int(sys.argv[2])
+          by_name = {asset["name"]: asset for asset in assets}
+          required = {
+              "MR-SCRAP-android-alpha.apk",
+              "MR-SCRAP-android-alpha.apk.sha256",
+              "COMMIT_SHA.txt",
+              "VERSION_CODE.txt",
+              "VERSION_NAME.txt",
+          }
+          missing = sorted(required - set(by_name))
+          if missing:
+              raise SystemExit(f"Missing release assets: {missing}")
+          if int(by_name["MR-SCRAP-android-alpha.apk"]["size"]) != expected_size:
+              raise SystemExit("Published APK size does not match the built APK")
+          print(f"Verified GitHub prerelease assets; APK size={expected_size}")
+          PY
+          rm -f "$verify_json"
