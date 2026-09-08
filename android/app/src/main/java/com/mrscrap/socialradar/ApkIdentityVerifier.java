@@ -49,14 +49,14 @@ final class ApkIdentityVerifier {
     }
 
     private static Set<String> signerDigests(PackageInfo info) throws Exception {
+        Set<String> result = new HashSet<>();
         Signature[] signatures;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            if (info.signingInfo == null) return Set.of();
+            if (info.signingInfo == null) return result;
             signatures = info.signingInfo.getApkContentsSigners();
         } else {
             signatures = info.signatures;
         }
-        Set<String> result = new HashSet<>();
         if (signatures == null) return result;
         for (Signature signature : signatures) {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
