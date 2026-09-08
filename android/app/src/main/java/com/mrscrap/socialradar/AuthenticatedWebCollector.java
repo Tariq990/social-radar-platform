@@ -31,7 +31,7 @@ final class AuthenticatedWebCollector {
     private static final long TIMEOUT_MS = 30_000;
     private static final long FIRST_EXTRACTION_DELAY_MS = 450;
     private static final long RETRY_DELAY_MS = 750;
-    private static final int BASIC_FALLBACK_ATTEMPT = 6;
+    private static final int SURFACE_FALLBACK_ATTEMPT = 4;
     private static final int MAX_EXTRACTION_ATTEMPTS = 12;
     private static final int DEFAULT_LIMIT = 10;
     private static final int MAX_LIMIT = 20;
@@ -66,6 +66,7 @@ final class AuthenticatedWebCollector {
         }
 
         final int targetLimit = Math.max(1, Math.min(MAX_LIMIT, requestedLimit));
+        final String desktopUrl = preferDesktopFacebookUrl(url);
         final String mobileUrl = preferMobileFacebookUrl(url);
         final String basicFallbackUrl = preferBasicFacebookUrl(url);
         Handler main = new Handler(Looper.getMainLooper());
@@ -73,6 +74,7 @@ final class AuthenticatedWebCollector {
         main.post(() -> {
             AtomicBoolean finished = new AtomicBoolean(false);
             int[] attempts = new int[] { 0 };
+            boolean[] triedMobileFallback = new boolean[] { false };
             boolean[] triedBasicFallback = new boolean[] { false };
 
             WebView webView = new WebView(context.getApplicationContext());
@@ -136,16 +138,20 @@ final class AuthenticatedWebCollector {
                             return;
                         }
 
-                        if (
-                            reliableSource && postCount == 0 && attempts[0] >= BASIC_FALLBACK_ATTEMPT &&
-                            !triedBasicFallback[0] && basicFallbackUrl != null && !basicFallbackUrl.equals(mobileUrl)
-                        ) {
-                            // If Facebook's modern mobile SPA exposes no stable post anchors, try the
-                            // simpler first-party mbasic surface using the same local Facebook session.
-                            triedBasicFallback[0] = true;
-                            attempts[0] = 0;
-                            webView.loadUrl(basicFallbackUrl);
-                            return;
+                        if (postCount == 0 && attempts[0] >= SURFACE_FALLBACK_ATTEMPT) {
+                            if (!triedMobileFallback[0] && mobileUrl != null && !mobileUrl.equals(desktopUrl)) {
+                                triedMobileFallback[0] = true;
+                                attempts[0] = 0;
+                                webView.loadUrl(mobileUrl);
+                                return;
+                            }
+                            if (!triedBasicFallback[0] && basicFallbackUrl != null &&
+                                !basicFallbackUrl.equals(desktopUrl) && !basicFallbackUrl.equals(mobileUrl)) {
+                                triedBasicFallback[0] = true;
+                                attempts[0] = 0;
+                                webView.loadUrl(basicFallbackUrl);
+                                return;
+                            }
                         }
 
                         if (attempts[0] < MAX_EXTRACTION_ATTEMPTS) {
@@ -214,7 +220,7 @@ final class AuthenticatedWebCollector {
                 }
             });
 
-            webView.loadUrl(mobileUrl);
+            webView.loadUrl(desktopUrl);
         });
     }
 
@@ -259,6 +265,21 @@ final class AuthenticatedWebCollector {
             "|anchors=" + anchors +
             "|postLinks=" + postLinks +
             "|body=" + bodyTextLength;
+    }
+
+    private static String preferDesktopFacebookUrl(String rawUrl) {
+        try {
+            Uri uri = Uri.parse(rawUrl);
+            String host = uri.getHost();
+            if (host == null) return rawUrl;
+            String normalized = host.toLowerCase();
+            boolean facebook = normalized.equals("facebook.com") || normalized.endsWith(".facebook.com") ||
+                normalized.equals("fb.com") || normalized.endsWith(".fb.com");
+            if (!facebook || normalized.equals("fb.watch")) return rawUrl;
+            return uri.buildUpon().authority("www.facebook.com").build().toString();
+        } catch (Exception ignored) {
+            return rawUrl;
+        }
     }
 
     private static String preferMobileFacebookUrl(String rawUrl) {
