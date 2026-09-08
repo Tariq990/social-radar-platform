@@ -46,24 +46,29 @@ function safeError(error: any): string {
   return error?.message || 'Unexpected server error';
 }
 
-function validateSocialUrl(input: unknown): { ok: true; url: string } | { ok: false; error: string } {
-  if (typeof input !== 'string' || !input.trim()) return { ok: false, error: 'URL is required' };
+interface SocialUrlValidation {
+  ok: boolean;
+  url: string;
+  error: string;
+}
+
+function validateSocialUrl(input: unknown): SocialUrlValidation {
+  if (typeof input !== 'string' || !input.trim()) return { ok: false, url: '', error: 'URL is required' };
   try {
     const parsed = new URL(input.trim());
-    if (!['http:', 'https:'].includes(parsed.protocol)) return { ok: false, error: 'Only http/https URLs are allowed' };
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return { ok: false, url: '', error: 'Only http/https URLs are allowed' };
+    }
     const host = parsed.hostname.toLowerCase();
     const allowed = host === 'facebook.com' || host.endsWith('.facebook.com') || host === 'fb.com' || host.endsWith('.fb.com') || host === 'fb.watch' || host === 'instagram.com' || host.endsWith('.instagram.com') || host === 'instagr.am' || host.endsWith('.instagr.am');
-    if (!allowed) return { ok: false, error: 'Only Facebook and Instagram URLs are supported' };
+    if (!allowed) return { ok: false, url: '', error: 'Only Facebook and Instagram URLs are supported' };
     parsed.hash = '';
-    return { ok: true, url: parsed.toString() };
+    return { ok: true, url: parsed.toString(), error: '' };
   } catch {
-    return { ok: false, error: 'Invalid URL' };
+    return { ok: false, url: '', error: 'Invalid URL' };
   }
 }
 
-// -----------------------------------------------------------------------------
-// SYSTEM HEALTH / OPERATOR CONFIG
-// -----------------------------------------------------------------------------
 app.get('/api/health', (_req, res) => {
   const ai = getAIConfigurationStatus();
   res.json({
@@ -95,15 +100,11 @@ app.get('/api/config', (_req, res) => {
   });
 });
 
-// This endpoint never returns AI_API_KEY. It is intended for operator diagnostics only.
 app.get('/api/internal/ai/health', rateLimiter(5, 60_000), async (_req, res) => {
   const result = await testConfiguredAIProvider();
   res.status(result.reachable ? 200 : 503).json(result);
 });
 
-// -----------------------------------------------------------------------------
-// SOURCES CRUD
-// -----------------------------------------------------------------------------
 app.get('/api/sources', async (_req, res) => {
   try {
     res.json(await db.getSources('user_default'));
@@ -195,9 +196,6 @@ app.post('/api/sources/resolve', rateLimiter(20, 60_000), async (req, res) => {
   }
 });
 
-// -----------------------------------------------------------------------------
-// RULES CRUD
-// -----------------------------------------------------------------------------
 app.get('/api/rules', async (_req, res) => {
   try {
     res.json(await db.getRules('user_default'));
@@ -250,9 +248,6 @@ app.patch('/api/rules/:id/toggle', async (req, res) => {
   }
 });
 
-// -----------------------------------------------------------------------------
-// ALERTS / MATCHES
-// -----------------------------------------------------------------------------
 app.get('/api/alerts', async (_req, res) => {
   try {
     res.json(await db.getMatches('user_default'));
@@ -275,8 +270,6 @@ app.patch('/api/alerts/:id', async (req, res) => {
   }
 });
 
-// Server-side scan only processes explicitly configured server-side providers.
-// device_session sources are collected on Android and arrive through /api/device/ingest.
 app.post('/api/alerts/scan', rateLimiter(15, 60_000), async (req, res) => {
   try {
     const demo = Boolean(req.body?.demo || isDemoMode());
@@ -294,9 +287,6 @@ app.post('/api/alerts/scan', rateLimiter(15, 60_000), async (req, res) => {
   }
 });
 
-// -----------------------------------------------------------------------------
-// AUTHENTICATED ANDROID DEVICE INGESTION
-// -----------------------------------------------------------------------------
 app.post('/api/device/ingest', rateLimiter(30, 60_000), async (req, res) => {
   try {
     const { sourceId, posts, locale } = req.body || {};
@@ -318,9 +308,6 @@ app.post('/api/device/ingest', rateLimiter(30, 60_000), async (req, res) => {
   }
 });
 
-// -----------------------------------------------------------------------------
-// PROVIDER-NEUTRAL AI ENDPOINTS
-// -----------------------------------------------------------------------------
 app.post('/api/ai/evaluate-post', rateLimiter(30, 60_000), async (req, res) => {
   try {
     const { post, rule, locale } = req.body || {};
@@ -399,7 +386,6 @@ app.post('/api/ai/preview-match', rateLimiter(20, 60_000), async (req, res) => {
 async function startServer() {
   await db.init();
 
-  // Production must never silently run on the local JSON fallback.
   if (APP_MODE === 'production' && !db.isUsingPostgres()) {
     throw new Error('Production startup aborted: DATABASE_URL is missing/unreachable. Local JSON persistence is allowed only outside APP_MODE=production.');
   }
