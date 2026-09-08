@@ -102,3 +102,42 @@ test('Meta login WebViews detach from their parent before destroy', () => {
     assert.ok(removeIndex >= 0 && destroyIndex > removeIndex, `${file} must detach before destroy`);
   }
 });
+
+test('anonymous public bootstrap does not request authenticated radar CRUD', () => {
+  const radar = read('src/context/RadarContext.tsx');
+  const authGuard = radar.indexOf('if (!auth.authenticated || !auth.user)');
+  const privateFetch = radar.indexOf('apiFetchSources()', authGuard);
+  assert.ok(authGuard >= 0, 'authenticated bootstrap guard must exist');
+  assert.ok(privateFetch > authGuard, 'private source/rule/alert fetches must occur only after auth guard');
+  assert.match(radar, /extractSupportedSocialUrl/);
+});
+
+test('shared URL onboarding accepts only supported Facebook and Instagram URLs', () => {
+  const helper = read('src/lib/socialUrl.ts');
+  const app = read('src/App.tsx');
+  assert.match(helper, /FACEBOOK_HOSTS/);
+  assert.match(helper, /INSTAGRAM_HOSTS/);
+  assert.match(helper, /parsed\.protocol !== 'https:' && parsed\.protocol !== 'http:'/);
+  assert.match(app, /extractSupportedSocialUrl/);
+  assert.doesNotMatch(app, /sharedUrl\.startsWith\('http'\)/);
+});
+
+test('Android updater is backend-origin pinned and validates APK identity before installer', () => {
+  const update = read('src/services/appUpdate.ts');
+  const plugin = read('android/app/src/main/java/com/mrscrap/socialradar/AppUpdatePlugin.java');
+  const verifier = read('android/app/src/main/java/com/mrscrap/socialradar/ApkIdentityVerifier.java');
+  assert.match(update, /url\.origin !== backendOrigin\.origin/);
+  const verifyIndex = plugin.indexOf('ApkIdentityVerifier.verify');
+  const installerIndex = plugin.indexOf('FileProvider.getUriForFile');
+  assert.ok(verifyIndex >= 0 && installerIndex > verifyIndex, 'APK identity verification must happen before installer launch');
+  assert.match(verifier, /context\.getPackageName\(\)\.equals\(archive\.packageName\)/);
+  assert.match(verifier, /archiveCode != expectedVersionCode/);
+  assert.match(verifier, /archiveCode <= installedCode/);
+  assert.match(verifier, /!installedSigners\.equals\(archiveSigners\)/);
+});
+
+test('mandatory updater follows the stored app locale when available', () => {
+  const gate = read('src/components/ForceUpdateGate.tsx');
+  assert.match(gate, /const LOCALE_KEY = 'mrscrap_locale_v2'/);
+  assert.match(gate, /localStorage\.getItem\(LOCALE_KEY\)/);
+});
