@@ -1,6 +1,7 @@
 import pg from 'pg';
 import fs from 'fs';
 import path from 'path';
+import { postgresSsl } from './pgSsl';
 
 const { Pool } = pg;
 
@@ -142,7 +143,7 @@ export class DatabaseRepository {
       try {
         this.pool = new Pool({
           connectionString: dbUrl,
-          ssl: dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1') ? false : { rejectUnauthorized: false }
+          ssl: postgresSsl(dbUrl)
         });
         const client = await this.pool.connect();
         try {
@@ -235,14 +236,16 @@ export class DatabaseRepository {
     const now = new Date().toISOString();
     const fullSource: DbSource = { ...source, created_at: now, updated_at: now };
     if (this.isPostgres && this.pool) {
+      // Identity collisions are not updates. Silently updating an existing source here used to
+      // replace its canonical page URL with a shared-post URL and then let the UI create a second
+      // rule. Keep the existing row untouched and surface a deterministic duplicate error instead.
       const query = `
         INSERT INTO sources (
           id, user_id, platform, external_id, url, name, handle, avatar_url, bio,
           visibility_type, connector_type, connector_status, is_paused,
           consecutive_failures, metadata, created_at, updated_at
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-        ON CONFLICT (user_id, platform, external_id) DO UPDATE SET
-          name=EXCLUDED.name, avatar_url=EXCLUDED.avatar_url, url=EXCLUDED.url, updated_at=EXCLUDED.updated_at
+        ON CONFLICT (user_id, platform, external_id) DO NOTHING
         RETURNING *;
       `;
       const res = await this.pool.query(query, [
@@ -251,14 +254,11 @@ export class DatabaseRepository {
         fullSource.connector_type, fullSource.connector_status, fullSource.is_paused, fullSource.consecutive_failures,
         JSON.stringify(fullSource.metadata || {}), now, now
       ]);
-      return res.rows[0];
+      if (res.rows[0]) return res.rows[0];
+      throw new Error('SOURCE_ALREADY_EXISTS');
     }
     const existingIndex = this.memoryStore.sources.findIndex(s => s.user_id === source.user_id && s.platform === source.platform && s.external_id === source.external_id);
-    if (existingIndex >= 0) {
-      this.memoryStore.sources[existingIndex] = { ...this.memoryStore.sources[existingIndex], ...fullSource, id: this.memoryStore.sources[existingIndex].id };
-      this.saveToDisk();
-      return this.memoryStore.sources[existingIndex];
-    }
+    if (existingIndex >= 0) throw new Error('SOURCE_ALREADY_EXISTS');
     this.memoryStore.sources.unshift(fullSource);
     this.saveToDisk();
     return fullSource;
@@ -281,6 +281,41 @@ export class DatabaseRepository {
       else { src.consecutive_failures = (src.consecutive_failures || 0) + 1; src.last_error = errorMsg; }
       this.saveToDisk();
     }
+  }
+
+  async updateSourceMetadata(
+    id: string,
+    updates: Partial<Pick<DbSource, 'name' | 'handle' | 'avatar_url' | 'bio'>>
+  ): Promise<DbSource | null> {
+    const name = typeof updates.name === 'string' ? updates.name.trim().slice(0, 255) : '';
+    const handle = typeof updates.handle === 'string' ? updates.handle.trim().replace(/^@/, '').slice(0, 255) : '';
+    const avatar = typeof updates.avatar_url === 'string' ? updates.avatar_url.trim().slice(0, 4096) : '';
+    const bio = typeof updates.bio === 'string' ? updates.bio.trim().slice(0, 5000) : '';
+    if (!name && !handle && !avatar && !bio) return await this.getSource(id);
+
+    if (this.isPostgres && this.pool) {
+      const res = await this.pool.query(`
+        UPDATE sources SET
+          name = COALESCE(NULLIF($2, ''), name),
+          handle = COALESCE(NULLIF($3, ''), handle),
+          avatar_url = COALESCE(NULLIF($4, ''), avatar_url),
+          bio = COALESCE(NULLIF($5, ''), bio),
+          updated_at = NOW()
+        WHERE id = $1
+        RETURNING *
+      `, [id, name, handle, avatar, bio]);
+      return res.rows[0] || null;
+    }
+
+    const source = this.memoryStore.sources.find(item => item.id === id);
+    if (!source) return null;
+    if (name) source.name = name;
+    if (handle) source.handle = handle;
+    if (avatar) source.avatar_url = avatar;
+    if (bio) source.bio = bio;
+    source.updated_at = new Date().toISOString();
+    this.saveToDisk();
+    return { ...source };
   }
 
   async toggleSourcePause(id: string): Promise<boolean> {
@@ -418,9 +453,6 @@ export class DatabaseRepository {
       `, [fullMatch.id, fullMatch.user_id, fullMatch.post_id, fullMatch.rule_id, fullMatch.source_id, fullMatch.confidence, fullMatch.category, fullMatch.reason, JSON.stringify(fullMatch.extracted || {}), fullMatch.feedback || 'unrated', fullMatch.is_read || false, fullMatch.is_saved || false, now]);
       if (res.rows.length > 0) return res.rows[0];
 
-      // A concurrent ingestion may have won the unique(rule_id, post_id) race. Return the actual
-      // persisted row, never the losing candidate object, so callers cannot dispatch a duplicate
-      // notification for a match that PostgreSQL did not insert.
       const existing = await this.pool.query('SELECT * FROM matches WHERE rule_id = $1 AND post_id = $2 LIMIT 1', [fullMatch.rule_id, fullMatch.post_id]);
       if (existing.rows[0]) return existing.rows[0];
       throw new Error('Match conflict occurred but the persisted match could not be loaded');
