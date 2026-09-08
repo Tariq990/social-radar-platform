@@ -1,7 +1,16 @@
+import { Capacitor, registerPlugin } from '@capacitor/core';
 import { Source, WatchRule, AlertMatch, NormalizedPost, ConnectorStatus, ConnectorType, SourcePlatform } from '../types';
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
 const DEVICE_AUTH_STORAGE_KEY = 'mrscrap_backend_device_auth_v1';
+
+interface NativeBackendAuthPlugin {
+  getBackendAuth(): Promise<{ configured: boolean; userId?: string; deviceId?: string; token?: string; platform?: string }>;
+  saveBackendAuth(options: { userId: string; deviceId: string; token: string; platform: string }): Promise<{ saved: boolean }>;
+  clearBackendAuth(): Promise<{ cleared: boolean }>;
+}
+
+const NativeBackendAuth = registerPlugin<NativeBackendAuthPlugin>('AuthenticatedSocialSession');
 
 export interface ApiDeviceAuthSession {
   userId: string;
@@ -10,7 +19,19 @@ export interface ApiDeviceAuthSession {
   platform: 'web' | 'android' | 'ios';
 }
 
+class ApiRequestError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
 let registrationPromise: Promise<ApiDeviceAuthSession> | null = null;
+
+function isNativeAndroid(): boolean {
+  return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
+}
 
 export function getApiBaseUrl(): string {
   return API_BASE_URL;
@@ -18,6 +39,9 @@ export function getApiBaseUrl(): string {
 
 function apiUrl(path: string): string {
   if (!path.startsWith('/')) path = `/${path}`;
+  if (isNativeAndroid() && !API_BASE_URL) {
+    throw new Error('Android build is missing VITE_API_BASE_URL. Rebuild the app with the public HTTPS backend origin.');
+  }
   return `${API_BASE_URL}${path}`;
 }
 
@@ -32,12 +56,16 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (!response.ok) {
-    throw new Error(body?.error || body?.message || `Request failed with HTTP ${response.status}`);
+    throw new ApiRequestError(response.status, body?.error || body?.message || `Request failed with HTTP ${response.status}`);
   }
   return body as T;
 }
 
 function detectClientPlatform(): 'web' | 'android' | 'ios' {
+  if (Capacitor.isNativePlatform()) {
+    const platform = Capacitor.getPlatform();
+    if (platform === 'android' || platform === 'ios') return platform;
+  }
   if (typeof navigator === 'undefined') return 'web';
   const ua = navigator.userAgent || '';
   if (/Android/i.test(ua)) return 'android';
@@ -45,48 +73,87 @@ function detectClientPlatform(): 'web' | 'android' | 'ios' {
   return 'web';
 }
 
-function readStoredDeviceAuth(): ApiDeviceAuthSession | null {
-  try {
-    const raw = localStorage.getItem(DEVICE_AUTH_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (
-      parsed &&
-      typeof parsed.userId === 'string' &&
-      typeof parsed.deviceId === 'string' &&
-      typeof parsed.token === 'string' &&
-      parsed.token.length >= 24
-    ) {
-      return {
-        userId: parsed.userId,
-        deviceId: parsed.deviceId,
-        token: parsed.token,
-        platform: parsed.platform === 'android' || parsed.platform === 'ios' ? parsed.platform : 'web'
-      };
-    }
-  } catch {
-    // Invalid/corrupted local installation auth is replaced below.
+function validateDeviceAuth(value: any): ApiDeviceAuthSession | null {
+  if (
+    value &&
+    typeof value.userId === 'string' &&
+    typeof value.deviceId === 'string' &&
+    typeof value.token === 'string' &&
+    value.token.length >= 24 && value.token.length <= 512
+  ) {
+    return {
+      userId: value.userId,
+      deviceId: value.deviceId,
+      token: value.token,
+      platform: value.platform === 'android' || value.platform === 'ios' ? value.platform : 'web'
+    };
   }
   return null;
 }
 
+async function readStoredDeviceAuth(): Promise<ApiDeviceAuthSession | null> {
+  if (isNativeAndroid()) {
+    try {
+      const native = await NativeBackendAuth.getBackendAuth();
+      if (!native.configured) return null;
+      return validateDeviceAuth(native);
+    } catch {
+      return null;
+    }
+  }
+
+  try {
+    const raw = localStorage.getItem(DEVICE_AUTH_STORAGE_KEY);
+    if (!raw) return null;
+    return validateDeviceAuth(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+async function persistDeviceAuth(session: ApiDeviceAuthSession): Promise<void> {
+  if (isNativeAndroid()) {
+    await NativeBackendAuth.saveBackendAuth(session);
+    return;
+  }
+  localStorage.setItem(DEVICE_AUTH_STORAGE_KEY, JSON.stringify(session));
+}
+
+async function clearStoredDeviceAuth(): Promise<void> {
+  if (isNativeAndroid()) {
+    try { await NativeBackendAuth.clearBackendAuth(); } catch { /* re-registration will recover */ }
+    return;
+  }
+  localStorage.removeItem(DEVICE_AUTH_STORAGE_KEY);
+}
+
 /**
  * Backend application-device authorization. This token is unrelated to Facebook login and
- * never contains Facebook cookies/session material. Registration is intentionally frictionless.
+ * never contains Facebook cookies/session material. On Android it is encrypted at rest by an
+ * AndroidKeyStore-backed native store rather than localStorage or WorkManager Data.
+ *
+ * NOTE: registration is still bound to the current single-user backend identity. Full end-user
+ * authentication/tenant isolation remains a production blocker tracked separately.
  */
-export async function ensureApiDeviceAuth(): Promise<ApiDeviceAuthSession> {
-  const stored = readStoredDeviceAuth();
-  if (stored) return stored;
+export async function ensureApiDeviceAuth(forceRefresh: boolean = false): Promise<ApiDeviceAuthSession> {
+  if (!forceRefresh) {
+    const stored = await readStoredDeviceAuth();
+    if (stored) return stored;
+  } else {
+    await clearStoredDeviceAuth();
+  }
+
   if (registrationPromise) return registrationPromise;
 
   registrationPromise = requestJson<ApiDeviceAuthSession>('/api/auth/device/register', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ platform: detectClientPlatform() })
-  }).then(session => {
-    if (!session?.token || !session?.deviceId) throw new Error('Backend returned invalid device authorization');
-    localStorage.setItem(DEVICE_AUTH_STORAGE_KEY, JSON.stringify(session));
-    return session;
+  }).then(async session => {
+    const validated = validateDeviceAuth(session);
+    if (!validated) throw new Error('Backend returned invalid device authorization');
+    await persistDeviceAuth(validated);
+    return validated;
   }).finally(() => {
     registrationPromise = null;
   });
@@ -99,9 +166,6 @@ export interface HealthResponse {
   service: string;
   databaseType: string;
   aiConfigured: boolean;
-  aiProvider?: string;
-  aiModel?: string;
-  aiFormat?: string;
   monitoringMode: 'device_session' | 'optional_public_provider';
   optionalPublicProviderConfigured: boolean;
   appMode: 'production' | 'demo';
@@ -112,9 +176,6 @@ export interface ConfigResponse {
   appMode: 'production' | 'demo';
   isPostgres: boolean;
   aiConfigured: boolean;
-  aiProvider?: string;
-  aiModel?: string;
-  aiFormat?: string;
   monitoringMode: 'device_session' | 'optional_public_provider';
   optionalPublicProviderConfigured: boolean;
 }
@@ -152,6 +213,7 @@ export interface ResolvedSourceResponse {
 export interface DeviceIngestResponse {
   accepted: number;
   duplicates: number;
+  rejected: number;
   matchesCreated: AlertMatch[];
   evaluationErrors: { postId: string; ruleId: string; error: string }[];
 }
@@ -213,6 +275,9 @@ export function normalizeAlertMatch(raw: any): AlertMatch {
   const originalUrl = postRaw.canonical_url || postRaw.originalUrl;
   if (typeof originalUrl !== 'string' || !originalUrl) throw new Error('Alert post is missing canonical URL');
 
+  const confidence = typeof raw.confidence === 'number' ? raw.confidence : Number(raw.confidence);
+  if (!Number.isFinite(confidence)) throw new Error('Alert record has invalid confidence');
+
   const post: NormalizedPost = {
     id: postRaw.id || postId,
     sourceId,
@@ -240,7 +305,7 @@ export function normalizeAlertMatch(raw: any): AlertMatch {
     sourceAvatar,
     sourcePlatform: platform,
     post,
-    confidence: typeof raw.confidence === 'number' ? raw.confidence : Number(raw.confidence),
+    confidence: Math.max(0, Math.min(1, confidence)),
     category: typeof raw.category === 'string' ? raw.category : '',
     reason: typeof raw.reason === 'string' ? raw.reason : '',
     extracted: raw.extracted && typeof raw.extracted === 'object' ? raw.extracted : {},
@@ -397,8 +462,7 @@ export async function apiScanSources(demo: boolean = false): Promise<ScanRespons
   };
 }
 
-export async function apiIngestDevicePosts(sourceId: string, posts: NormalizedPost[], locale: 'en' | 'ar'): Promise<DeviceIngestResponse> {
-  const auth = await ensureApiDeviceAuth();
+async function ingestWithAuth(auth: ApiDeviceAuthSession, sourceId: string, posts: NormalizedPost[], locale: 'en' | 'ar'): Promise<any> {
   const payloadPosts = posts.map(post => ({
     externalPostId: post.externalPostId,
     originalUrl: post.originalUrl,
@@ -409,7 +473,8 @@ export async function apiIngestDevicePosts(sourceId: string, posts: NormalizedPo
     publishedAt: post.publishedAt,
     metadata: post.metadata
   }));
-  const data = await requestJson<any>('/api/device/ingest', {
+
+  return requestJson<any>('/api/device/ingest', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -418,6 +483,22 @@ export async function apiIngestDevicePosts(sourceId: string, posts: NormalizedPo
     },
     body: JSON.stringify({ sourceId, posts: payloadPosts, locale })
   });
+}
+
+export async function apiIngestDevicePosts(sourceId: string, posts: NormalizedPost[], locale: 'en' | 'ar'): Promise<DeviceIngestResponse> {
+  let auth = await ensureApiDeviceAuth();
+  let data: any;
+  try {
+    data = await ingestWithAuth(auth, sourceId, posts, locale);
+  } catch (error) {
+    if (error instanceof ApiRequestError && (error.status === 401 || error.status === 403)) {
+      auth = await ensureApiDeviceAuth(true);
+      data = await ingestWithAuth(auth, sourceId, posts, locale);
+    } else {
+      throw error;
+    }
+  }
+
   const matches: AlertMatch[] = [];
   for (const raw of Array.isArray(data.matchesCreated) ? data.matchesCreated : []) {
     try { matches.push(normalizeAlertMatch(raw)); } catch { /* ignore malformed response records */ }
@@ -425,6 +506,7 @@ export async function apiIngestDevicePosts(sourceId: string, posts: NormalizedPo
   return {
     accepted: Number(data.accepted || 0),
     duplicates: Number(data.duplicates || 0),
+    rejected: Number(data.rejected || 0),
     matchesCreated: matches,
     evaluationErrors: Array.isArray(data.evaluationErrors) ? data.evaluationErrors : []
   };
