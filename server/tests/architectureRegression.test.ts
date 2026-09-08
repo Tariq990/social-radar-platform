@@ -109,6 +109,7 @@ test('shared URL entry points accept only Facebook and Instagram links', () => {
   const radar = read('src/context/RadarContext.tsx');
   assert.match(helper, /FACEBOOK_HOSTS/);
   assert.match(helper, /INSTAGRAM_HOSTS/);
+  assert.match(helper, /SOCIAL_HOST_FRAGMENT/);
   assert.match(app, /extractSupportedSocialUrl/);
   assert.match(radar, /extractSupportedSocialUrl/);
   assert.doesNotMatch(radar, /function extractSharedUrl/);
@@ -125,11 +126,15 @@ test('anonymous landing bootstrap does not fetch private radar resources', () =>
 test('Android updater is same-origin and verifies package identity before install', () => {
   const webUpdater = read('src/services/appUpdate.ts');
   const nativeUpdater = read('android/app/src/main/java/com/mrscrap/socialradar/AppUpdatePlugin.java');
+  const verifier = read('android/app/src/main/java/com/mrscrap/socialradar/ApkIdentityVerifier.java');
   assert.match(webUpdater, /url\.origin !== backendOrigin\.origin/);
-  assert.match(nativeUpdater, /getPackageArchiveInfo/);
-  assert.match(nativeUpdater, /getPackageName\(\)/);
-  assert.match(nativeUpdater, /versionCode/);
-  assert.match(nativeUpdater, /signingInfo|signatures/);
+  assert.match(nativeUpdater, /sameHttpsOrigin/);
+  assert.match(nativeUpdater, /redirected away from the MR SCRAP backend origin/);
+  assert.match(nativeUpdater, /ApkIdentityVerifier\.verify/);
+  assert.match(verifier, /getPackageArchiveInfo/);
+  assert.match(verifier, /getPackageName\(\)/);
+  assert.match(verifier, /getLongVersionCode|versionCode/);
+  assert.match(verifier, /signingInfo|signatures/);
 });
 
 test('Android updater UI follows stored MR SCRAP locale', () => {
@@ -137,4 +142,26 @@ test('Android updater UI follows stored MR SCRAP locale', () => {
   assert.match(gate, /mrscrap_locale_v2/);
   assert.match(gate, /stored === 'ar'/);
   assert.match(gate, /stored === 'en'/);
+});
+
+test('initial monitoring snapshot is a baseline except for explicit latest-post rules', () => {
+  const ingestion = read('server/worker/deviceIngestion.ts');
+  assert.match(ingestion, /const isInitialBaseline = !source\.last_checked_at/);
+  assert.match(ingestion, /isInitialBaseline \? latestPostRules : sourceRules/);
+  assert.match(ingestion, /latestCandidateInputIndex/);
+  assert.match(ingestion, /latestCandidate: rawIndex === latestCandidateIndex/);
+});
+
+test('metadata resolver can recover the source profile from a shared post URL', () => {
+  const resolver = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSourceMetadataResolver.java');
+  assert.match(resolver, /authorHref/);
+  assert.match(resolver, /rawMetaTitle\.match/);
+  assert.match(resolver, /profileUrl/);
+  assert.match(resolver, /profileImage/);
+});
+
+test('alpha brand configuration does not advertise unimplemented paid capabilities', () => {
+  const brand = read('src/config/brand.ts');
+  assert.match(brand, /PLANS_CONFIG = \{\} as const/);
+  assert.doesNotMatch(brand, /Instant push notifications|Priority background polling|Export alerts to CSV/);
 });

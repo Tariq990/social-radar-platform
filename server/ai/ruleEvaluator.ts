@@ -79,24 +79,24 @@ export async function evaluatePostAgainstRule(
     }
   }
 
-  // "Latest/new post" is a transport intent, not a semantic-content filter. A newly ingested
-  // top feed item should therefore match immediately instead of paying for an AI round trip.
-  // Android collector metadata marks pinned/older visible items so only the actual top feed item
-  // is selected when that ordering information is available.
+  // "Latest/new post" is a transport intent, not a semantic-content filter. Device ingestion
+  // marks exactly one non-pinned item from the current feed snapshot as latestCandidate. This is
+  // more reliable than assuming feedIndex=0 because Meta can place pinned posts above the newest
+  // chronological post. Older APKs may not send latestCandidate, so retain a conservative fallback.
   if (isLatestPostIntent(rule.natural_language || '')) {
     const metadata = post.metadata && typeof post.metadata === 'object' ? post.metadata as Record<string, unknown> : {};
     const pinned = metadata.pinned === true;
+    const latestCandidate = metadata.latestCandidate;
     const feedIndex = Number(metadata.feedIndex);
-    const isOlderVisibleItem = Number.isFinite(feedIndex) && feedIndex > 0;
 
-    if (pinned || isOlderVisibleItem) {
+    if (pinned || latestCandidate === false || (latestCandidate === undefined && Number.isFinite(feedIndex) && feedIndex > 0)) {
       return {
         matched: false,
         confidence: 1,
         category: 'New Post',
         reason: locale === 'ar'
-          ? 'تم تجاهل هذا العنصر لأنه ليس أحدث منشور فعلي في ترتيب الصفحة.'
-          : 'Ignored because this item is not the newest real post in the page order.',
+          ? 'تم تجاهل هذا العنصر لأنه ليس أحدث منشور فعلي غير مثبت في ترتيب الصفحة.'
+          : 'Ignored because this item is not the newest real non-pinned post in the page order.',
         extracted: {}
       };
     }
@@ -106,8 +106,8 @@ export async function evaluatePostAgainstRule(
       confidence: 1,
       category: 'New Post',
       reason: locale === 'ar'
-        ? 'هذا هو أحدث منشور فعلي جديد تم التقاطه من المصدر.'
-        : 'This is the newest real post newly collected from the source.',
+        ? 'هذا هو أحدث منشور فعلي غير مثبت تم التقاطه من المصدر.'
+        : 'This is the newest real non-pinned post collected from the source.',
       extracted: {}
     };
   }
