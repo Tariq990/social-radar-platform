@@ -25,7 +25,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      # Alpha acceptance fallback. A workflow input or repository variable still overrides it.
       VITE_API_BASE_URL: ${{ inputs.backend_base_url || vars.ALPHA_API_BASE_URL || 'https://mr-scrap-api-live.onrender.com' }}
       ANDROID_VERSION_CODE: ${{ github.run_number }}
       ANDROID_VERSION_NAME: 0.1.${{ github.run_number }}
@@ -41,7 +40,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${VITE_API_BASE_URL:-}" ]]; then
-            echo "VITE_API_BASE_URL is required. Set repository variable ALPHA_API_BASE_URL or provide workflow input backend_base_url."
+            echo "VITE_API_BASE_URL is required."
             exit 1
           fi
           if [[ ! "$VITE_API_BASE_URL" =~ ^https://[^/]+ ]]; then
@@ -116,16 +115,7 @@ jobs:
           set -euo pipefail
           APK=release/MR-SCRAP-android-alpha.apk
           APK_SHA="$(sha256sum "$APK" | awk '{print $1}')"
-
-          OIDC_TOKEN="$(
-            curl -fsSL \
-              -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=mrscrap-render-release" \
-              | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])'
-          )"
-
-          # The Render deploy for this commit normally finishes well before Gradle. Retries also
-          # cover a brief 404/503 window if the new updater endpoint is still rolling out.
+          OIDC_TOKEN="$(curl -fsSL -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=mrscrap-render-release" | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"
           curl --fail-with-body --retry 18 --retry-delay 10 --retry-all-errors \
             --connect-timeout 10 --max-time 120 \
             -X PUT \
@@ -157,27 +147,20 @@ jobs:
           NOTES=$(cat <<EOF
           ## MR SCRAP Android Alpha
 
-          This is the latest **debug/alpha** build from \`work/real-session-ai-provider\`.
-
           - Commit: \`$GITHUB_SHA\`
           - Android version: \`$ANDROID_VERSION_NAME\` (code \`$ANDROID_VERSION_CODE\`)
-          - Backend compiled into APK: \`$VITE_API_BASE_URL\`
-          - Future alpha builds are mandatory in-app updates for older alpha installations.
-          - APK downloads are served by the MR SCRAP backend and SHA-256 verified on-device before Android opens the installer.
-          - Build type: debug/alpha with a stable alpha-only signing key (not the future Play Store production key).
-          - Facebook authenticated monitoring remains subject to physical-device acceptance testing and Meta DOM/login behavior.
-          - Do not treat this prerelease as production-ready.
-
-          Download \`MR-SCRAP-android-alpha.apk\` and verify its SHA-256 with the accompanying checksum file.
+          - Backend: \`$VITE_API_BASE_URL\`
+          - Mandatory in-app update for older alpha installations.
+          - APK is SHA-256 verified on-device before Android opens the installer.
+          - Alpha-only signing key; not the future Play Store production key.
+          - Facebook and Instagram authenticated monitoring remain subject to physical-device acceptance testing and Meta DOM/login behavior.
           EOF
           )
-
           if gh release view android-alpha >/dev/null 2>&1; then
             gh release edit android-alpha --title "MR SCRAP Android Alpha" --prerelease --notes "$NOTES"
           else
             gh release create android-alpha --target "$GITHUB_SHA" --title "MR SCRAP Android Alpha" --prerelease --notes "$NOTES"
           fi
-
           gh release upload android-alpha \
             release/MR-SCRAP-android-alpha.apk \
             release/MR-SCRAP-android-alpha.apk.sha256 \
