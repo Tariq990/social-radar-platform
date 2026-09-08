@@ -10,6 +10,7 @@ import {
 } from '../services/appUpdate';
 
 const CACHE_KEY = 'mrscrap_required_android_update_v1';
+const LOCALE_KEY = 'mrscrap_locale_v2';
 
 interface Props {
   children: React.ReactNode;
@@ -54,6 +55,9 @@ export const ForceUpdateGate: React.FC<Props> = ({ children }) => {
 
   const isArabic = useMemo(() => {
     try {
+      const stored = localStorage.getItem(LOCALE_KEY);
+      if (stored === 'ar') return true;
+      if (stored === 'en') return false;
       return (navigator.language || '').toLowerCase().startsWith('ar');
     } catch {
       return false;
@@ -163,8 +167,8 @@ export const ForceUpdateGate: React.FC<Props> = ({ children }) => {
         </h1>
         <p className="mt-3 text-sm leading-6 text-slate-400">
           {isArabic
-            ? 'لا يمكن متابعة استخدام MR SCRAP قبل تثبيت آخر إصدار. سيتم تنزيل ملف التحديث من خادم MR SCRAP والتحقق من بصمته قبل فتح مثبت Android.'
-            : 'MR SCRAP cannot continue until the latest version is installed. The APK is downloaded from the MR SCRAP backend and its SHA-256 is verified before Android opens the installer.'}
+            ? 'لا يمكن متابعة استخدام MR SCRAP قبل تثبيت آخر إصدار. سيتم تنزيل ملف التحديث من خادم MR SCRAP والتحقق من بصمته وهوية الحزمة وتوقيعها قبل فتح مثبت Android.'
+            : 'MR SCRAP cannot continue until the latest version is installed. The APK is downloaded from the MR SCRAP backend and its hash, package identity, version, and signing certificate are verified before Android opens the installer.'}
         </p>
 
         <div className="mt-5 rounded-2xl border border-slate-800 bg-slate-950/70 p-4 text-xs text-slate-400 space-y-2">
