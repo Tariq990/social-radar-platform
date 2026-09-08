@@ -38,7 +38,7 @@ interface AuthenticatedSocialSessionPlugin {
   disconnect(): Promise<{ disconnected: boolean }>;
   resolveSource(options: { url: string }): Promise<NativeResolvedSource>;
   collectSource(options: { sourceId: string; url: string; platform: string }): Promise<{ posts: NativeCollectedPost[]; checkedAt: string }>;
-  scheduleSource(options: { sourceId: string; url: string; platform: string; backendBaseUrl: string }): Promise<{ scheduled: boolean; minimumIntervalMinutes: number }>;
+  scheduleSource(options: { sourceId: string; url: string; platform: string; backendBaseUrl: string; authToken: string }): Promise<{ scheduled: boolean; minimumIntervalMinutes: number }>;
   cancelSource(options: { sourceId: string }): Promise<{ cancelled: boolean }>;
 }
 
@@ -96,13 +96,19 @@ export class DeviceSessionConnector implements SourceConnector {
     await NativeSession.disconnect();
   }
 
-  static async scheduleBackgroundSource(source: { id: string; url: string; platform: SourcePlatform }, backendBaseUrl: string): Promise<void> {
+  static async scheduleBackgroundSource(
+    source: { id: string; url: string; platform: SourcePlatform },
+    backendBaseUrl: string,
+    authToken: string
+  ): Promise<void> {
     if (!isAndroidNative()) throw new Error('Background authenticated monitoring requires the Android app.');
+    if (!authToken || authToken.length < 24) throw new Error('Backend device authorization is missing.');
     await NativeSession.scheduleSource({
       sourceId: source.id,
       url: source.url,
       platform: source.platform,
-      backendBaseUrl
+      backendBaseUrl,
+      authToken
     });
   }
 
