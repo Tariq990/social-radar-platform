@@ -34,7 +34,7 @@ export function extractSupportedSocialUrl(value: string): string | null {
   const text = value.replace(BIDI_MARKS, ' ').trim();
   if (!text) return null;
 
-  const candidates = text.match(/https?:\/\/[^\s<>"']+/gi) || [];
+  const candidates: string[] = [...(text.match(/https?:\/\/[^\s<>"']+/gi) || [])];
   const hostOnly = text.match(SOCIAL_HOST_FRAGMENT)?.[0];
   if (hostOnly) candidates.push(/^https?:\/\//i.test(hostOnly) ? hostOnly : `https://${hostOnly}`);
   if (candidates.length === 0) candidates.push(text);
