@@ -32,22 +32,18 @@ jobs:
           python3 <<'PY'
           from pathlib import Path
           import re
-
           collector_path = Path('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedWebCollector.java')
           test_path = Path('server/tests/architectureRegression.test.ts')
           source = collector_path.read_text()
-
           def one(old, new, label):
               global source
               count = source.count(old)
               if count != 1:
                   raise SystemExit(f'{label}: expected one match, found {count}')
               source = source.replace(old, new, 1)
-
           one('    private static final int BASIC_FALLBACK_ATTEMPT = 6;\n', '    private static final int SURFACE_FALLBACK_ATTEMPT = 4;\n', 'fallback constant')
           one('        final String mobileUrl = preferMobileFacebookUrl(url);\n', '        final String desktopUrl = preferDesktopFacebookUrl(url);\n        final String mobileUrl = preferMobileFacebookUrl(url);\n', 'desktop declaration')
           one('            boolean[] triedBasicFallback = new boolean[] { false };\n', '            boolean[] triedMobileFallback = new boolean[] { false };\n            boolean[] triedBasicFallback = new boolean[] { false };\n', 'surface state')
-
           pattern = re.compile(r'                        if \(\n                            reliableSource && postCount == 0 && attempts\[0\] >= BASIC_FALLBACK_ATTEMPT &&\n                            !triedBasicFallback\[0\] && basicFallbackUrl != null && !basicFallbackUrl\.equals\(mobileUrl\)\n                        \) \{\n                            // If Facebook\x27s modern mobile SPA exposes no stable post anchors, try the\n                            // simpler first-party mbasic surface using the same local Facebook session\.\n                            triedBasicFallback\[0\] = true;\n                            attempts\[0\] = 0;\n                            webView\.loadUrl\(basicFallbackUrl\);\n                            return;\n                        \}\n')
           replacement = ''.join([
               '                        if (postCount == 0 && attempts[0] >= SURFACE_FALLBACK_ATTEMPT) {\n',
@@ -69,13 +65,11 @@ jobs:
           source, count = pattern.subn(replacement, source, count=1)
           if count != 1:
               raise SystemExit(f'fallback block: expected one match, found {count}')
-
           old_initial = '            webView.loadUrl(mobileUrl);\n'
           initial_index = source.rfind(old_initial)
           if initial_index < 0:
               raise SystemExit('initial surface load not found')
           source = source[:initial_index] + '            webView.loadUrl(desktopUrl);\n' + source[initial_index + len(old_initial):]
-
           marker = '    private static String preferMobileFacebookUrl(String rawUrl) {\n'
           helper = ''.join([
               '    private static String preferDesktopFacebookUrl(String rawUrl) {\n',
@@ -91,14 +85,12 @@ jobs:
               '        } catch (Exception ignored) {\n',
               '            return rawUrl;\n',
               '        }\n',
-              '    }\n',
-              '\n'
+              '    }\n\n'
           ])
           if source.count(marker) != 1:
               raise SystemExit('desktop helper insertion point not found exactly once')
           source = source.replace(marker, helper + marker, 1)
           collector_path.write_text(source)
-
           tests = test_path.read_text()
           needle = '  assert.match(collector, /setOffscreenPreRaster\\(true\\)/);\n'
           extra = ''.join([
@@ -133,7 +125,7 @@ jobs:
           set -euo pipefail
           curl -fsS --connect-timeout 3 http://127.0.0.1:9222/json/version >/dev/null
           node <<'NODE'
-          const fs = require('node:fs');
+          import fs from 'node:fs';
           const BASE = 'http://127.0.0.1:9222';
           const sleep = ms => new Promise(r => setTimeout(r, ms));
           const targets = await (await fetch(`${BASE}/json/list`)).json();
@@ -145,7 +137,6 @@ jobs:
             } catch { return false; }
           });
           if (!target) throw new Error('NO_FACEBOOK_TAB');
-
           const java = fs.readFileSync('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedWebCollector.java', 'utf8');
           const match = java.match(/return """\n([\s\S]*?)\n\s*"""\n\s*\.replace\("__LIMIT__"/);
           if (!match) throw new Error('EXTRACTOR_TEXT_BLOCK_NOT_FOUND');
@@ -154,7 +145,6 @@ jobs:
           const indent = Math.min(...nonBlank.map(x => (x.match(/^\s*/) || [''])[0].length));
           let expression = lines.map(x => x.slice(Math.min(indent, x.length))).join('\n');
           expression = expression.replace('__LIMIT__', '10').replace('__REQUESTED__', JSON.stringify(target.url));
-
           const socket = new WebSocket(target.webSocketDebuggerUrl);
           await new Promise((resolve, reject) => {
             const timer = setTimeout(() => reject(new Error('CDP websocket timeout')), 5000);
@@ -180,7 +170,6 @@ jobs:
             if (out.exceptionDetails) throw new Error('EXTRACTOR_EVALUATION_EXCEPTION');
             return out.result?.value;
           };
-
           await cdp('Runtime.enable');
           const attempts = [];
           for (let i = 0; i < 4; i++) {
