@@ -6,14 +6,19 @@ This document is the authoritative launch-gate summary for branch:
 
 Current classification: **ALPHA / NOT PRODUCTION READY**.
 
-The implementation now has a real Android/session/backend architecture, but external multi-user production launch is blocked by the P0 items below.
+The implementation now has a real Android/session/backend architecture plus application-level user authentication and tenant isolation. The remaining P0 launch gate is the physical Android Facebook-session acceptance protocol and a green final-candidate CI run.
 
 ## Core architecture status
 
 | Area | Status | Notes |
 |---|---|---|
 | React/Vite product UI | ✅ Implemented | Existing UI preserved. |
-| Capacitor Android project | ✅ Builds | CI compiles debug APK. |
+| Application signup/login | ✅ Implemented | Email/password, scrypt password hashing, opaque hashed server sessions. |
+| HttpOnly app sessions | ✅ Implemented | Secure credentialed cookie flow; exact-origin CORS. |
+| Tenant isolation | ✅ Implemented + tested | User-scoped CRUD, ownership checks, cross-tenant negative integration tests. |
+| User-bound Android device auth | ✅ Implemented | Device registration requires app login and binds credential to that user. |
+| Logout/revocation | ✅ Implemented | App session is invalidated and associated backend device credentials are revoked. |
+| Capacitor Android project | ✅ Builds | CI compiles debug APK; physical-device behavior still requires acceptance evidence. |
 | Android Share Target | ✅ Implemented | Receives shared text/URLs; physical-device validation still required. |
 | Facebook dedicated WebView login | ✅ Implemented | Real Facebook page, local CookieManager session. Must pass physical-device acceptance. |
 | Raw Facebook cookies/passwords stay device-local by contract | ✅ Implemented | No cookie/password field in backend ingestion contract. Physical network/log validation still required. |
@@ -30,11 +35,42 @@ The implementation now has a real Android/session/backend architecture, but exte
 | Fake production posts/matches | ✅ Removed from production paths | Demo mode remains explicitly separated. |
 | In-app notification persistence | ✅ Implemented | Durable notification rows. |
 | Real FCM/Web Push | ❌ Not implemented | P1 blocker if external push is part of launch promise. |
-| Full user authentication | ❌ Not implemented | **P0**. Backend CRUD still uses `user_default`. |
-| Tenant isolation | ❌ Not implemented | **P0**. Must authorize every CRUD path. |
 | Physical Facebook acceptance test | ❌ Not completed | **P0**. Build success does not prove live WebView/DOM behavior. |
 | Instagram authenticated-session validation | ⚠️ Partial | Collector accepts Instagram URLs, but login/session behavior is Facebook-first and not independently proven. |
 | Production Android signing / Play Store | ❌ Not implemented | P1 release work. |
+
+## Application authentication and tenant boundary
+
+MR SCRAP application authentication is intentionally separate from Facebook authentication:
+
+```text
+MR SCRAP email + password
+→ scrypt password hash
+→ opaque random application session
+→ SHA-256 session-token hash in PostgreSQL
+→ HttpOnly secure session cookie
+→ requireAppAuth
+→ authenticated userId
+→ user-scoped sources / rules / alerts / scans
+→ user-bound Android backend device credential
+```
+
+Security properties implemented:
+
+- plaintext application passwords are not stored;
+- application session tokens are opaque and only their hashes are stored server-side;
+- production cookies are `HttpOnly` and `Secure`;
+- cross-origin credential use is restricted to explicitly approved origins rather than `*`;
+- source deletion/pause, rule mutation, alert mutation and scans are tenant-authorized;
+- a rule cannot be attached to another user's source;
+- Android device registration requires an authenticated MR SCRAP user session;
+- Android `/api/device/ingest` derives tenant identity from the user-bound device credential;
+- application logout revokes associated backend device credentials;
+- automated integration coverage proves user B cannot list/delete/pause/rule-bind/ingest into user A resources.
+
+This application account/session is unrelated to the Facebook WebView session. Facebook cookies and passwords remain device-local.
+
+Email verification and self-service password reset are not yet implemented; they are product/account-recovery follow-up work rather than a tenant-isolation bypass.
 
 ## Primary monitoring path
 
@@ -46,7 +82,7 @@ Facebook real WebView login
 → AuthenticatedWebCollector
 → normalized post metadata only
 → HTTPS /api/device/ingest
-→ device bearer authentication
+→ user-bound device bearer authentication
 → PostgreSQL dedupe/persistence
 → active rule selection
 → configured AI provider
@@ -89,23 +125,31 @@ DATABASE_URL=postgresql://...
 
 If PostgreSQL is unavailable, production startup is aborted before the app serves production traffic. Local JSON persistence is development/demo-only.
 
+Authentication schema includes:
+
+- `users.password_hash`;
+- case-insensitive unique email index;
+- `app_sessions` with hashed opaque session tokens, expiry and revocation metadata;
+- `devices.user_id` binding backend device authorization to the authenticated application tenant.
+
 ## Device authorization
 
-`/api/device/ingest` now requires an MR SCRAP device bearer credential.
+`/api/device/ingest` requires an MR SCRAP device bearer credential.
 
 Server behavior:
 
-- generates an opaque random token;
-- stores only SHA-256 digest in the `devices` table;
-- rejects missing/invalid tokens.
+- device registration itself requires a valid MR SCRAP application session;
+- generates an opaque random device token;
+- stores only its SHA-256 digest in the `devices` table;
+- binds the device row to the authenticated `user_id`;
+- rejects missing/invalid/revoked tokens;
+- logout can revoke the user's associated device credentials.
 
 Android behavior:
 
-- stores the bearer token with AndroidKeyStore-backed AES-GCM encryption;
+- stores the backend device bearer with AndroidKeyStore-backed AES-GCM encryption;
 - does not store it in WorkManager job data;
 - clears/re-registers when backend authorization is rejected.
-
-**Important limitation:** device registration is still bound to the temporary `user_default` identity. It is not a substitute for real account authentication/tenant authorization.
 
 ## Deduplication
 
@@ -115,7 +159,7 @@ Post identity priority:
 2. canonical social URL;
 3. deterministic normalized content hash fallback.
 
-Canonicalization removes tracking parameters while preserving Facebook identity-bearing query values such as `story_fbid` and `id`.
+Canonicalization removes tracking parameters while preserving Facebook identity-bearing query values such as `story_fbid` and `id`, and normalizes equivalent Facebook/Instagram host forms before URL fingerprinting.
 
 The persisted fingerprint is source-scoped before insertion so the same public post monitored by different sources/users cannot suppress another user's processing.
 
@@ -147,23 +191,9 @@ It requires a real HTTPS backend origin through repository variable `ALPHA_API_B
 
 Alpha APKs are debug builds and are not Play Store production releases.
 
-## P0 blockers — must close before external production
+## P0 blocker — must close before external production
 
-### P0-1 — End-user authentication and tenant isolation
-
-Required:
-
-- real signup/login/session model;
-- authenticate all user-facing CRUD APIs;
-- bind device registration to the logged-in user;
-- user-scoped source/rule/alert reads and writes;
-- authorization on delete/pause/update operations;
-- logout/revocation behavior;
-- cross-tenant negative tests proving user A cannot read/change user B data.
-
-Until this is complete, do not expose the current backend as a multi-user public production service.
-
-### P0-2 — Physical Android Facebook acceptance test
+### P0 — Physical Android Facebook acceptance test
 
 Run the full protocol in:
 
@@ -172,6 +202,7 @@ Run the full protocol in:
 Required evidence includes:
 
 - Facebook real WebView login succeeds on physical hardware;
+- application login/session works in the installed Android build;
 - session survives app restart where Facebook allows it;
 - Share Target receives real URLs;
 - real source metadata resolves;
@@ -179,13 +210,15 @@ Required evidence includes:
 - repeated scans dedupe correctly;
 - AI positive/negative/failure paths behave correctly;
 - background WorkManager eventually checks;
-- logout/expiry/reconnect works;
+- MR SCRAP logout revokes backend application/device authorization;
+- Facebook logout/expiry/reconnect works honestly;
 - Disconnect clears local Facebook session;
 - no raw Facebook cookie/password appears in backend/network/log payloads.
 
 ## P1 blockers / launch-scope decisions
 
 - real FCM/Web Push token registration and delivery;
+- email verification and password reset/account recovery;
 - independently validate Instagram authenticated flow;
 - collector regression/resilience testing against live Meta layouts;
 - release signing / AAB / Play Store workflow;
@@ -199,13 +232,13 @@ Required evidence includes:
 
 1. dependency installation;
 2. TypeScript typecheck;
-3. unit tests;
+3. unit and integration tests, including authentication/tenant isolation;
 4. web/server bundle;
 5. Capacitor Android sync;
 6. Android debug APK compilation;
 7. workflow APK artifact upload.
 
-CI proves the code compiles and covered deterministic logic passes tests. It does **not** prove Facebook accepts WebView login or that Meta's live DOM matches the collector selectors.
+CI proves the code compiles and covered deterministic/backend authorization logic passes tests. It does **not** prove Facebook accepts WebView login or that Meta's live DOM matches the collector selectors.
 
 ## Documentation
 
@@ -220,9 +253,8 @@ CI proves the code compiles and covered deterministic logic passes tests. It doe
 
 Keep PR #1 as **Draft** until at minimum:
 
-1. P0 end-user auth/tenant isolation is implemented and tested;
-2. physical Android Facebook acceptance protocol passes with evidence;
-3. current CI is green on the final candidate head;
-4. another focused security/data-flow review finds no critical blocker.
+1. physical Android Facebook acceptance protocol passes with evidence;
+2. current CI is green on the final candidate head;
+3. another focused security/data-flow review finds no critical blocker.
 
 Do not label this branch “production ready” before those gates are closed.
