@@ -37,9 +37,12 @@ interface AuthenticatedSocialSessionPlugin {
   status(): Promise<NativeSessionStatus>;
   connectFacebook(): Promise<{ opened: boolean }>;
   disconnect(): Promise<{ disconnected: boolean }>;
+  saveBackendAuth(options: { userId: string; deviceId: string; token: string; platform: string }): Promise<{ saved: boolean }>;
+  getBackendAuth(): Promise<{ configured: boolean; userId?: string; deviceId?: string; token?: string; platform?: string }>;
+  clearBackendAuth(): Promise<{ cleared: boolean }>;
   resolveSource(options: { url: string }): Promise<NativeResolvedSource>;
   collectSource(options: { sourceId: string; url: string; platform: string }): Promise<{ posts: NativeCollectedPost[]; checkedAt: string }>;
-  scheduleSource(options: { sourceId: string; url: string; platform: string; backendBaseUrl: string; authToken: string }): Promise<{ scheduled: boolean; minimumIntervalMinutes: number }>;
+  scheduleSource(options: { sourceId: string; url: string; platform: string; backendBaseUrl: string }): Promise<{ scheduled: boolean; minimumIntervalMinutes: number }>;
   cancelSource(options: { sourceId: string }): Promise<{ cancelled: boolean }>;
 }
 
@@ -103,12 +106,19 @@ export class DeviceSessionConnector implements SourceConnector {
   ): Promise<void> {
     if (!isAndroidNative()) throw new Error('Background authenticated monitoring requires the Android app.');
     const auth = await ensureApiDeviceAuth();
+    // WorkManager must never receive the bearer token in job Data. Persist it through the
+    // AndroidKeyStore-backed native store first; the Worker decrypts it only when executing.
+    await NativeSession.saveBackendAuth({
+      userId: auth.userId,
+      deviceId: auth.deviceId,
+      token: auth.token,
+      platform: auth.platform
+    });
     await NativeSession.scheduleSource({
       sourceId: source.id,
       url: source.url,
       platform: source.platform,
-      backendBaseUrl,
-      authToken: auth.token
+      backendBaseUrl
     });
   }
 
