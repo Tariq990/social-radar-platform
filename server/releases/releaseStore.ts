@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import pg from 'pg';
 
 import type { AndroidReleaseMetadata } from './versionPolicy';
+import { postgresSsl } from '../db/pgSsl';
 
 const { Pool } = pg;
 const CHANNEL = 'android-alpha' as const;
@@ -17,9 +18,7 @@ function getPool(): pg.Pool {
   if (!databaseUrl) throw new Error('DATABASE_URL is required for Android release storage');
   pool = new Pool({
     connectionString: databaseUrl,
-    ssl: databaseUrl.includes('localhost') || databaseUrl.includes('127.0.0.1')
-      ? false
-      : { rejectUnauthorized: false }
+    ssl: postgresSsl(databaseUrl)
   });
   return pool;
 }
@@ -103,6 +102,8 @@ export async function publishAndroidRelease(input: {
        release_notes = EXCLUDED.release_notes,
        apk = EXCLUDED.apk,
        published_at = NOW()
+     WHERE app_releases.version_code < EXCLUDED.version_code
+        OR (app_releases.version_code = EXCLUDED.version_code AND app_releases.sha256 = EXCLUDED.sha256)
      RETURNING channel, version_code, version_name, min_supported_version_code,
                mandatory, sha256, size_bytes, published_at`,
     [
@@ -118,5 +119,8 @@ export async function publishAndroidRelease(input: {
     ]
   );
 
+  if (!result.rows[0]) {
+    throw new Error('Android release rollback or same-version replacement was rejected');
+  }
   return rowToMetadata(result.rows[0]);
 }
