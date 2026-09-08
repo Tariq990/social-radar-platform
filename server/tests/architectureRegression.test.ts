@@ -40,6 +40,9 @@ test('native collector supports bounded multi-post collection', () => {
   assert.match(collector, /window\.scrollBy/);
   assert.match(collector, /posts\.slice\(0, LIMIT\)/);
   assert.match(collector, /setOffscreenPreRaster\(true\)/);
+  assert.match(collector, /authority\("www\.facebook\.com"\)/);
+  assert.match(collector, /webView\.loadUrl\(desktopUrl\)/);
+  assert.match(collector, /SURFACE_FALLBACK_ATTEMPT\s*=\s*4/);
   assert.match(collector, /mbasic\.facebook\.com/);
   assert.match(collector, /NO_EXTRACTABLE_POSTS/);
 });
