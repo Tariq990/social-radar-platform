@@ -26,13 +26,14 @@ import java.util.concurrent.atomic.AtomicReference;
  * Android controls the exact execution time; the minimum WorkManager interval is 15 minutes.
  * The worker uses the local WebView CookieManager session only for page collection. Backend
  * ingestion is a separate HTTPS request containing normalized post data, never cookies.
+ * The MR SCRAP backend bearer token is read from AndroidKeyStore-backed storage at runtime and
+ * is never persisted in WorkManager input/output data.
  */
 public class AuthenticatedSourceWorker extends Worker {
     public static final String KEY_SOURCE_ID = "sourceId";
     public static final String KEY_SOURCE_URL = "sourceUrl";
     public static final String KEY_PLATFORM = "platform";
     public static final String KEY_BACKEND_BASE_URL = "backendBaseUrl";
-    public static final String KEY_AUTH_TOKEN = "backendAuthToken";
 
     public AuthenticatedSourceWorker(@NonNull Context context, @NonNull WorkerParameters params) {
         super(context, params);
@@ -44,13 +45,13 @@ public class AuthenticatedSourceWorker extends Worker {
         String sourceId = getInputData().getString(KEY_SOURCE_ID);
         String sourceUrl = getInputData().getString(KEY_SOURCE_URL);
         String backendBaseUrl = getInputData().getString(KEY_BACKEND_BASE_URL);
-        String authToken = getInputData().getString(KEY_AUTH_TOKEN);
+        String authToken = DeviceCredentialStore.token(getApplicationContext());
 
         if (sourceId == null || sourceUrl == null || backendBaseUrl == null) {
             return Result.failure(errorData("Missing worker configuration"));
         }
         if (authToken == null || authToken.length() < 24 || authToken.length() > 512) {
-            return Result.failure(errorData("Backend device authorization is missing"));
+            return Result.failure(errorData("Backend device authorization is missing; reopen the app to re-register this device"));
         }
         if (!SessionStateStore.isFacebookConnected()) {
             return Result.failure(errorData("Facebook session requires reconnect"));
@@ -108,7 +109,8 @@ public class AuthenticatedSourceWorker extends Worker {
                     .build());
             }
             if (status == 401 || status == 403) {
-                return Result.failure(errorData("Backend device authorization was rejected"));
+                DeviceCredentialStore.clear(getApplicationContext());
+                return Result.failure(errorData("Backend device authorization was rejected; reopen the app to re-register this device"));
             }
             if (status == 408 || status == 429 || status >= 500) return Result.retry();
             return Result.failure(errorData("Backend rejected normalized ingestion with HTTP " + status));
@@ -137,7 +139,6 @@ public class AuthenticatedSourceWorker extends Worker {
         }
 
         int status = connection.getResponseCode();
-        // Drain the response so the HTTP connection can be reused. Never log the body.
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(
             status >= 400 ? connection.getErrorStream() : connection.getInputStream(),
             StandardCharsets.UTF_8
@@ -152,7 +153,6 @@ public class AuthenticatedSourceWorker extends Worker {
         try {
             URL url = new URL(raw);
             if (!"https".equalsIgnoreCase(url.getProtocol())) {
-                // Local Android emulator development can opt in explicitly via localhost/10.0.2.2.
                 return "http".equalsIgnoreCase(url.getProtocol()) &&
                     ("10.0.2.2".equals(url.getHost()) || "localhost".equalsIgnoreCase(url.getHost()));
             }
