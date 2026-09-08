@@ -35,7 +35,8 @@ interface NativeCollectedPost {
 
 interface AuthenticatedSocialSessionPlugin {
   status(): Promise<NativeSessionStatus>;
-  connectFacebook(): Promise<{ opened: boolean }>;
+  readClipboard(): Promise<{ text?: string }>;
+  connectFacebook(): Promise<{ opened: boolean; connected?: boolean; cancelled?: boolean }>;
   disconnect(): Promise<{ disconnected: boolean }>;
   saveBackendAuth(options: { userId: string; deviceId: string; token: string; platform: string }): Promise<{ saved: boolean }>;
   getBackendAuth(): Promise<{ configured: boolean; userId?: string; deviceId?: string; token?: string; platform?: string }>;
@@ -90,6 +91,12 @@ export class DeviceSessionConnector implements SourceConnector {
     return await NativeSession.status();
   }
 
+  static async readClipboardText(): Promise<string> {
+    if (!isAndroidNative()) return '';
+    const result = await NativeSession.readClipboard();
+    return typeof result?.text === 'string' ? result.text : '';
+  }
+
   static async connectFacebook(): Promise<void> {
     if (!isAndroidNative()) throw new Error('Facebook session connection requires the Android app.');
     await NativeSession.connectFacebook();
@@ -106,8 +113,6 @@ export class DeviceSessionConnector implements SourceConnector {
   ): Promise<void> {
     if (!isAndroidNative()) throw new Error('Background authenticated monitoring requires the Android app.');
     const auth = await ensureApiDeviceAuth();
-    // WorkManager must never receive the bearer token in job Data. Persist it through the
-    // AndroidKeyStore-backed native store first; the Worker decrypts it only when executing.
     await NativeSession.saveBackendAuth({
       userId: auth.userId,
       deviceId: auth.deviceId,
