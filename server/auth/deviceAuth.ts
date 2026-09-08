@@ -21,7 +21,6 @@ export interface DeviceIdentity {
 
 let authPool: pg.Pool | null = null;
 const developmentTokens = new Map<string, DeviceIdentity>();
-const CURRENT_SINGLE_USER_ID = 'user_default';
 
 function appMode(): string {
   return (process.env.APP_MODE || 'production').trim().toLowerCase();
@@ -50,50 +49,35 @@ function getPool(): pg.Pool {
   return authPool;
 }
 
-export async function ensureCurrentBackendIdentity(): Promise<void> {
-  if (appMode() !== 'production' && !process.env.DATABASE_URL?.trim()) return;
-  const pool = getPool();
-  await pool.query(
-    `INSERT INTO users (id, email, name, tier, created_at, updated_at)
-     VALUES ($1, NULL, 'Radar Operator', 'pro', NOW(), NOW())
-     ON CONFLICT (id) DO NOTHING`,
-    [CURRENT_SINGLE_USER_ID]
-  );
-}
-
 /**
- * Creates an installation bearer token for backend ingestion.
- *
- * The current application data model is still single-user (`user_default`), so device
- * authorization is deliberately bound to that identity until the full multi-user migration
- * lands. This closes unauthenticated device ingestion without pretending tenant isolation is
- * already complete. Facebook login/session state remains completely separate and device-local.
- * Only a SHA-256 digest of this backend bearer token is stored server-side.
+ * Creates a backend-only installation credential for the currently authenticated application user.
+ * This credential is unrelated to Facebook authentication. Facebook session state remains local
+ * to the Android WebView and is never encoded into this token.
  */
-export async function registerDevice(rawPlatform: unknown): Promise<DeviceRegistration> {
+export async function registerDevice(rawPlatform: unknown, userId: string): Promise<DeviceRegistration> {
+  if (!userId || typeof userId !== 'string') throw new Error('Authenticated user is required for device registration.');
+
   const platform = normalizePlatform(rawPlatform);
   const token = newOpaqueToken();
   const hash = tokenHash(token);
   const deviceId = `dev_${crypto.randomUUID()}`;
 
   if (appMode() !== 'production' && !process.env.DATABASE_URL?.trim()) {
-    const identity: DeviceIdentity = {
-      userId: CURRENT_SINGLE_USER_ID,
-      deviceId,
-      platform
-    };
+    const identity: DeviceIdentity = { userId, deviceId, platform };
     developmentTokens.set(hash, identity);
     return { ...identity, token };
   }
 
-  await ensureCurrentBackendIdentity();
   const pool = getPool();
+  const user = await pool.query('SELECT id FROM users WHERE id = $1 LIMIT 1', [userId]);
+  if (!user.rows[0]) throw new Error('Authenticated user no longer exists.');
+
   await pool.query(
     `INSERT INTO devices (id, user_id, device_token, platform, last_active, created_at)
      VALUES ($1, $2, $3, $4, NOW(), NOW())`,
-    [deviceId, CURRENT_SINGLE_USER_ID, hash, platform]
+    [deviceId, userId, hash, platform]
   );
-  return { userId: CURRENT_SINGLE_USER_ID, deviceId, token, platform };
+  return { userId, deviceId, token, platform };
 }
 
 export async function authenticateDeviceToken(rawToken: unknown): Promise<DeviceIdentity | null> {
@@ -121,6 +105,19 @@ export async function authenticateDeviceToken(rawToken: unknown): Promise<Device
     deviceId: row.id,
     platform: normalizePlatform(row.platform)
   };
+}
+
+export async function revokeUserDevices(userId: string): Promise<void> {
+  if (!userId) return;
+
+  if (appMode() !== 'production' && !process.env.DATABASE_URL?.trim()) {
+    for (const [hash, identity] of developmentTokens) {
+      if (identity.userId === userId) developmentTokens.delete(hash);
+    }
+    return;
+  }
+
+  await getPool().query('DELETE FROM devices WHERE user_id = $1', [userId]);
 }
 
 function bearerToken(req: Request): string | null {
