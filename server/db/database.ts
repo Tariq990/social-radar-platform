@@ -32,6 +32,7 @@ export interface DbSource {
   consecutive_failures: number;
   last_error?: string;
   metadata: Record<string, any>;
+  recentPostsCount?: number;
   created_at: string;
   updated_at: string;
 }
@@ -82,7 +83,6 @@ export interface DbMatch {
   is_read: boolean;
   is_saved: boolean;
   created_at: string;
-  // Joined fields for display
   source_name?: string;
   source_avatar?: string;
   source_platform?: string;
@@ -163,11 +163,8 @@ export class DatabaseRepository {
           connectionString: dbUrl,
           ssl: dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1') ? false : { rejectUnauthorized: false }
         });
-        
-        // Test connection
         const client = await this.pool.connect();
         try {
-          // Run migration DDL
           const schemaPath = path.join(process.cwd(), 'server', 'db', 'schema.sql');
           if (fs.existsSync(schemaPath)) {
             const ddl = fs.readFileSync(schemaPath, 'utf8');
@@ -187,11 +184,9 @@ export class DatabaseRepository {
       }
     }
 
-    // Local file persistence initialization
     this.loadFromDisk();
     console.log('[Database] Local persistent store loaded from', this.localFilePath);
 
-    // Ensure default user exists
     if (!this.memoryStore.users.some(u => u.id === 'user_default')) {
       this.memoryStore.users.push({
         id: 'user_default',
@@ -244,13 +239,21 @@ export class DatabaseRepository {
 
   async getSources(userId: string = 'user_default'): Promise<DbSource[]> {
     if (this.isPostgres && this.pool) {
-      const res = await this.pool.query(
-        'SELECT * FROM sources WHERE user_id = $1 ORDER BY created_at DESC',
-        [userId]
-      );
+      const res = await this.pool.query(`
+        SELECT s.*,
+          COALESCE((SELECT COUNT(*)::int FROM posts p WHERE p.source_id = s.id), 0) AS "recentPostsCount"
+        FROM sources s
+        WHERE s.user_id = $1
+        ORDER BY s.created_at DESC
+      `, [userId]);
       return res.rows;
     }
-    return this.memoryStore.sources.filter(s => s.user_id === userId);
+    return this.memoryStore.sources
+      .filter(s => s.user_id === userId)
+      .map(source => ({
+        ...source,
+        recentPostsCount: this.memoryStore.posts.filter(post => post.source_id === source.id).length
+      }));
   }
 
   async getSource(id: string): Promise<DbSource | null> {
@@ -750,7 +753,6 @@ export class DatabaseRepository {
       details,
       created_at: now
     });
-    // Keep max 200 events in memory
     if (this.memoryStore.connector_events.length > 200) {
       this.memoryStore.connector_events = this.memoryStore.connector_events.slice(0, 200);
     }

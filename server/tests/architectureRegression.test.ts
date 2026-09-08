@@ -40,3 +40,23 @@ test('native collector supports bounded multi-post collection', () => {
   assert.match(collector, /window\.scrollBy/);
   assert.match(collector, /posts\.slice\(0,LIMIT\)/);
 });
+
+test('rate limiting trusts one production proxy hop and isolates route buckets', () => {
+  const server = read('server.ts');
+  assert.match(server, /app\.set\('trust proxy', APP_MODE === 'production' \? 1 : false\)/);
+  assert.match(server, /const bucket = `rl_\$\{\+\+rateLimiterSequence\}`/);
+  assert.match(server, /const key = `\$\{bucket\}:\$\{ip\}`/);
+  assert.doesNotMatch(server, /rateLimitMap\.get\(ip\)/);
+});
+
+test('source list exposes exact persisted post counts', () => {
+  const database = read('server/db/database.ts');
+  assert.match(database, /COUNT\(\*\)::int FROM posts p WHERE p\.source_id = s\.id/);
+  assert.match(database, /AS "recentPostsCount"/);
+});
+
+test('a successful empty initial device scan still updates source health', () => {
+  const radar = read('src/context/RadarContext.tsx');
+  assert.doesNotMatch(radar, /if \(posts\.length === 0\) return;/);
+  assert.match(radar, /apiIngestDevicePosts\(persistedSource\.id, posts, locale\)/);
+});

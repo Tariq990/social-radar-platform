@@ -171,7 +171,8 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const hydratedSources = dbSources.map(source => ({
         ...source,
         activeRulesCount: dbRules.filter(rule => rule.enabled && (rule.sourceIds.length === 0 || rule.sourceIds.includes(source.id))).length,
-        // This is a conservative lower bound after reload until a future source-stats query is added.
+        // Backend now returns the exact persisted post count. Keep alert-derived count only as a
+        // defensive lower bound for older backends during rolling deployments.
         recentPostsCount: Math.max(Number(source.recentPostsCount || 0), uniqueMatchedPosts.get(source.id)?.size || 0)
       }));
       setSources(hydratedSources);
@@ -270,7 +271,8 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             applyDeviceStatus(status);
             if (!DeviceSessionConnector.isPlatformConnected(status, persistedSource.platform)) return;
             const posts = await deviceConnector.fetchLatest(persistedSource, 10);
-            if (posts.length === 0) return;
+            // Empty is still a successful authenticated scan. Ingest it so the backend marks the
+            // source connected instead of leaving a valid new source stuck at needs_relogin.
             const ingest = await apiIngestDevicePosts(persistedSource.id, posts, locale);
             if (ingest.matchesCreated.length > 0) setMatches(previous => [...ingest.matchesCreated, ...previous]);
             setSources(previous => previous.map(source => source.id === persistedSource.id
