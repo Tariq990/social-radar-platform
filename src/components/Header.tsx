@@ -1,33 +1,31 @@
 import React, { useState } from 'react';
-import { 
-  Radar, 
-  Plus, 
-  Search, 
-  RotateCw, 
-  Sparkles, 
-  Globe, 
-  Moon, 
-  Sun, 
-  Bell, 
-  Sliders,
+import {
+  Radar,
+  Plus,
+  RotateCw,
+  Sparkles,
+  Globe,
+  Moon,
+  Sun,
   CheckCircle2,
   ShieldCheck,
-  Home
+  Home,
+  LogOut
 } from 'lucide-react';
 import { useRadar } from '../context/RadarContext';
 import { translations } from '../lib/i18n';
 import { BRAND } from '../config/brand';
+import { apiLogout } from '../services/api';
 
 export const Header: React.FC = () => {
-  const { 
-    locale, 
-    setLocale, 
-    theme, 
-    setTheme, 
-    openAddSource, 
-    scanAllSources, 
+  const {
+    locale,
+    setLocale,
+    theme,
+    setTheme,
+    openAddSource,
+    scanAllSources,
     isScanning,
-    resetToDemo,
     matches,
     openDigest,
     openPaywall,
@@ -37,13 +35,23 @@ export const Header: React.FC = () => {
   } = useRadar();
 
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [loggingOut, setLoggingOut] = useState(false);
   const t = translations[locale];
-  const unreadCount = matches.filter(m => !m.isRead).length;
 
   const handleScan = async () => {
     const res = await scanAllSources();
     setToastMessage(`${t.scanSuccess} (+${res.scanned} ${t.scannedLabel})`);
     setTimeout(() => setToastMessage(null), 3500);
+  };
+
+  const handleLogout = async () => {
+    if (loggingOut) return;
+    setLoggingOut(true);
+    try {
+      await apiLogout();
+    } finally {
+      window.location.replace('/');
+    }
   };
 
   const toggleLanguage = () => {
@@ -56,7 +64,6 @@ export const Header: React.FC = () => {
 
   return (
     <header className="sticky top-0 z-30 w-full border-b border-slate-800/80 bg-slate-950/90 backdrop-blur-md transition-colors">
-      {/* Toast Notification Banner */}
       {toastMessage && (
         <div className="bg-cyan-500/10 border-b border-cyan-500/20 px-4 py-2 text-center text-xs font-medium text-cyan-300 flex items-center justify-center gap-2">
           <CheckCircle2 className="w-3.5 h-3.5 text-cyan-400" />
@@ -65,7 +72,6 @@ export const Header: React.FC = () => {
       )}
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-3">
-        {/* Left: Mobile Brand & Tagline */}
         <div className="flex items-center gap-3 lg:hidden">
           <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-cyan-500 to-blue-600 flex items-center justify-center text-white shadow-sm shadow-cyan-500/20">
             <Radar className="w-5 h-5 text-white animate-pulse" />
@@ -83,7 +89,6 @@ export const Header: React.FC = () => {
           </div>
         </div>
 
-        {/* Desktop Title Context */}
         <div className="hidden lg:flex items-center gap-3">
           <div className="flex items-center gap-2">
             <span className="text-xs px-2.5 py-1 rounded-full bg-slate-900 border border-slate-800 text-slate-300 flex items-center gap-1.5">
@@ -96,9 +101,7 @@ export const Header: React.FC = () => {
           </div>
         </div>
 
-        {/* Right Actions */}
         <div className="flex items-center gap-2 sm:gap-3">
-          {/* Quick AI Digest Trigger */}
           <button
             id="btn-quick-digest"
             onClick={openDigest}
@@ -109,7 +112,6 @@ export const Header: React.FC = () => {
             <span>{locale === 'ar' ? 'ملخص 30ث' : '30s Digest'}</span>
           </button>
 
-          {/* Instant Scan Button */}
           <button
             id="btn-scan-now"
             onClick={handleScan}
@@ -121,16 +123,14 @@ export const Header: React.FC = () => {
             <span className="hidden sm:inline">{isScanning ? t.loading : t.seedActivity}</span>
           </button>
 
-          {/* Backend Status Pill */}
-          <div 
+          <div
             className="hidden xl:flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-semibold bg-slate-900 border border-slate-800 text-slate-300"
-            title="Express Backend + Gemini API Connected"
+            title="MR SCRAP backend status"
           >
             <span className={`w-1.5 h-1.5 rounded-full ${backendStatus === 'online' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
             <span>{backendStatus === 'online' ? (locale === 'ar' ? 'الخادم متصل' : 'Backend Live') : 'Connecting...'}</span>
           </div>
 
-          {/* Website Home Button */}
           <button
             id="btn-header-home"
             onClick={() => setCurrentScreen('landing')}
@@ -141,7 +141,6 @@ export const Header: React.FC = () => {
             <span className="hidden md:inline">{locale === 'ar' ? 'الموقع' : 'Site'}</span>
           </button>
 
-          {/* Language Switch (EN / AR) */}
           <button
             id="btn-lang-toggle"
             onClick={toggleLanguage}
@@ -152,32 +151,20 @@ export const Header: React.FC = () => {
             <span>{locale === 'en' ? 'عربي' : 'EN'}</span>
           </button>
 
-          {/* Theme Toggle */}
           <button
             id="btn-theme-toggle"
             onClick={toggleTheme}
             className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-800 transition-all active:scale-95 cursor-pointer shadow-xs"
-            title={
-              theme === 'dark' 
-                ? (locale === 'ar' ? 'التحويل إلى الوضع الفاتح (نهاري)' : 'Switch to Light Mode')
-                : (locale === 'ar' ? 'التحويل إلى الوضع الداكن (ليلي)' : 'Switch to Dark Mode')
-            }
+            title={theme === 'dark' ? (locale === 'ar' ? 'التحويل إلى الوضع الفاتح' : 'Switch to Light Mode') : (locale === 'ar' ? 'التحويل إلى الوضع الداكن' : 'Switch to Dark Mode')}
             aria-label={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
           >
             {theme === 'dark' ? (
-              <>
-                <Sun className="w-3.5 h-3.5 text-amber-400" />
-                <span className="hidden md:inline text-[11px] font-semibold">{locale === 'ar' ? 'فاتح' : 'Light'}</span>
-              </>
+              <><Sun className="w-3.5 h-3.5 text-amber-400" /><span className="hidden md:inline text-[11px] font-semibold">{locale === 'ar' ? 'فاتح' : 'Light'}</span></>
             ) : (
-              <>
-                <Moon className="w-3.5 h-3.5 text-cyan-400" />
-                <span className="hidden md:inline text-[11px] font-semibold">{locale === 'ar' ? 'داكن' : 'Dark'}</span>
-              </>
+              <><Moon className="w-3.5 h-3.5 text-cyan-400" /><span className="hidden md:inline text-[11px] font-semibold">{locale === 'ar' ? 'داكن' : 'Dark'}</span></>
             )}
           </button>
 
-          {/* Plan Chip */}
           <button
             id="btn-plan-badge"
             onClick={openPaywall}
@@ -187,7 +174,17 @@ export const Header: React.FC = () => {
             <span>{user.plan}</span>
           </button>
 
-          {/* Primary CTA: + Watch */}
+          <button
+            id="btn-logout"
+            onClick={handleLogout}
+            disabled={loggingOut}
+            className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-rose-300 border border-slate-800 transition-colors disabled:opacity-50"
+            title={locale === 'ar' ? 'تسجيل الخروج وإلغاء صلاحيات الجهاز' : 'Sign out and revoke device authorization'}
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span>{locale === 'ar' ? 'خروج' : 'Logout'}</span>
+          </button>
+
           <button
             id="btn-add-watch-header"
             onClick={() => openAddSource()}
