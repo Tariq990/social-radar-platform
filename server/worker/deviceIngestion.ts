@@ -1,6 +1,6 @@
-import { db, DbMatch } from '../db/database';
+import { db, DbMatch, DbPost, DbRule } from '../db/database';
 import { canonicalizeSocialUrl, computePostFingerprint } from './deduplication';
-import { evaluatePostAgainstRule } from '../ai/ruleEvaluator';
+import { evaluatePostAgainstRule, isLatestPostIntent } from '../ai/ruleEvaluator';
 import { notificationService } from '../notifications';
 
 export interface DeviceNormalizedPostInput {
@@ -62,7 +62,6 @@ function sanitizePublishedAt(value: unknown): string | undefined {
   if (typeof value !== 'string' || !value.trim()) return undefined;
   const millis = Date.parse(value);
   if (!Number.isFinite(millis)) return undefined;
-  // Reject clearly corrupt timestamps far in the future while allowing clock skew.
   if (millis > Date.now() + 24 * 60 * 60 * 1000) return undefined;
   return new Date(millis).toISOString();
 }
@@ -78,6 +77,65 @@ function isAllowedPostUrl(raw: string, platform: 'facebook' | 'instagram'): bool
     return host === 'facebook.com' || host.endsWith('.facebook.com') || host === 'fb.com' || host.endsWith('.fb.com') || host === 'fb.watch';
   } catch {
     return false;
+  }
+}
+
+async function evaluateAndPersistMatches(
+  post: DbPost,
+  rules: DbRule[],
+  source: any,
+  userId: string,
+  locale: 'en' | 'ar',
+  knownMatchKeys: Set<string>,
+  result: DeviceIngestionResult
+): Promise<void> {
+  for (const rule of rules) {
+    const matchKey = `${rule.id}:${post.id}`;
+    if (knownMatchKeys.has(matchKey)) continue;
+
+    try {
+      const evaluation = await evaluatePostAgainstRule(post, rule, locale);
+      if (!evaluation.matched) continue;
+
+      const candidateMatchId = `match_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const match = await db.createMatch({
+        id: candidateMatchId,
+        user_id: userId,
+        post_id: post.id,
+        rule_id: rule.id,
+        source_id: source.id,
+        confidence: evaluation.confidence,
+        category: evaluation.category,
+        reason: evaluation.reason,
+        extracted: evaluation.extracted,
+        feedback: 'unrated',
+        is_read: false,
+        is_saved: false
+      });
+
+      // Local storage returns the existing record on conflict. PostgreSQL normally cannot reach
+      // this path because knownMatchKeys is preloaded; keep the id guard as an extra race check.
+      if (match.id !== candidateMatchId) {
+        knownMatchKeys.add(matchKey);
+        continue;
+      }
+
+      knownMatchKeys.add(matchKey);
+      match.source_name = source.name;
+      match.source_avatar = source.avatar_url;
+      match.source_platform = source.platform;
+      match.rule_name = rule.name;
+      match.post = post;
+      result.matchesCreated.push(match);
+
+      await notificationService.dispatchMatchNotification(match);
+    } catch (error: any) {
+      result.evaluationErrors.push({
+        postId: post.id,
+        ruleId: rule.id,
+        error: error?.message || 'AI evaluation failed'
+      });
+    }
   }
 }
 
@@ -112,6 +170,10 @@ export async function ingestDevicePosts(
   const sourceRules = allRules.filter(rule =>
     rule.enabled && (!rule.source_ids || rule.source_ids.length === 0 || rule.source_ids.includes(source.id))
   );
+  const latestPostRules = sourceRules.filter(rule => isLatestPostIntent(rule.natural_language || ''));
+  const knownMatchKeys = new Set(
+    (await db.getMatches(userId)).map(match => `${match.rule_id}:${match.post_id}`)
+  );
 
   for (const raw of posts.slice(0, 50)) {
     const originalUrl = typeof raw.originalUrl === 'string' ? raw.originalUrl.trim() : '';
@@ -126,15 +188,15 @@ export async function ingestDevicePosts(
       ? raw.externalPostId.trim().slice(0, 512)
       : undefined;
     const contentFingerprint = computePostFingerprint(source.platform, externalId, canonicalUrl, text);
-    // Database fingerprint uniqueness is atomic; prefixing sourceId prevents a post monitored by
-    // two different users/sources from suppressing one another.
     const fingerprint = `${source.id}:${contentFingerprint}`.slice(0, 255);
+    const currentMetadata = {
+      ...sanitizeMetadata(raw.metadata),
+      ingestion: 'android_device_session'
+    };
 
-    if (await db.hasPostFingerprint(fingerprint)) {
-      result.duplicates++;
-      continue;
-    }
-
+    // createPost is the atomic dedupe boundary: on an existing fingerprint it returns the
+    // persisted post. That lets a newly-created "latest post" rule reconcile the current top
+    // post even when an older app version already stored it without creating a match.
     const candidatePostId = `post_${source.platform}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const savedPost = await db.createPost({
       id: candidatePostId,
@@ -148,59 +210,43 @@ export async function ingestDevicePosts(
       media: sanitizeMedia(raw.media),
       published_at: sanitizePublishedAt(raw.publishedAt),
       fingerprint,
-      metadata: {
-        ...sanitizeMetadata(raw.metadata),
-        ingestion: 'android_device_session'
-      }
+      metadata: currentMetadata
     });
 
-    // A concurrent worker can win the fingerprint insert after our preflight check.
-    if (savedPost.id !== candidatePostId) {
+    const isDuplicate = savedPost.id !== candidatePostId;
+    if (isDuplicate) {
       result.duplicates++;
+      if (latestPostRules.length > 0) {
+        const currentViewPost: DbPost = {
+          ...savedPost,
+          metadata: {
+            ...(savedPost.metadata || {}),
+            ...currentMetadata
+          }
+        };
+        await evaluateAndPersistMatches(
+          currentViewPost,
+          latestPostRules,
+          source,
+          userId,
+          locale,
+          knownMatchKeys,
+          result
+        );
+      }
       continue;
     }
 
     result.accepted++;
-
-    for (const rule of sourceRules) {
-      try {
-        const evaluation = await evaluatePostAgainstRule(savedPost, rule, locale);
-        if (!evaluation.matched) continue;
-
-        const candidateMatchId = `match_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        const match = await db.createMatch({
-          id: candidateMatchId,
-          user_id: userId,
-          post_id: savedPost.id,
-          rule_id: rule.id,
-          source_id: source.id,
-          confidence: evaluation.confidence,
-          category: evaluation.category,
-          reason: evaluation.reason,
-          extracted: evaluation.extracted,
-          feedback: 'unrated',
-          is_read: false,
-          is_saved: false
-        });
-
-        if (match.id !== candidateMatchId) continue;
-
-        match.source_name = source.name;
-        match.source_avatar = source.avatar_url;
-        match.source_platform = source.platform;
-        match.rule_name = rule.name;
-        match.post = savedPost;
-        result.matchesCreated.push(match);
-
-        await notificationService.dispatchMatchNotification(match);
-      } catch (error: any) {
-        result.evaluationErrors.push({
-          postId: savedPost.id,
-          ruleId: rule.id,
-          error: error?.message || 'AI evaluation failed'
-        });
-      }
-    }
+    await evaluateAndPersistMatches(
+      savedPost,
+      sourceRules,
+      source,
+      userId,
+      locale,
+      knownMatchKeys,
+      result
+    );
   }
 
   await db.updateSourceHealth(source.id, 'connected', true);
