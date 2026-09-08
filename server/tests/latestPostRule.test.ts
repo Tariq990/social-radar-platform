@@ -2,17 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { evaluatePostAgainstRule } from '../ai/ruleEvaluator';
 
-function post(feedIndex: number, pinned = false): any {
+function post(feedIndex: number, pinned = false, latestCandidate?: boolean): any {
   return {
-    id: `post-${feedIndex}`,
+    id: `post-${feedIndex}-${pinned ? 'p' : 'n'}`,
     source_id: 'source-1',
     platform: 'facebook',
     canonical_url: `https://www.facebook.com/example/posts/${feedIndex + 1}`,
     author_name: 'Example Page',
     text: 'A real newly collected Facebook post.',
     media: [],
-    fingerprint: `fp-${feedIndex}`,
-    metadata: { feedIndex, pinned }
+    fingerprint: `fp-${feedIndex}-${pinned ? 'p' : 'n'}`,
+    metadata: { feedIndex, pinned, ...(latestCandidate === undefined ? {} : { latestCandidate }) }
   };
 }
 
@@ -44,6 +44,17 @@ test('latest-post rule ignores older visible feed items', async () => {
 });
 
 test('latest-post rule ignores a pinned item even when it is visually first', async () => {
-  const result = await evaluatePostAgainstRule(post(0, true), rule('نبهني اخر منشور نزل'), 'ar');
+  const result = await evaluatePostAgainstRule(post(0, true, false), rule('نبهني اخر منشور نزل'), 'ar');
+  assert.equal(result.matched, false);
+});
+
+test('latest-post rule accepts the first non-pinned item below a pinned post', async () => {
+  const result = await evaluatePostAgainstRule(post(1, false, true), rule('نبهني آخر بوست نزل'), 'ar');
+  assert.equal(result.matched, true);
+  assert.equal(result.confidence, 1);
+});
+
+test('explicit latestCandidate=false wins over feedIndex fallback', async () => {
+  const result = await evaluatePostAgainstRule(post(0, false, false), rule('Notify me about the latest post'), 'en');
   assert.equal(result.matched, false);
 });

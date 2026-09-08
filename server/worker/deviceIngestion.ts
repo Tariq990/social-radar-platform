@@ -80,6 +80,27 @@ function isAllowedPostUrl(raw: string, platform: 'facebook' | 'instagram'): bool
   }
 }
 
+function latestCandidateInputIndex(posts: DeviceNormalizedPostInput[], platform: 'facebook' | 'instagram'): number {
+  let winner = -1;
+  let winnerRank = Number.POSITIVE_INFINITY;
+  for (let index = 0; index < Math.min(posts.length, 50); index++) {
+    const raw = posts[index];
+    const originalUrl = typeof raw?.originalUrl === 'string' ? raw.originalUrl.trim() : '';
+    if (!originalUrl || !isAllowedPostUrl(originalUrl, platform)) continue;
+    const metadata = raw?.metadata && typeof raw.metadata === 'object' && !Array.isArray(raw.metadata)
+      ? raw.metadata as Record<string, unknown>
+      : {};
+    if (metadata.pinned === true) continue;
+    const feedIndex = Number(metadata.feedIndex);
+    const rank = Number.isFinite(feedIndex) && feedIndex >= 0 ? feedIndex : 10_000 + index;
+    if (rank < winnerRank) {
+      winner = index;
+      winnerRank = rank;
+    }
+  }
+  return winner;
+}
+
 async function evaluateAndPersistMatches(
   post: DbPost,
   rules: DbRule[],
@@ -113,8 +134,6 @@ async function evaluateAndPersistMatches(
         is_saved: false
       });
 
-      // Local storage returns the existing record on conflict. PostgreSQL normally cannot reach
-      // this path because knownMatchKeys is preloaded; keep the id guard as an extra race check.
       if (match.id !== candidateMatchId) {
         knownMatchKeys.add(matchKey);
         continue;
@@ -174,8 +193,11 @@ export async function ingestDevicePosts(
   const knownMatchKeys = new Set(
     (await db.getMatches(userId)).map(match => `${match.rule_id}:${match.post_id}`)
   );
+  const incoming = posts.slice(0, 50);
+  const latestCandidateIndex = latestCandidateInputIndex(incoming, source.platform);
+  const isInitialBaseline = !source.last_checked_at;
 
-  for (const raw of posts.slice(0, 50)) {
+  for (const [rawIndex, raw] of incoming.entries()) {
     const originalUrl = typeof raw.originalUrl === 'string' ? raw.originalUrl.trim() : '';
     if (!originalUrl || !isAllowedPostUrl(originalUrl, source.platform)) {
       result.rejected++;
@@ -191,12 +213,10 @@ export async function ingestDevicePosts(
     const fingerprint = `${source.id}:${contentFingerprint}`.slice(0, 255);
     const currentMetadata = {
       ...sanitizeMetadata(raw.metadata),
+      latestCandidate: rawIndex === latestCandidateIndex,
       ingestion: 'android_device_session'
     };
 
-    // createPost is the atomic dedupe boundary: on an existing fingerprint it returns the
-    // persisted post. That lets a newly-created "latest post" rule reconcile the current top
-    // post even when an older app version already stored it without creating a match.
     const candidatePostId = `post_${source.platform}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const savedPost = await db.createPost({
       id: candidatePostId,
@@ -238,9 +258,13 @@ export async function ingestDevicePosts(
     }
 
     result.accepted++;
+    // The first authenticated snapshot establishes a baseline. It must not flood the user with
+    // historical semantic matches. "Latest post" is the deliberate exception: users expect that
+    // rule to surface the current newest non-pinned post immediately. Historical investigation is
+    // handled separately by Smart Grab, which never creates watch alerts.
     await evaluateAndPersistMatches(
       savedPost,
-      sourceRules,
+      isInitialBaseline ? latestPostRules : sourceRules,
       source,
       userId,
       locale,
@@ -254,7 +278,7 @@ export async function ingestDevicePosts(
     source.id,
     'device_ingest',
     'success',
-    `Accepted ${result.accepted} new posts; ignored ${result.duplicates} duplicates; rejected ${result.rejected} invalid records.`
+    `Accepted ${result.accepted} new posts; ignored ${result.duplicates} duplicates; rejected ${result.rejected} invalid records.${isInitialBaseline ? ' Initial snapshot was stored as a baseline.' : ''}`
   );
 
   return result;

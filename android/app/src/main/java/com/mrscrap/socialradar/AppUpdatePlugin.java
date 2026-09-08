@@ -111,9 +111,10 @@ public class AppUpdatePlugin extends Plugin {
     ) {
         HttpURLConnection connection = null;
         File partial = null;
+        File target = null;
         try {
-            URL url = new URL(downloadUrl);
-            connection = (HttpURLConnection) url.openConnection();
+            URL requestedUrl = new URL(downloadUrl);
+            connection = (HttpURLConnection) requestedUrl.openConnection();
             connection.setConnectTimeout(15_000);
             connection.setReadTimeout(60_000);
             connection.setInstanceFollowRedirects(true);
@@ -128,6 +129,14 @@ public class AppUpdatePlugin extends Plugin {
             if (finalUrl == null || !"https".equalsIgnoreCase(finalUrl.getProtocol())) {
                 throw new IllegalStateException("Update download redirected to a non-HTTPS URL");
             }
+            if (!sameHttpsOrigin(requestedUrl, finalUrl)) {
+                throw new SecurityException("Update download redirected away from the MR SCRAP backend origin");
+            }
+
+            String contentType = connection.getContentType();
+            if (contentType != null && contentType.toLowerCase(Locale.US).startsWith("text/html")) {
+                throw new SecurityException("Update endpoint returned HTML instead of an APK");
+            }
 
             long announcedLength = connection.getContentLengthLong();
             if (announcedLength > MAX_APK_BYTES) {
@@ -140,7 +149,7 @@ public class AppUpdatePlugin extends Plugin {
             }
 
             partial = new File(updateDir, "mr-scrap-" + targetVersionCode + ".apk.part");
-            File target = new File(updateDir, "mr-scrap-" + targetVersionCode + ".apk");
+            target = new File(updateDir, "mr-scrap-" + targetVersionCode + ".apk");
             if (partial.exists()) partial.delete();
             if (target.exists()) target.delete();
 
@@ -197,11 +206,19 @@ public class AppUpdatePlugin extends Plugin {
             });
         } catch (Exception error) {
             if (partial != null && partial.exists()) partial.delete();
+            if (target != null && target.exists()) target.delete();
             String message = error.getMessage() == null ? "Update installation failed" : error.getMessage();
             getActivity().runOnUiThread(() -> call.reject(message));
         } finally {
             if (connection != null) connection.disconnect();
         }
+    }
+
+    private static boolean sameHttpsOrigin(URL expected, URL actual) {
+        if (!"https".equalsIgnoreCase(expected.getProtocol()) || !"https".equalsIgnoreCase(actual.getProtocol())) return false;
+        int expectedPort = expected.getPort() == -1 ? expected.getDefaultPort() : expected.getPort();
+        int actualPort = actual.getPort() == -1 ? actual.getDefaultPort() : actual.getPort();
+        return expected.getHost().equalsIgnoreCase(actual.getHost()) && expectedPort == actualPort;
     }
 
     private static String toHex(byte[] bytes) {
