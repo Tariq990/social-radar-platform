@@ -1,10 +1,10 @@
 import { AIConnectionResult, AIProvider, AIJsonRequest, AIConfig } from './types';
 import { parseJsonText, postJson, stripTrailingSlash } from './http';
 
-function buildGeminiUrl(baseUrl: string, model: string, apiKey: string): string {
+function buildGeminiUrl(baseUrl: string, model: string): string {
   const base = stripTrailingSlash(baseUrl);
   const encodedModel = encodeURIComponent(model);
-  return `${base}/models/${encodedModel}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  return `${base}/models/${encodedModel}:generateContent`;
 }
 
 export class GeminiNativeProvider implements AIProvider {
@@ -15,7 +15,12 @@ export class GeminiNativeProvider implements AIProvider {
   }
 
   async generateJson<T>(request: AIJsonRequest): Promise<T> {
-    const response = await postJson(buildGeminiUrl(this.config.baseUrl, this.config.model, this.config.apiKey), {
+    const response = await postJson(buildGeminiUrl(this.config.baseUrl, this.config.model), {
+      headers: {
+        // Keep the operator secret in a header rather than query parameters so it is not
+        // copied into URLs, access logs, traces, or exception messages.
+        'x-goog-api-key': this.config.apiKey
+      },
       body: {
         systemInstruction: {
           parts: [{ text: request.system }]
