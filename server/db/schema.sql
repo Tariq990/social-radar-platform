@@ -4,14 +4,30 @@
 -- 1. Users Table
 CREATE TABLE IF NOT EXISTS users (
   id VARCHAR(255) PRIMARY KEY,
-  email VARCHAR(255),
+  email VARCHAR(320),
   name VARCHAR(255),
-  tier VARCHAR(50) DEFAULT 'pro',
+  tier VARCHAR(50) DEFAULT 'free',
+  password_hash TEXT,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 2. Devices Table
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+ALTER TABLE users ALTER COLUMN email TYPE VARCHAR(320);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email_ci ON users(LOWER(email)) WHERE email IS NOT NULL;
+
+-- 2. Application Sessions
+CREATE TABLE IF NOT EXISTS app_sessions (
+  id VARCHAR(255) PRIMARY KEY,
+  user_id VARCHAR(255) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash VARCHAR(128) NOT NULL UNIQUE,
+  expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  last_seen_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  revoked_at TIMESTAMP WITH TIME ZONE
+);
+
+-- 3. Devices Table
 CREATE TABLE IF NOT EXISTS devices (
   id VARCHAR(255) PRIMARY KEY,
   user_id VARCHAR(255) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -21,7 +37,7 @@ CREATE TABLE IF NOT EXISTS devices (
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 3. Sources Table (Monitored Social Accounts / Pages)
+-- 4. Sources Table (Monitored Social Accounts / Pages)
 CREATE TABLE IF NOT EXISTS sources (
   id VARCHAR(255) PRIMARY KEY,
   user_id VARCHAR(255) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -46,7 +62,7 @@ CREATE TABLE IF NOT EXISTS sources (
   CONSTRAINT uq_user_source UNIQUE(user_id, platform, external_id)
 );
 
--- 4. Rules Table (Natural Language & Filter Rules)
+-- 5. Rules Table (Natural Language & Filter Rules)
 CREATE TABLE IF NOT EXISTS rules (
   id VARCHAR(255) PRIMARY KEY,
   user_id VARCHAR(255) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -62,7 +78,7 @@ CREATE TABLE IF NOT EXISTS rules (
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 5. Rule Sources Mapping (Many-to-Many)
+-- 6. Rule Sources Mapping (Many-to-Many)
 CREATE TABLE IF NOT EXISTS rule_sources (
   id VARCHAR(255) PRIMARY KEY,
   rule_id VARCHAR(255) NOT NULL REFERENCES rules(id) ON DELETE CASCADE,
@@ -71,7 +87,7 @@ CREATE TABLE IF NOT EXISTS rule_sources (
   CONSTRAINT uq_rule_source UNIQUE(rule_id, source_id)
 );
 
--- 6. Posts Table (Normalized & Deduplicated Feed Content)
+-- 7. Posts Table (Normalized & Deduplicated Feed Content)
 -- fingerprint values are source-scoped in application code (`sourceId:contentFingerprint`) so
 -- this single-column UNIQUE constraint remains atomic and safe across multiple users/sources.
 CREATE TABLE IF NOT EXISTS posts (
@@ -100,10 +116,9 @@ UPDATE posts
 SET fingerprint = LEFT(source_id || ':' || fingerprint, 255)
 WHERE fingerprint NOT LIKE (source_id || ':%');
 
--- Restore the expected unique index if an intermediate development migration removed it.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_posts_fingerprint ON posts(fingerprint);
 
--- 7. Matches Table (AI / Rule Matches)
+-- 8. Matches Table (AI / Rule Matches)
 CREATE TABLE IF NOT EXISTS matches (
   id VARCHAR(255) PRIMARY KEY,
   user_id VARCHAR(255) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -121,7 +136,7 @@ CREATE TABLE IF NOT EXISTS matches (
   CONSTRAINT uq_match_rule_post UNIQUE(rule_id, post_id)
 );
 
--- 8. Notifications Table (Prepared and Sent Notifications)
+-- 9. Notifications Table (Prepared and Sent Notifications)
 CREATE TABLE IF NOT EXISTS notifications (
   id VARCHAR(255) PRIMARY KEY,
   user_id VARCHAR(255) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -134,7 +149,7 @@ CREATE TABLE IF NOT EXISTS notifications (
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 9. Connector Events Table (Audit / Health Logging)
+-- 10. Connector Events Table (Audit / Health Logging)
 CREATE TABLE IF NOT EXISTS connector_events (
   id VARCHAR(255) PRIMARY KEY,
   source_id VARCHAR(255) NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
@@ -145,9 +160,11 @@ CREATE TABLE IF NOT EXISTS connector_events (
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 10. Performance, integrity & Monitoring Indexes
+-- 11. Performance, integrity & Monitoring Indexes
 CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_token_hash ON devices(device_token);
 CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id);
+CREATE INDEX IF NOT EXISTS idx_app_sessions_user ON app_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_app_sessions_expires ON app_sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_sources_user ON sources(user_id);
 CREATE INDEX IF NOT EXISTS idx_sources_active ON sources(is_paused, connector_status);
 CREATE INDEX IF NOT EXISTS idx_rules_user ON rules(user_id);
