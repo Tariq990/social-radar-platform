@@ -14,6 +14,11 @@ const SUPPORTED_FORMATS: AIFormat[] = ['openai_chat', 'openai_responses', 'gemin
 let cachedSignature = '';
 let cachedProvider: AIProvider | null = null;
 
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '10.0.2.2';
+}
+
 export function readAIConfig(): AIConfig {
   const baseUrl = (process.env.AI_BASE_URL || '').trim();
   const apiKey = (process.env.AI_API_KEY || '').trim();
@@ -46,6 +51,11 @@ export function readAIConfig(): AIConfig {
 
   if (!['http:', 'https:'].includes(parsed.protocol)) {
     throw new AIConfigurationError('AI_BASE_URL must use http or https');
+  }
+
+  const appMode = (process.env.APP_MODE || 'production').trim().toLowerCase();
+  if (appMode === 'production' && parsed.protocol !== 'https:' && !isLoopbackHost(parsed.hostname)) {
+    throw new AIConfigurationError('AI_BASE_URL must use HTTPS in production so AI_API_KEY is never sent over plaintext HTTP');
   }
 
   return {
