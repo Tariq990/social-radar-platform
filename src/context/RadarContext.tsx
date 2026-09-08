@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { Source, WatchRule, AlertMatch, Collection, RadarDigest, UserProfile, NormalizedPost } from '../types';
+import { Source, WatchRule, AlertMatch, Collection, RadarDigest, UserProfile } from '../types';
 import { 
   INITIAL_USER, 
   INITIAL_SOURCES, 
@@ -8,10 +8,25 @@ import {
   INITIAL_COLLECTIONS, 
   INITIAL_DIGEST 
 } from '../data/seedData';
-import { defaultConnectorManager } from '../connectors/connectorManager';
 import { DeviceSessionConnector } from '../connectors/deviceSessionConnector';
 import { Locale } from '../lib/i18n';
-import { apiCheckHealth, apiScanSources, apiGenerateDigest, normalizeAlertMatch } from '../services/api';
+import { 
+  apiCheckHealth, 
+  apiGetConfig,
+  apiFetchSources,
+  apiCreateSource,
+  apiDeleteSource,
+  apiToggleSourcePause,
+  apiFetchRules,
+  apiCreateRule,
+  apiDeleteRule,
+  apiToggleRule,
+  apiFetchAlerts,
+  apiUpdateAlert,
+  apiScanSources, 
+  apiGenerateDigest, 
+  normalizeAlertMatch 
+} from '../services/api';
 
 interface RadarContextType {
   user: UserProfile;
@@ -24,7 +39,11 @@ interface RadarContextType {
   theme: 'dark' | 'light';
   isScanning: boolean;
   backendStatus: 'online' | 'offline' | 'checking';
+  isPostgres: boolean;
+  apifyConfigured: boolean;
   geminiConfigured: boolean;
+  isDemoMode: boolean;
+  toggleDemoMode: () => void;
   selectedAlert: AlertMatch | null;
   selectedAlertDetail: AlertMatch | null;
   selectedSourceId: string | null;
@@ -47,15 +66,15 @@ interface RadarContextType {
   openDigest: () => void;
   closeDigest: () => void;
   addSourceWithRule: (source: Omit<Source, 'id' | 'userId' | 'activeRulesCount' | 'lastCheckedAt' | 'isPaused'>, ruleNL: string, ruleName?: string) => Promise<void>;
-  toggleSourcePause: (sourceId: string) => void;
-  deleteSource: (sourceId: string) => void;
-  addRule: (rule: Omit<WatchRule, 'id' | 'userId' | 'createdAt'>) => void;
-  toggleRule: (ruleId: string) => void;
-  deleteRule: (ruleId: string) => void;
+  toggleSourcePause: (sourceId: string) => Promise<void>;
+  deleteSource: (sourceId: string) => Promise<void>;
+  addRule: (rule: Omit<WatchRule, 'id' | 'userId' | 'createdAt'>) => Promise<void>;
+  toggleRule: (ruleId: string) => Promise<void>;
+  deleteRule: (ruleId: string) => Promise<void>;
   updateRule: (rule: WatchRule) => void;
-  rateMatchFeedback: (matchId: string, feedback: 'relevant' | 'not_relevant') => void;
-  toggleSaveMatch: (matchId: string) => void;
-  markMatchRead: (matchId: string) => void;
+  rateMatchFeedback: (matchId: string, feedback: 'relevant' | 'not_relevant') => Promise<void>;
+  toggleSaveMatch: (matchId: string) => Promise<void>;
+  markMatchRead: (matchId: string) => Promise<void>;
   scanAllSources: () => Promise<{ scanned: number; matched: number }>;
   resetToDemo: () => void;
   connectFacebookSession: (accountName: string) => void;
@@ -65,12 +84,9 @@ interface RadarContextType {
 const RadarContext = createContext<RadarContextType | undefined>(undefined);
 
 const STORAGE_KEYS = {
-  SOURCES: 'mrscrap_sources_v1',
-  RULES: 'mrscrap_rules_v1',
-  MATCHES: 'mrscrap_matches_v1',
-  USER: 'mrscrap_user_v1',
-  LOCALE: 'mrscrap_locale_v1',
-  THEME: 'mrscrap_theme_v1'
+  LOCALE: 'mrscrap_locale_v2',
+  THEME: 'mrscrap_theme_v2',
+  DEMO_MODE: 'mrscrap_demo_mode_v2'
 };
 
 export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -82,65 +98,25 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return (localStorage.getItem(STORAGE_KEYS.THEME) as 'dark' | 'light') || 'dark';
   });
 
-  const [user, setUser] = useState<UserProfile>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS.USER);
-      if (saved) return JSON.parse(saved);
-    } catch (e) {
-      console.warn('Error loading user from localStorage', e);
-    }
-    return INITIAL_USER;
+  const [isDemoMode, setIsDemoMode] = useState<boolean>(() => {
+    return localStorage.getItem(STORAGE_KEYS.DEMO_MODE) === 'true';
   });
 
-  const [sources, setSources] = useState<Source[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS.SOURCES);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      }
-    } catch (e) {
-      console.warn('Error loading sources from localStorage', e);
-    }
-    return INITIAL_SOURCES;
-  });
-
-  const [rules, setRules] = useState<WatchRule[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS.RULES);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      }
-    } catch (e) {
-      console.warn('Error loading rules from localStorage', e);
-    }
-    return INITIAL_RULES;
-  });
-
-  const [matches, setMatches] = useState<AlertMatch[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS.MATCHES);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed.map(normalizeAlertMatch);
-        }
-      }
-    } catch (e) {
-      console.warn('Error loading matches from localStorage', e);
-    }
-    return INITIAL_MATCHES;
-  });
-
+  const [user, setUser] = useState<UserProfile>(INITIAL_USER);
+  const [sources, setSources] = useState<Source[]>([]);
+  const [rules, setRules] = useState<WatchRule[]>([]);
+  const [matches, setMatches] = useState<AlertMatch[]>([]);
   const [collections] = useState<Collection[]>(INITIAL_COLLECTIONS);
   const [digest, setDigest] = useState<RadarDigest>(INITIAL_DIGEST);
 
   const [isScanning, setIsScanning] = useState(false);
   const [backendStatus, setBackendStatus] = useState<'online' | 'offline' | 'checking'>('checking');
+  const [isPostgres, setIsPostgres] = useState(false);
+  const [apifyConfigured, setApifyConfigured] = useState(false);
   const [geminiConfigured, setGeminiConfigured] = useState(false);
+
   const [selectedAlert, setSelectedAlert] = useState<AlertMatch | null>(null);
-  const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
+  const [selectedSourceId] = useState<string | null>(null);
   const [isAddSourceOpen, setIsAddSourceOpen] = useState(false);
   const [isPaywallOpen, setIsPaywallOpen] = useState(false);
   const [isDigestOpen, setIsDigestOpen] = useState(false);
@@ -152,28 +128,57 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         return scr as any;
       }
     }
-    // Default to 'landing' website page before entering the dashboard
     return 'landing';
   });
   const [sharedIncomingUrl, setSharedIncomingUrl] = useState<string | null>(null);
 
-  // Check backend health on mount
+  // Sync data from the persistent backend database
+  const loadDatabaseState = async () => {
+    try {
+      const [health, config, dbSources, dbRules, dbAlerts] = await Promise.all([
+        apiCheckHealth(),
+        apiGetConfig(),
+        apiFetchSources(),
+        apiFetchRules(),
+        apiFetchAlerts()
+      ]);
+
+      setBackendStatus(health.status === 'ok' ? 'online' : 'offline');
+      setIsPostgres(Boolean(config.isPostgres));
+      setApifyConfigured(Boolean(config.apifyConfigured));
+      setGeminiConfigured(Boolean(config.geminiConfigured));
+
+      if (dbSources.length > 0 || dbRules.length > 0 || dbAlerts.length > 0) {
+        setSources(dbSources);
+        setRules(dbRules);
+        setMatches(dbAlerts);
+        setUser(prev => ({
+          ...prev,
+          watchedSourcesCount: dbSources.length,
+          activeRulesCount: dbRules.filter(r => r.enabled).length
+        }));
+      } else {
+        // If DB is freshly created and user wants demo mode, show initial demo setup
+        if (isDemoMode) {
+          setSources(INITIAL_SOURCES);
+          setRules(INITIAL_RULES);
+          setMatches(INITIAL_MATCHES);
+        }
+      }
+    } catch (err) {
+      console.warn('[RadarProvider] Could not load state from backend database, offline:', err);
+      setBackendStatus('offline');
+      if (isDemoMode) {
+        setSources(INITIAL_SOURCES);
+        setRules(INITIAL_RULES);
+        setMatches(INITIAL_MATCHES);
+      }
+    }
+  };
+
   useEffect(() => {
-    let isMounted = true;
-    apiCheckHealth()
-      .then(res => {
-        if (isMounted) {
-          setBackendStatus(res.status === 'ok' ? 'online' : 'offline');
-          setGeminiConfigured(Boolean(res.geminiConfigured));
-        }
-      })
-      .catch(() => {
-        if (isMounted) {
-          setBackendStatus('offline');
-        }
-      });
-    return () => { isMounted = false; };
-  }, []);
+    loadDatabaseState();
+  }, [isDemoMode]);
 
   // Sync RTL and document attributes on locale/theme change
   useEffect(() => {
@@ -198,22 +203,11 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     localStorage.setItem(STORAGE_KEYS.THEME, theme);
   }, [theme]);
 
-  // Persist state changes
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.SOURCES, JSON.stringify(sources));
-  }, [sources]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.RULES, JSON.stringify(rules));
-  }, [rules]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.MATCHES, JSON.stringify(matches));
-  }, [matches]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(user));
-  }, [user]);
+  const toggleDemoMode = () => {
+    const next = !isDemoMode;
+    setIsDemoMode(next);
+    localStorage.setItem(STORAGE_KEYS.DEMO_MODE, String(next));
+  };
 
   // Android Share Target / URL parameters detection
   useEffect(() => {
@@ -222,7 +216,6 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     if (sharedUrl && (sharedUrl.includes('http') || sharedUrl.includes('facebook') || sharedUrl.includes('instagram'))) {
       setSharedIncomingUrl(sharedUrl);
       setIsAddSourceOpen(true);
-      // Clean query params so refresh doesn't keep reopening
       window.history.replaceState({}, document.title, window.location.pathname);
     }
   }, []);
@@ -263,100 +256,59 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     ruleNL: string,
     ruleName?: string
   ) => {
-    const newSourceId = `src_${Date.now()}`;
-    const newSource: Source = {
-      ...sourceData,
-      id: newSourceId,
-      userId: user.id,
-      activeRulesCount: 1,
-      lastCheckedAt: 'Just now',
-      isPaused: false,
-      recentPostsCount: 8
-    };
-
-    const newRuleId = `rule_${Date.now()}`;
-    const newRule: WatchRule = {
-      id: newRuleId,
-      userId: user.id,
-      name: ruleName || `${newSource.displayName} Watch`,
-      naturalLanguage: ruleNL,
-      sourceIds: [newSourceId],
-      collectionId: newSource.collectionId,
-      minConfidence: 0.82,
-      alertMode: 'instant',
-      enabled: true,
-      createdAt: new Date().toISOString()
-    };
-
-    setSources(prev => [newSource, ...prev]);
-    setRules(prev => [newRule, ...prev]);
-    setUser(prev => ({
-      ...prev,
-      watchedSourcesCount: prev.watchedSourcesCount + 1,
-      activeRulesCount: prev.activeRulesCount + 1
-    }));
-
-    // Trigger instant evaluation on any sample posts from connector
     try {
-      const response = await fetch('/api/ai/preview-match', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ruleNaturalLanguage: ruleNL,
-          sourceName: newSource.displayName
-        })
+      // Persist source to backend database
+      const persistedSource = await apiCreateSource({
+        platform: sourceData.platform,
+        externalId: sourceData.externalId,
+        url: sourceData.url,
+        name: sourceData.displayName,
+        handle: sourceData.handle,
+        avatarUrl: sourceData.avatarUrl,
+        bio: sourceData.bio,
+        visibilityType: sourceData.visibilityType,
+        connectorType: sourceData.connectorType
       });
-      if (response.ok) {
-        const preview = await response.json();
-        const simulatedMatch: AlertMatch = {
-          id: `match_${Date.now()}`,
-          userId: user.id,
-          postId: `post_${Date.now()}`,
-          ruleId: newRuleId,
-          ruleName: newRule.name,
-          sourceId: newSourceId,
-          sourceName: newSource.displayName,
-          sourceAvatar: newSource.avatarUrl,
-          sourcePlatform: newSource.platform,
-          post: {
-            id: `post_${Date.now()}`,
-            sourceId: newSourceId,
-            platform: newSource.platform,
-            originalUrl: newSource.url,
-            authorName: newSource.displayName,
-            authorAvatar: newSource.avatarUrl,
-            text: preview.excerpt || 'New verified matching post from source.',
-            media: [
-              {
-                type: 'image',
-                url: 'https://images.unsplash.com/photo-1555353540-64580b51c258?w=800&auto=format&fit=crop&q=80'
-              }
-            ],
-            publishedAt: 'Just now',
-            detectedAt: 'Just now',
-            fingerprint: `fp_${Date.now()}`,
-            metadata: { simulation: true }
-          },
-          confidence: 0.93,
-          category: preview.category || 'Target Match',
-          reason: preview.whyMatched || `Matched rule: "${ruleNL}"`,
-          feedback: 'unrated',
-          isRead: false,
-          isSaved: false,
-          createdAt: 'Just now'
-        };
-        setMatches(prev => [simulatedMatch, ...prev]);
-      }
-    } catch {
-      // Ignored
+
+      // Persist rule to backend database
+      const persistedRule = await apiCreateRule({
+        name: ruleName || `${persistedSource.displayName} Watch`,
+        naturalLanguage: ruleNL,
+        minConfidence: 0.82,
+        alertMode: 'instant',
+        collectionId: sourceData.collectionId
+      }, [persistedSource.id]);
+
+      setSources(prev => [persistedSource, ...prev.filter(s => s.id !== persistedSource.id)]);
+      setRules(prev => [persistedRule, ...prev.filter(r => r.id !== persistedRule.id)]);
+      setUser(prev => ({
+        ...prev,
+        watchedSourcesCount: prev.watchedSourcesCount + 1,
+        activeRulesCount: prev.activeRulesCount + 1
+      }));
+
+      // Trigger instant scan in the background to fetch first batch of posts
+      apiScanSources(isDemoMode).then(scanRes => {
+        if (scanRes.matches && scanRes.matches.length > 0) {
+          setMatches(prev => [...scanRes.matches, ...prev]);
+        }
+      }).catch(() => {});
+    } catch (err: any) {
+      console.error('[addSourceWithRule] Error saving to database:', err);
+      throw err;
     }
   };
 
-  const toggleSourcePause = (sourceId: string) => {
+  const toggleSourcePause = async (sourceId: string) => {
     setSources(prev => prev.map(s => s.id === sourceId ? { ...s, isPaused: !s.isPaused } : s));
+    try {
+      await apiToggleSourcePause(sourceId);
+    } catch (err) {
+      console.warn('Failed to toggle source pause on server', err);
+    }
   };
 
-  const deleteSource = (sourceId: string) => {
+  const deleteSource = async (sourceId: string) => {
     setSources(prev => prev.filter(s => s.id !== sourceId));
     setRules(prev => prev.filter(r => !r.sourceIds.includes(sourceId)));
     setMatches(prev => prev.filter(m => m.sourceId !== sourceId));
@@ -364,48 +316,84 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       ...prev,
       watchedSourcesCount: Math.max(0, prev.watchedSourcesCount - 1)
     }));
+    try {
+      await apiDeleteSource(sourceId);
+    } catch (err) {
+      console.warn('Failed to delete source on server', err);
+    }
   };
 
-  const addRule = (ruleData: Omit<WatchRule, 'id' | 'userId' | 'createdAt'>) => {
-    const newRule: WatchRule = {
-      ...ruleData,
-      id: `rule_${Date.now()}`,
-      userId: user.id,
-      createdAt: new Date().toISOString()
-    };
-    setRules(prev => [newRule, ...prev]);
-    setUser(prev => ({ ...prev, activeRulesCount: prev.activeRulesCount + 1 }));
+  const addRule = async (ruleData: Omit<WatchRule, 'id' | 'userId' | 'createdAt'>) => {
+    try {
+      const persisted = await apiCreateRule(ruleData, ruleData.sourceIds || []);
+      setRules(prev => [persisted, ...prev]);
+      setUser(prev => ({ ...prev, activeRulesCount: prev.activeRulesCount + 1 }));
+    } catch (err) {
+      console.error('Failed to create rule on server', err);
+    }
   };
 
-  const toggleRule = (ruleId: string) => {
+  const toggleRule = async (ruleId: string) => {
     setRules(prev => prev.map(r => r.id === ruleId ? { ...r, enabled: !r.enabled } : r));
+    try {
+      await apiToggleRule(ruleId);
+    } catch (err) {
+      console.warn('Failed to toggle rule on server', err);
+    }
   };
 
-  const deleteRule = (ruleId: string) => {
+  const deleteRule = async (ruleId: string) => {
     setRules(prev => prev.filter(r => r.id !== ruleId));
     setUser(prev => ({ ...prev, activeRulesCount: Math.max(0, prev.activeRulesCount - 1) }));
+    try {
+      await apiDeleteRule(ruleId);
+    } catch (err) {
+      console.warn('Failed to delete rule on server', err);
+    }
   };
 
   const updateRule = (updated: WatchRule) => {
     setRules(prev => prev.map(r => r.id === updated.id ? updated : r));
   };
 
-  const rateMatchFeedback = (matchId: string, feedback: 'relevant' | 'not_relevant') => {
+  const rateMatchFeedback = async (matchId: string, feedback: 'relevant' | 'not_relevant') => {
     setMatches(prev => prev.map(m => m.id === matchId ? { ...m, feedback } : m));
     if (selectedAlert && selectedAlert.id === matchId) {
       setSelectedAlert(prev => prev ? { ...prev, feedback } : null);
     }
-  };
-
-  const toggleSaveMatch = (matchId: string) => {
-    setMatches(prev => prev.map(m => m.id === matchId ? { ...m, isSaved: !m.isSaved } : m));
-    if (selectedAlert && selectedAlert.id === matchId) {
-      setSelectedAlert(prev => prev ? { ...prev, isSaved: !prev.isSaved } : null);
+    try {
+      await apiUpdateAlert(matchId, { feedback });
+    } catch (err) {
+      console.warn('Failed to update alert feedback on server', err);
     }
   };
 
-  const markMatchRead = (matchId: string) => {
+  const toggleSaveMatch = async (matchId: string) => {
+    let nextSaved = false;
+    setMatches(prev => prev.map(m => {
+      if (m.id === matchId) {
+        nextSaved = !m.isSaved;
+        return { ...m, isSaved: nextSaved };
+      }
+      return m;
+    }));
+    if (selectedAlert && selectedAlert.id === matchId) {
+      setSelectedAlert(prev => prev ? { ...prev, isSaved: !prev.isSaved } : null);
+    }
+    try {
+      await apiUpdateAlert(matchId, { isSaved: nextSaved });
+    } catch (err) {
+      console.warn('Failed to update save status on server', err);
+    }
+  };
+
+  const markMatchRead = async (matchId: string) => {
     setMatches(prev => prev.map(m => m.id === matchId ? { ...m, isRead: true } : m));
+    try {
+      await apiUpdateAlert(matchId, { isRead: true });
+    } catch (err) {
+      console.warn('Failed to mark alert as read on server', err);
+    }
   };
 
   const scanAllSources = async (): Promise<{ scanned: number; matched: number }> => {
@@ -414,27 +402,15 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     let newMatchesCount = 0;
 
     try {
-      // First attempt backend scan via Express + Gemini API
-      try {
-        const scanRes = await apiScanSources(sources, rules, locale);
-        totalScanned = scanRes.scanned;
-        if (scanRes.matches && scanRes.matches.length > 0) {
-          newMatchesCount = scanRes.matches.length;
-          setMatches(prev => [...scanRes.matches, ...prev]);
-        }
-        setBackendStatus('online');
-      } catch (backendErr) {
-        console.warn('Backend scan failed, falling back to client simulation:', backendErr);
-        setBackendStatus('offline');
-        // Fallback local scan
-        for (const source of sources.filter(s => !s.isPaused)) {
-          totalScanned += Math.floor(Math.random() * 6) + 3;
-          const sourceRules = rules.filter(r => r.enabled && r.sourceIds.includes(source.id));
-          if (sourceRules.length > 0) {
-            await defaultConnectorManager.testHealth(source);
-          }
-        }
+      const scanRes = await apiScanSources(isDemoMode);
+      totalScanned = scanRes.scanned;
+
+      if (scanRes.matches && scanRes.matches.length > 0) {
+        newMatchesCount = scanRes.matches.length;
+        setMatches(prev => [...scanRes.matches, ...prev]);
       }
+
+      setBackendStatus('online');
 
       // Update digest count
       setDigest(prev => ({
@@ -445,6 +421,9 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       // Update source lastCheckedAt
       setSources(prev => prev.map(s => ({ ...s, lastCheckedAt: locale === 'ar' ? 'الآن' : 'Just now' })));
+    } catch (backendErr) {
+      console.warn('Backend scan failed:', backendErr);
+      setBackendStatus('offline');
     } finally {
       setIsScanning(false);
     }
@@ -453,14 +432,13 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const resetToDemo = () => {
+    setIsDemoMode(true);
+    localStorage.setItem(STORAGE_KEYS.DEMO_MODE, 'true');
     setSources(INITIAL_SOURCES);
     setRules(INITIAL_RULES);
     setMatches(INITIAL_MATCHES);
     setUser(INITIAL_USER);
     setDigest(INITIAL_DIGEST);
-    localStorage.removeItem(STORAGE_KEYS.SOURCES);
-    localStorage.removeItem(STORAGE_KEYS.RULES);
-    localStorage.removeItem(STORAGE_KEYS.MATCHES);
   };
 
   const connectFacebookSession = (accountName: string) => {
@@ -480,7 +458,6 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       deviceSessionConnected: false,
       deviceSessionAccount: undefined
     }));
-    // Update authenticated sources status to needs_relogin
     setSources(prev => prev.map(s => s.connectorType === 'device_session' ? { ...s, connectorStatus: 'needs_relogin' } : s));
   };
 
@@ -497,7 +474,11 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         theme,
         isScanning,
         backendStatus,
+        isPostgres,
+        apifyConfigured,
         geminiConfigured,
+        isDemoMode,
+        toggleDemoMode,
         selectedAlert,
         selectedAlertDetail: selectedAlert,
         selectedSourceId,

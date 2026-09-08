@@ -21,6 +21,7 @@ import { defaultConnectorManager } from '../connectors/connectorManager';
 import { ResolvedSource } from '../connectors/types';
 import { translations } from '../lib/i18n';
 import { BRAND } from '../config/brand';
+import { apiResolveSource } from '../services/api';
 
 interface AddSourceModalProps {
   initialUrl?: string | null;
@@ -28,7 +29,7 @@ interface AddSourceModalProps {
 }
 
 export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onClose }) => {
-  const { addSourceWithRule, locale, user } = useRadar();
+  const { addSourceWithRule, locale, user, isDemoMode } = useRadar();
   const t = translations[locale];
 
   // Flow steps: 1 = Enter URL / Paste, 2 = Resolving, 3 = Source Card & Rule Composer, 4 = Success
@@ -78,9 +79,30 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onCl
     const timer2 = setTimeout(() => setResolvingStep(3), 1000);
 
     try {
-      const resolved = await defaultConnectorManager.validateAndResolve(clean, false);
+      const res = await apiResolveSource(clean, isDemoMode);
       clearTimeout(timer1);
       clearTimeout(timer2);
+
+      if (!res.valid) {
+        setResolveError(res.error || 'Could not resolve public page details. Please verify the URL.');
+        setStep(1);
+        return;
+      }
+
+      const resolved: ResolvedSource = {
+        platform: res.platform === 'instagram' ? 'instagram' : 'facebook',
+        externalId: res.externalId || clean.split('/').filter(Boolean).pop() || 'source',
+        url: res.url || clean,
+        displayName: res.name || 'Monitored Account',
+        handle: res.handle || `@${clean.split('/').filter(Boolean).pop() || 'page'}`,
+        avatarUrl: res.avatarUrl || '',
+        bio: '',
+        visibilityType: res.visibilityType || 'public',
+        connectorType: (res.connectorType as any) || 'public_cloud',
+        connectorStatus: (res.connectorStatus === 'connected' ? 'connected' : 'public_monitoring') as any,
+        samplePosts: []
+      };
+
       setResolvedSource(resolved);
       setRuleName(`${resolved.displayName} Watch`);
 
