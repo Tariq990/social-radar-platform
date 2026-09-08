@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="MR SCRAP Social Radar">
+  <rect width="512" height="512" rx="112" fill="#020617"/>
+  <circle cx="256" cy="256" r="164" fill="none" stroke="#22d3ee" stroke-width="24" opacity="0.32"/>
+  <circle cx="256" cy="256" r="104" fill="none" stroke="#22d3ee" stroke-width="20" opacity="0.58"/>
+  <circle cx="256" cy="256" r="42" fill="#22d3ee"/>
+  <path d="M256 256 L410 168" stroke="#22d3ee" stroke-width="24" stroke-linecap="round"/>
+  <circle cx="394" cy="177" r="20" fill="#f8fafc"/>
+</svg>
