@@ -173,6 +173,8 @@ public class AppUpdatePlugin extends Plugin {
                 throw new IllegalStateException("Could not finalize downloaded APK");
             }
 
+            ApkIdentityVerifier.verify(getContext(), target.getAbsolutePath(), targetVersionCode);
+
             Uri apkUri = FileProvider.getUriForFile(
                 getContext(),
                 getContext().getPackageName() + ".fileprovider",
