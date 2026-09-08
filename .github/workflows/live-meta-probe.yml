@@ -1,0 +1,24 @@
+name: Live Meta Public Probe
+
+on:
+  push:
+    branches:
+      - test/meta-public-probe
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Probe public Facebook and Instagram surfaces
+        run: node live-meta-public-smoke.mjs
