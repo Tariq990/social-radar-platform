@@ -2,6 +2,7 @@ package com.mrscrap.socialradar;
 
 import android.content.Intent;
 import android.os.Bundle;
+import android.webkit.CookieManager;
 
 import com.getcapacitor.BridgeActivity;
 
@@ -12,7 +13,18 @@ public class MainActivity extends BridgeActivity {
     protected void onCreate(Bundle savedInstanceState) {
         registerPlugin(AuthenticatedSocialSessionPlugin.class);
         super.onCreate(savedInstanceState);
+
         if (bridge != null && bridge.getWebView() != null) {
+            // The bundled Capacitor origin (https://localhost) talks to a separately hosted HTTPS
+            // MR SCRAP API. Application auth uses an HttpOnly Secure SameSite=None cookie, so the
+            // main WebView must explicitly accept credential cookies for that approved API origin.
+            // Exact-origin CORS remains enforced server-side; this does not expose cookie contents
+            // to JavaScript and is unrelated to the separate Facebook CookieManager session.
+            CookieManager cookieManager = CookieManager.getInstance();
+            cookieManager.setAcceptCookie(true);
+            cookieManager.setAcceptThirdPartyCookies(bridge.getWebView(), true);
+            cookieManager.flush();
+
             bridge.getWebView().postDelayed(() -> deliverSharedIntent(getIntent()), 500);
         }
     }
