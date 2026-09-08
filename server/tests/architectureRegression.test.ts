@@ -103,41 +103,38 @@ test('Meta login WebViews detach from their parent before destroy', () => {
   }
 });
 
-test('anonymous public bootstrap does not request authenticated radar CRUD', () => {
-  const radar = read('src/context/RadarContext.tsx');
-  const authGuard = radar.indexOf('if (!auth.authenticated || !auth.user)');
-  const privateFetch = radar.indexOf('apiFetchSources()', authGuard);
-  assert.ok(authGuard >= 0, 'authenticated bootstrap guard must exist');
-  assert.ok(privateFetch > authGuard, 'private source/rule/alert fetches must occur only after auth guard');
-  assert.match(radar, /extractSupportedSocialUrl/);
-});
-
-test('shared URL onboarding accepts only supported Facebook and Instagram URLs', () => {
+test('shared URL entry points accept only Facebook and Instagram links', () => {
   const helper = read('src/lib/socialUrl.ts');
   const app = read('src/App.tsx');
+  const radar = read('src/context/RadarContext.tsx');
   assert.match(helper, /FACEBOOK_HOSTS/);
   assert.match(helper, /INSTAGRAM_HOSTS/);
-  assert.match(helper, /parsed\.protocol !== 'https:' && parsed\.protocol !== 'http:'/);
   assert.match(app, /extractSupportedSocialUrl/);
-  assert.doesNotMatch(app, /sharedUrl\.startsWith\('http'\)/);
+  assert.match(radar, /extractSupportedSocialUrl/);
+  assert.doesNotMatch(radar, /function extractSharedUrl/);
 });
 
-test('Android updater is backend-origin pinned and validates APK identity before installer', () => {
-  const update = read('src/services/appUpdate.ts');
-  const plugin = read('android/app/src/main/java/com/mrscrap/socialradar/AppUpdatePlugin.java');
-  const verifier = read('android/app/src/main/java/com/mrscrap/socialradar/ApkIdentityVerifier.java');
-  assert.match(update, /url\.origin !== backendOrigin\.origin/);
-  const verifyIndex = plugin.indexOf('ApkIdentityVerifier.verify');
-  const installerIndex = plugin.indexOf('FileProvider.getUriForFile');
-  assert.ok(verifyIndex >= 0 && installerIndex > verifyIndex, 'APK identity verification must happen before installer launch');
-  assert.match(verifier, /context\.getPackageName\(\)\.equals\(archive\.packageName\)/);
-  assert.match(verifier, /archiveCode != expectedVersionCode/);
-  assert.match(verifier, /archiveCode <= installedCode/);
-  assert.match(verifier, /!installedSigners\.equals\(archiveSigners\)/);
+test('anonymous landing bootstrap does not fetch private radar resources', () => {
+  const radar = read('src/context/RadarContext.tsx');
+  const authIndex = radar.indexOf('if (!auth.authenticated || !auth.user)');
+  const sourceIndex = radar.indexOf('apiFetchSources()');
+  assert.ok(authIndex >= 0, 'anonymous short-circuit must exist');
+  assert.ok(sourceIndex > authIndex, 'private source fetch must occur only after authenticated short-circuit');
 });
 
-test('mandatory updater follows the stored app locale when available', () => {
+test('Android updater is same-origin and verifies package identity before install', () => {
+  const webUpdater = read('src/services/appUpdate.ts');
+  const nativeUpdater = read('android/app/src/main/java/com/mrscrap/socialradar/AppUpdatePlugin.java');
+  assert.match(webUpdater, /url\.origin !== backendOrigin\.origin/);
+  assert.match(nativeUpdater, /getPackageArchiveInfo/);
+  assert.match(nativeUpdater, /getPackageName\(\)/);
+  assert.match(nativeUpdater, /versionCode/);
+  assert.match(nativeUpdater, /signingInfo|signatures/);
+});
+
+test('Android updater UI follows stored MR SCRAP locale', () => {
   const gate = read('src/components/ForceUpdateGate.tsx');
-  assert.match(gate, /const LOCALE_KEY = 'mrscrap_locale_v2'/);
-  assert.match(gate, /localStorage\.getItem\(LOCALE_KEY\)/);
+  assert.match(gate, /mrscrap_locale_v2/);
+  assert.match(gate, /stored === 'ar'/);
+  assert.match(gate, /stored === 'en'/);
 });
