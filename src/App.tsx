@@ -57,6 +57,15 @@ const RadarAppContent: React.FC = () => {
     }
   }, []);
 
+  useEffect(() => {
+    const navigate = (event: Event) => {
+      const screen = (event as CustomEvent<{ screen?: string }>).detail?.screen;
+      if (screen === 'alerts' || screen === 'radar' || screen === 'watchlist') setCurrentScreen(screen);
+    };
+    window.addEventListener('mrscrap:navigate', navigate as EventListener);
+    return () => window.removeEventListener('mrscrap:navigate', navigate as EventListener);
+  }, [setCurrentScreen]);
+
   const completeAuthentication = () => {
     const params = new URLSearchParams();
     params.set('screen', 'radar');
