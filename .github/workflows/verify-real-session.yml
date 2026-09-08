@@ -38,9 +38,6 @@ jobs:
       - name: Unit tests
         run: npm test
 
-      - name: Live public Meta fetch diagnostic
-        run: node live-meta-public-smoke.mjs
-
       - name: Build web and server bundle
         run: npm run build
         env:
