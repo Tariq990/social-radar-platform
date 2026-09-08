@@ -1,6 +1,9 @@
 package com.mrscrap.socialradar;
 
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
 import android.webkit.CookieManager;
 
@@ -38,6 +41,34 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
             ? "Authenticated Facebook WebView session is available on this Android device."
             : "Facebook login is required on this Android device.");
         call.resolve(result);
+    }
+
+    /** Android clipboard access does not require storage permissions. It must only be invoked
+     * while the app is foregrounded, directly from the user's Paste button gesture. */
+    @PluginMethod
+    public void readClipboard(PluginCall call) {
+        try {
+            ClipboardManager clipboard = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
+            JSObject result = new JSObject();
+            if (clipboard == null || !clipboard.hasPrimaryClip()) {
+                result.put("text", "");
+                call.resolve(result);
+                return;
+            }
+
+            ClipData clip = clipboard.getPrimaryClip();
+            if (clip == null || clip.getItemCount() == 0) {
+                result.put("text", "");
+                call.resolve(result);
+                return;
+            }
+
+            CharSequence value = clip.getItemAt(0).coerceToText(getContext());
+            result.put("text", value == null ? "" : value.toString());
+            call.resolve(result);
+        } catch (Exception error) {
+            call.reject("Could not read clipboard");
+        }
     }
 
     @PluginMethod
