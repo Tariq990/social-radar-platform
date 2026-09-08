@@ -1,4 +1,4 @@
-import { db, DbMatch, DbPost, DbRule } from '../db/database';
+import { db, DbMatch, DbPost, DbRule, DbSource } from '../db/database';
 import { canonicalizeSocialUrl, computePostFingerprint } from './deduplication';
 import { evaluatePostAgainstRule, isLatestPostIntent } from '../ai/ruleEvaluator';
 import { notificationService } from '../notifications';
@@ -20,6 +20,11 @@ export interface DeviceIngestionResult {
   rejected: number;
   matchesCreated: DbMatch[];
   evaluationErrors: { postId: string; ruleId: string; error: string }[];
+  sourceMetadata?: {
+    displayName: string;
+    avatarUrl?: string;
+    handle?: string;
+  };
 }
 
 function safeHttpUrl(value: unknown, maxLength: number = 4096): string | undefined {
@@ -80,6 +85,46 @@ function isAllowedPostUrl(raw: string, platform: 'facebook' | 'instagram'): bool
   }
 }
 
+function normalizeIdentity(value: unknown): string {
+  return typeof value === 'string'
+    ? value.normalize('NFKC').trim().replace(/^@/, '').toLowerCase()
+    : '';
+}
+
+function isGenericSourceName(value: unknown, source: DbSource): boolean {
+  const name = normalizeIdentity(value);
+  if (!name) return true;
+  const generic = new Set([
+    'facebook', 'instagram', 'page', 'profile', 'home', 'log into facebook', 'log in to facebook',
+    normalizeIdentity(source.external_id), normalizeIdentity(source.handle)
+  ].filter(Boolean));
+  return generic.has(name);
+}
+
+async function healSourceMetadataFromPosts(
+  source: DbSource,
+  posts: DeviceNormalizedPostInput[]
+): Promise<DbSource> {
+  let betterName = '';
+  let betterAvatar = '';
+
+  for (const post of posts.slice(0, 20)) {
+    if (!betterName && isGenericSourceName(source.name, source)) {
+      const candidate = typeof post?.authorName === 'string' ? post.authorName.trim().slice(0, 255) : '';
+      if (candidate && !isGenericSourceName(candidate, source)) betterName = candidate;
+    }
+    if (!betterAvatar && !source.avatar_url) betterAvatar = safeHttpUrl(post?.authorAvatar) || '';
+    if ((betterName || !isGenericSourceName(source.name, source)) && (betterAvatar || source.avatar_url)) break;
+  }
+
+  if (!betterName && !betterAvatar) return source;
+  const updated = await db.updateSourceMetadata(source.id, {
+    name: betterName || undefined,
+    avatar_url: betterAvatar || undefined
+  });
+  return updated || source;
+}
+
 function latestCandidateInputIndex(posts: DeviceNormalizedPostInput[], platform: 'facebook' | 'instagram'): number {
   let winner = -1;
   let winnerRank = Number.POSITIVE_INFINITY;
@@ -104,7 +149,7 @@ function latestCandidateInputIndex(posts: DeviceNormalizedPostInput[], platform:
 async function evaluateAndPersistMatches(
   post: DbPost,
   rules: DbRule[],
-  source: any,
+  source: DbSource,
   userId: string,
   locale: 'en' | 'ar',
   knownMatchKeys: Set<string>,
@@ -178,12 +223,23 @@ export async function ingestDevicePosts(
   };
 
   const sources = await db.getSources(userId);
-  const source = sources.find(item => item.id === sourceId);
+  let source = sources.find(item => item.id === sourceId);
   if (!source) throw new Error('Source not found');
   if (source.is_paused) throw new Error('Source is paused');
   if (source.connector_type !== 'device_session') {
     throw new Error('Source is not configured for authenticated device monitoring');
   }
+
+  const incoming = posts.slice(0, 50);
+  // Source onboarding can deliberately move ahead after a short resolver budget so the user is
+  // never stuck behind Meta's lazy DOM. The first successful authenticated collection therefore
+  // doubles as a trusted metadata repair pass for placeholder @handles and missing avatars.
+  source = await healSourceMetadataFromPosts(source, incoming);
+  result.sourceMetadata = {
+    displayName: source.name,
+    avatarUrl: source.avatar_url,
+    handle: source.handle
+  };
 
   const allRules = await db.getRules(userId);
   const sourceRules = allRules.filter(rule =>
@@ -193,7 +249,6 @@ export async function ingestDevicePosts(
   const knownMatchKeys = new Set(
     (await db.getMatches(userId)).map(match => `${match.rule_id}:${match.post_id}`)
   );
-  const incoming = posts.slice(0, 50);
   const latestCandidateIndex = latestCandidateInputIndex(incoming, source.platform);
   const isInitialBaseline = !source.last_checked_at;
 
@@ -258,10 +313,6 @@ export async function ingestDevicePosts(
     }
 
     result.accepted++;
-    // The first authenticated snapshot establishes a baseline. It must not flood the user with
-    // historical semantic matches. "Latest post" is the deliberate exception: users expect that
-    // rule to surface the current newest non-pinned post immediately. Historical investigation is
-    // handled separately by Smart Grab, which never creates watch alerts.
     await evaluateAndPersistMatches(
       savedPost,
       isInitialBaseline ? latestPostRules : sourceRules,
