@@ -3,6 +3,7 @@ package com.mrscrap.socialradar;
 import android.Manifest;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.webkit.CookieManager;
@@ -37,7 +38,7 @@ public class MainActivity extends BridgeActivity {
             cookieManager.setAcceptThirdPartyCookies(bridge.getWebView(), true);
             cookieManager.flush();
 
-            bridge.getWebView().postDelayed(() -> deliverSharedIntent(getIntent()), 500);
+            bridge.getWebView().postDelayed(() -> deliverIntent(getIntent()), 500);
         }
     }
 
@@ -45,7 +46,7 @@ public class MainActivity extends BridgeActivity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        deliverSharedIntent(intent);
+        deliverIntent(intent);
     }
 
     private void requestRadarNotificationPermissionOnce() {
@@ -65,10 +66,28 @@ public class MainActivity extends BridgeActivity {
         ), 900);
     }
 
-    private void deliverSharedIntent(Intent intent) {
+    private void deliverIntent(Intent intent) {
         if (intent == null || bridge == null || bridge.getWebView() == null) return;
-        if (!Intent.ACTION_SEND.equals(intent.getAction()) || !"text/plain".equals(intent.getType())) return;
+        if (Intent.ACTION_SEND.equals(intent.getAction()) && "text/plain".equals(intent.getType())) {
+            deliverSharedIntent(intent);
+            return;
+        }
+        if (Intent.ACTION_VIEW.equals(intent.getAction())) deliverNavigationIntent(intent.getData());
+    }
 
+    private void deliverNavigationIntent(Uri data) {
+        if (data == null || !"mrscrap".equalsIgnoreCase(data.getScheme())) return;
+        String screen = data.getHost();
+        if (!"alerts".equals(screen) && !"radar".equals(screen) && !"watchlist".equals(screen)) return;
+        try {
+            JSONObject payload = new JSONObject();
+            payload.put("screen", screen);
+            String javascript = "window.dispatchEvent(new CustomEvent('mrscrap:navigate',{detail:" + payload.toString() + "}));";
+            bridge.getWebView().post(() -> bridge.getWebView().evaluateJavascript(javascript, null));
+        } catch (Exception ignored) { }
+    }
+
+    private void deliverSharedIntent(Intent intent) {
         String text = intent.getStringExtra(Intent.EXTRA_TEXT);
         String subject = intent.getStringExtra(Intent.EXTRA_SUBJECT);
         if (text == null || text.trim().isEmpty()) return;
