@@ -1,5 +1,5 @@
 import React from 'react';
-import { Radar, ArrowLeft, ArrowRight, Bell, Filter, Link2, ShieldCheck, Smartphone, Globe, Moon, Sun, CheckCircle2 } from 'lucide-react';
+import { Radar, ArrowLeft, ArrowRight, Bell, Filter, Link2, ShieldCheck, Smartphone, Globe, Moon, Sun, CheckCircle2, Sparkles } from 'lucide-react';
 import { useRadar } from '../context/RadarContext';
 import { BRAND } from '../config/brand';
 
@@ -32,7 +32,7 @@ export const LandingScreen: React.FC = () => {
             {ar ? <>راقب ما <span className="text-cyan-400">يهمك</span> فقط.</> : <>Watch only what <span className="text-cyan-400">matters</span>.</>}
           </h1>
           <p className="mt-5 text-base sm:text-lg text-slate-400 leading-8 max-w-2xl mx-auto">
-            {ar ? 'أضف صفحة أو حسابًا، اكتب متى تريد التنبيه، واترك MR SCRAP يفحص المحتوى الذي تستطيع رؤيته ويرسل لك التطابقات المهمة فقط.' : 'Add a page or account, describe when you want an alert, and let MR SCRAP check content your device can access and surface only relevant matches.'}
+            {ar ? 'أضف صفحة أو حسابًا، راقب ما سيُنشر لاحقًا، أو اطلب فورًا آخر المنشورات وابحث فيها وصنّفها بالذكاء الاصطناعي.' : 'Add a page or account, monitor what happens next, or instantly grab recent posts and search or classify them with AI.'}
           </p>
           <div className="mt-8 flex flex-col sm:flex-row gap-3 justify-center">
             <button onClick={() => openAddSource()} className="px-6 py-3 rounded-2xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-sm font-black inline-flex items-center justify-center gap-2"><Link2 className="w-4 h-4" />{ar ? 'أضف أول مصدر' : 'Add a source'}{ar ? <ArrowLeft className="w-4 h-4" /> : <ArrowRight className="w-4 h-4" />}</button>
@@ -40,10 +40,11 @@ export const LandingScreen: React.FC = () => {
           </div>
         </section>
 
-        <section className="max-w-6xl mx-auto px-4 sm:px-6 pb-16 grid md:grid-cols-3 gap-4">
-          <Feature icon={Link2} title={ar ? 'أضف الرابط' : 'Add the link'} text={ar ? 'Facebook أو Instagram. التطبيق يتعرف على المصدر ويمنع تكراره.' : 'Facebook or Instagram. The app resolves the source and blocks duplicates.'} />
-          <Feature icon={Filter} title={ar ? 'اكتب القاعدة' : 'Write the rule'} text={ar ? 'اكتب بلغتك العادية ما الذي يستحق تنبيهك.' : 'Describe in plain language what deserves your attention.'} />
-          <Feature icon={Bell} title={ar ? 'استلم التطابق' : 'Get the match'} text={ar ? 'تظهر التنبيهات عند وجود محتوى حقيقي يطابق القاعدة، بدون بيانات تجريبية.' : 'Alerts appear when real collected content matches your rule—no fake sample data.'} />
+        <section className="max-w-6xl mx-auto px-4 sm:px-6 pb-16 grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <Feature icon={Link2} title={ar ? 'أضف المصدر' : 'Add a source'} text={ar ? 'Facebook أو Instagram. التطبيق يتعرف على الحساب أو الصفحة ويمنع التكرار.' : 'Facebook or Instagram. The app resolves the account/page and blocks duplicates.'} />
+          <Feature icon={Filter} title={ar ? 'اكتب قاعدة' : 'Write a rule'} text={ar ? 'قل بلغتك العادية ما الذي يستحق تنبيهك عند ظهوره مستقبلًا.' : 'Describe in plain language what should trigger a future alert.'} />
+          <Feature icon={Sparkles} title={ar ? 'اجلب وحلّل الآن' : 'Grab & analyze now'} text={ar ? 'اجلب حتى آخر 20 منشورًا لكل مصدر وابحث فيها أو صنّفها تلقائيًا أو حسب تصنيفاتك.' : 'Grab up to the latest 20 posts per source, then search or classify them automatically or with your own categories.'} />
+          <Feature icon={Bell} title={ar ? 'استلم التطابق' : 'Get the match'} text={ar ? 'التنبيه مبني على محتوى حقيقي جديد، والجلب التاريخي لا يصنع تنبيهات قديمة.' : 'Alerts come from real new content; historical grabs never manufacture old alerts.'} />
         </section>
 
         <section className="border-y border-slate-800/80 bg-slate-900/35">
@@ -60,8 +61,8 @@ export const LandingScreen: React.FC = () => {
         </section>
 
         <section className="max-w-4xl mx-auto px-4 sm:px-6 py-16 text-center">
-          <h2 className="text-2xl sm:text-3xl font-black">{ar ? 'ما في Feed جديد تتصفحه.' : 'Not another feed to scroll.'}</h2>
-          <p className="mt-3 text-sm text-slate-400 max-w-xl mx-auto">{ar ? 'الهدف بسيط: لا تفتح المنصات طوال اليوم. خلّي الرادار يخبرك فقط عندما يحدث شيء يطابق اهتمامك.' : 'The goal is simple: stop checking social apps all day. Let the radar tell you when something matches what you care about.'}</p>
+          <h2 className="text-2xl sm:text-3xl font-black">{ar ? 'مش Feed جديد تضيع فيه.' : 'Not another feed to get lost in.'}</h2>
+          <p className="mt-3 text-sm text-slate-400 max-w-xl mx-auto">{ar ? 'الوضع المستمر ينبهك فقط عند المهم، ووضع الجلب يعطيك إجابة مصنفة عند الطلب بدل تمرير عشرات المنشورات يدويًا.' : 'Continuous mode alerts only on what matters; Grab mode gives you an on-demand classified answer instead of making you scroll dozens of posts.'}</p>
         </section>
       </main>
     </div>

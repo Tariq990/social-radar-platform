@@ -49,7 +49,7 @@ interface AuthenticatedSocialSessionPlugin {
   getBackendAuth(): Promise<{ configured: boolean; userId?: string; deviceId?: string; token?: string; platform?: string }>;
   clearBackendAuth(): Promise<{ cleared: boolean }>;
   resolveSource(options: { url: string }): Promise<NativeResolvedSource>;
-  collectSource(options: { sourceId: string; url: string; platform: string }): Promise<{ posts: NativeCollectedPost[]; checkedAt: string }>;
+  collectSource(options: { sourceId: string; url: string; platform: string; limit?: number }): Promise<{ posts: NativeCollectedPost[]; checkedAt: string; requestedLimit?: number }>;
   scheduleSource(options: { sourceId: string; url: string; platform: string; backendBaseUrl: string }): Promise<{ scheduled: boolean; minimumIntervalMinutes: number }>;
   cancelSource(options: { sourceId: string }): Promise<{ cancelled: boolean }>;
 }
@@ -58,6 +58,10 @@ const NativeSession = registerPlugin<AuthenticatedSocialSessionPlugin>('Authenti
 
 function isAndroidNative(): boolean {
   return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
+}
+
+function clampPostLimit(limit: number): number {
+  return Math.max(1, Math.min(20, Number.isFinite(limit) ? Math.floor(limit) : 10));
 }
 
 function toNormalizedPost(source: { id: string; platform: SourcePlatform; url: string; externalId: string }, post: NativeCollectedPost): NormalizedPost {
@@ -196,13 +200,21 @@ export class DeviceSessionConnector implements SourceConnector {
     };
   }
 
-  async fetchLatest(source: { id: string; url: string; platform: SourcePlatform; externalId: string }): Promise<NormalizedPost[]> {
+  async fetchLatest(
+    source: { id: string; url: string; platform: SourcePlatform; externalId: string },
+    limit: number = 10
+  ): Promise<NormalizedPost[]> {
     if (!isAndroidNative()) throw new Error('Authenticated source collection requires the Android app.');
     const status = await DeviceSessionConnector.getLocalSession();
     if (!DeviceSessionConnector.isPlatformConnected(status, source.platform)) {
       throw new Error(`${source.platform === 'instagram' ? 'Instagram' : 'Facebook'} session expired or is not connected.`);
     }
-    const result = await NativeSession.collectSource({ sourceId: source.id, url: source.url, platform: source.platform });
+    const result = await NativeSession.collectSource({
+      sourceId: source.id,
+      url: source.url,
+      platform: source.platform,
+      limit: clampPostLimit(limit)
+    });
     return (result.posts || []).map(post => toNormalizedPost(source, post));
   }
 

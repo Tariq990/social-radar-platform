@@ -237,6 +237,8 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
     public void collectSource(PluginCall call) {
         String sourceId = call.getString("sourceId");
         String url = call.getString("url");
+        Integer requestedLimit = call.getInt("limit", 10);
+        int limit = requestedLimit == null ? 10 : Math.max(1, Math.min(20, requestedLimit));
         if (sourceId == null || sourceId.isBlank()) {
             call.reject("sourceId is required");
             return;
@@ -251,7 +253,7 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
             return;
         }
 
-        AuthenticatedWebCollector.collect(getContext(), url, new AuthenticatedWebCollector.Callback() {
+        AuthenticatedWebCollector.collect(getContext(), url, limit, new AuthenticatedWebCollector.Callback() {
             @Override
             public void onSuccess(JSONObject result) {
                 try {
@@ -259,6 +261,7 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
                     JSObject output = new JSObject();
                     output.put("posts", result.getJSONArray("posts"));
                     output.put("checkedAt", java.time.Instant.now().toString());
+                    output.put("requestedLimit", limit);
                     call.resolve(output);
                 } catch (Exception error) {
                     call.reject("Could not normalize collected posts");

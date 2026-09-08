@@ -1,4 +1,5 @@
 export type AIFormat = 'openai_chat' | 'openai_responses' | 'gemini_native';
+export type ExploreMode = 'filter' | 'custom' | 'auto';
 
 export interface AIConfig {
   baseUrl: string;
@@ -48,6 +49,21 @@ export interface PreviewMatchResult {
   excerpt: string;
   whyMatched: string;
   category: string;
+}
+
+export interface ExploreAnalysisOptions {
+  mode: ExploreMode;
+  prompt?: string;
+  categories?: string[];
+  locale: 'en' | 'ar';
+}
+
+export interface ExploreAnalysisItem {
+  postId: string;
+  relevant: boolean;
+  category: string;
+  confidence: number;
+  reason: string;
 }
 
 export interface AIProvider {
