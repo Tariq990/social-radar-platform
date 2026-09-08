@@ -2,7 +2,11 @@ node_modules/
 build/
 dist/
 coverage/
+.data/
 .DS_Store
 *.log
 .env*
 !.env.example
+android/.gradle/
+android/local.properties
+android/app/build/
