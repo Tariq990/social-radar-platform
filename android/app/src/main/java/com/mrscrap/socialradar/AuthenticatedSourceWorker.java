@@ -32,6 +32,7 @@ public class AuthenticatedSourceWorker extends Worker {
     public static final String KEY_SOURCE_URL = "sourceUrl";
     public static final String KEY_PLATFORM = "platform";
     public static final String KEY_BACKEND_BASE_URL = "backendBaseUrl";
+    public static final String KEY_AUTH_TOKEN = "backendAuthToken";
 
     public AuthenticatedSourceWorker(@NonNull Context context, @NonNull WorkerParameters params) {
         super(context, params);
@@ -43,9 +44,13 @@ public class AuthenticatedSourceWorker extends Worker {
         String sourceId = getInputData().getString(KEY_SOURCE_ID);
         String sourceUrl = getInputData().getString(KEY_SOURCE_URL);
         String backendBaseUrl = getInputData().getString(KEY_BACKEND_BASE_URL);
+        String authToken = getInputData().getString(KEY_AUTH_TOKEN);
 
         if (sourceId == null || sourceUrl == null || backendBaseUrl == null) {
             return Result.failure(errorData("Missing worker configuration"));
+        }
+        if (authToken == null || authToken.length() < 24 || authToken.length() > 512) {
+            return Result.failure(errorData("Backend device authorization is missing"));
         }
         if (!SessionStateStore.isFacebookConnected()) {
             return Result.failure(errorData("Facebook session requires reconnect"));
@@ -94,13 +99,16 @@ public class AuthenticatedSourceWorker extends Worker {
             payload.put("sourceId", sourceId);
             payload.put("posts", posts);
 
-            int status = postNormalizedData(backendBaseUrl, payload);
+            int status = postNormalizedData(backendBaseUrl, authToken, payload);
             if (status >= 200 && status < 300) {
                 SessionStateStore.markChecked(getApplicationContext());
                 return Result.success(new Data.Builder()
                     .putInt("postCount", posts.length())
                     .putString("checkedAt", java.time.Instant.now().toString())
                     .build());
+            }
+            if (status == 401 || status == 403) {
+                return Result.failure(errorData("Backend device authorization was rejected"));
             }
             if (status == 408 || status == 429 || status >= 500) return Result.retry();
             return Result.failure(errorData("Backend rejected normalized ingestion with HTTP " + status));
@@ -109,7 +117,7 @@ public class AuthenticatedSourceWorker extends Worker {
         }
     }
 
-    private int postNormalizedData(String backendBaseUrl, JSONObject payload) throws Exception {
+    private int postNormalizedData(String backendBaseUrl, String authToken, JSONObject payload) throws Exception {
         String base = backendBaseUrl.replaceAll("/+$", "");
         URL endpoint = new URL(base + "/api/device/ingest");
         HttpURLConnection connection = (HttpURLConnection) endpoint.openConnection();
@@ -120,6 +128,7 @@ public class AuthenticatedSourceWorker extends Worker {
         connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
         connection.setRequestProperty("Accept", "application/json");
         connection.setRequestProperty("X-MR-SCRAP-CLIENT", "android-device-session");
+        connection.setRequestProperty("Authorization", "Bearer " + authToken);
 
         byte[] bytes = payload.toString().getBytes(StandardCharsets.UTF_8);
         connection.setFixedLengthStreamingMode(bytes.length);
