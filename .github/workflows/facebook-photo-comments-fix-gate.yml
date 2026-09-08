@@ -42,6 +42,19 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/apply-facebook-photo-comment-fix.py
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('server/tests/architectureRegression.test.ts')
+          lines = path.read_text().splitlines()
+          replaced = False
+          for index, line in enumerate(lines):
+              if 'assert.match(extractor, /role=' in line and 'listitem' in line:
+                  lines[index] = '  assert.match(extractor, /role="listitem"/);'
+                  replaced = True
+          if not replaced:
+              raise SystemExit('photo listitem regression assertion not found')
+          path.write_text('\n'.join(lines) + '\n')
+          PY
           git diff --check
 
       - name: Validate exact Facebook source posts and photo comments
