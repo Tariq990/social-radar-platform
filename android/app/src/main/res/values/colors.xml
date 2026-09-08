@@ -3,4 +3,5 @@
     <color name="colorPrimary">#06B6D4</color>
     <color name="colorPrimaryDark">#020617</color>
     <color name="splashBackground">#020617</color>
+    <color name="launcherBackground">#020617</color>
 </resources>
