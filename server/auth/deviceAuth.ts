@@ -21,6 +21,7 @@ export interface DeviceIdentity {
 
 let authPool: pg.Pool | null = null;
 const developmentTokens = new Map<string, DeviceIdentity>();
+const CURRENT_SINGLE_USER_ID = 'user_default';
 
 function appMode(): string {
   return (process.env.APP_MODE || 'production').trim().toLowerCase();
@@ -50,19 +51,24 @@ function getPool(): pg.Pool {
 }
 
 /**
- * Creates a frictionless installation identity. This is application authentication only;
- * it is completely separate from the Facebook WebView session used for source collection.
- * Only a SHA-256 digest of the bearer token is stored server-side.
+ * Creates an installation bearer token for backend ingestion.
+ *
+ * The current application data model is still single-user (`user_default`), so device
+ * authorization is deliberately bound to that identity until the full multi-user migration
+ * lands. This closes unauthenticated device ingestion without pretending tenant isolation is
+ * already complete. Facebook login/session state remains completely separate and device-local.
+ * Only a SHA-256 digest of this backend bearer token is stored server-side.
  */
 export async function registerDevice(rawPlatform: unknown): Promise<DeviceRegistration> {
   const platform = normalizePlatform(rawPlatform);
   const token = newOpaqueToken();
   const hash = tokenHash(token);
+  const deviceId = `dev_${crypto.randomUUID()}`;
 
   if (appMode() !== 'production' && !process.env.DATABASE_URL?.trim()) {
     const identity: DeviceIdentity = {
-      userId: 'user_default',
-      deviceId: `dev_${crypto.randomUUID()}`,
+      userId: CURRENT_SINGLE_USER_ID,
+      deviceId,
       platform
     };
     developmentTokens.set(hash, identity);
@@ -71,22 +77,23 @@ export async function registerDevice(rawPlatform: unknown): Promise<DeviceRegist
 
   const pool = getPool();
   const client = await pool.connect();
-  const userId = `user_${crypto.randomUUID()}`;
-  const deviceId = `dev_${crypto.randomUUID()}`;
   try {
     await client.query('BEGIN');
+    // The existing backend still stores all app-owned data under user_default. Ensure the
+    // FK target exists in PostgreSQL before creating device credentials.
     await client.query(
-      `INSERT INTO users (id, tier, created_at, updated_at)
-       VALUES ($1, 'free', NOW(), NOW())`,
-      [userId]
+      `INSERT INTO users (id, email, name, tier, created_at, updated_at)
+       VALUES ($1, NULL, 'Radar Operator', 'pro', NOW(), NOW())
+       ON CONFLICT (id) DO NOTHING`,
+      [CURRENT_SINGLE_USER_ID]
     );
     await client.query(
       `INSERT INTO devices (id, user_id, device_token, platform, last_active, created_at)
        VALUES ($1, $2, $3, $4, NOW(), NOW())`,
-      [deviceId, userId, hash, platform]
+      [deviceId, CURRENT_SINGLE_USER_ID, hash, platform]
     );
     await client.query('COMMIT');
-    return { userId, deviceId, token, platform };
+    return { userId: CURRENT_SINGLE_USER_ID, deviceId, token, platform };
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
