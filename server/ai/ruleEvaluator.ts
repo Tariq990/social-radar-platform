@@ -54,7 +54,10 @@ export async function evaluatePostAgainstRule(
   }
 
   const result = await aiService.classifyPost(post, rule, locale);
-  const threshold = Number(rule.min_confidence) || 0.8;
+  const configuredThreshold = Number(rule.min_confidence);
+  const threshold = Number.isFinite(configuredThreshold)
+    ? Math.max(0, Math.min(1, configuredThreshold))
+    : 0.8;
 
   return {
     ...result,
