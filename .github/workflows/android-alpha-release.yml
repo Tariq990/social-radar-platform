@@ -20,11 +20,12 @@ concurrency:
 
 jobs:
   build-and-publish:
-    if: ${{ github.event_name == 'workflow_dispatch' || vars.ALPHA_API_BASE_URL != '' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.ALPHA_API_BASE_URL != '' || github.ref_name == 'work/real-session-ai-provider' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      VITE_API_BASE_URL: ${{ inputs.backend_base_url || vars.ALPHA_API_BASE_URL }}
+      # Alpha acceptance fallback. A workflow input or repository variable still overrides it.
+      VITE_API_BASE_URL: ${{ inputs.backend_base_url || vars.ALPHA_API_BASE_URL || 'https://mr-scrap-api-live.onrender.com' }}
 
     steps:
       - name: Checkout
