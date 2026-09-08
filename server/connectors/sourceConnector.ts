@@ -1,30 +1,54 @@
-import { 
-  ISourceConnector, 
-  SourceInput, 
-  ResolvedSourceResult, 
-  RawProviderPost, 
-  SourcePlatform 
+import {
+  SourceInput,
+  ResolvedSourceResult,
+  RawProviderPost,
+  SourcePlatform,
+  ConnectorType
 } from './types';
 import { ApifyConnector } from './apifyConnector';
 import { PublicMetaResolver } from './metaResolver';
 
+/**
+ * Server-side connector manager.
+ *
+ * The primary production architecture is the authenticated Android device connector.
+ * The server can still resolve publicly exposed metadata, and an external public provider
+ * may be enabled explicitly as an optional adapter. It is never required by default.
+ */
 export class SourceConnectorManager {
-  private apifyConnector: ApifyConnector;
-  private metaResolver: PublicMetaResolver;
+  private readonly apifyConnector = new ApifyConnector();
+  private readonly metaResolver = new PublicMetaResolver();
 
-  constructor() {
-    this.apifyConnector = new ApifyConnector();
-    this.metaResolver = new PublicMetaResolver();
+  private optionalPublicProviderEnabled(): boolean {
+    return (process.env.PUBLIC_PROVIDER || '').trim().toLowerCase() === 'apify' && this.apifyConnector.isConfigured();
   }
 
   isApifyConfigured(): boolean {
-    return this.apifyConnector.isConfigured();
+    return this.optionalPublicProviderEnabled();
+  }
+
+  getPrimaryMonitoringMode(): 'device_session' | 'optional_public_provider' {
+    return this.optionalPublicProviderEnabled() ? 'optional_public_provider' : 'device_session';
   }
 
   async resolve(input: SourceInput, isDemoMode: boolean = false): Promise<ResolvedSourceResult> {
     const rawUrl = (input.url || '').trim();
+    if (!rawUrl) {
+      return {
+        valid: false,
+        platform: 'other',
+        externalId: '',
+        name: '',
+        handle: '',
+        url: '',
+        visibilityType: 'authenticated',
+        connectorType: 'device_session',
+        connectorStatus: 'error',
+        requiresAuthentication: true,
+        error: 'Source URL is required'
+      };
+    }
 
-    // 1. In demo mode only, if explicit demo is requested
     if (isDemoMode) {
       const isFb = rawUrl.includes('facebook.com');
       return {
@@ -43,52 +67,79 @@ export class SourceConnectorManager {
       };
     }
 
-    // 2. Production Mode: Attempt real resolution
-    // First, try fast direct Meta OpenGraph resolution to get real page name and real avatar
+    const platform: SourcePlatform = rawUrl.includes('instagram.com') ? 'instagram' : rawUrl.includes('facebook.com') || rawUrl.includes('fb.com') || rawUrl.includes('fb.watch') ? 'facebook' : 'other';
+    if (platform === 'other') {
+      return {
+        valid: false,
+        platform,
+        externalId: '',
+        name: '',
+        handle: '',
+        url: rawUrl,
+        visibilityType: 'authenticated',
+        connectorType: 'device_session',
+        connectorStatus: 'error',
+        requiresAuthentication: true,
+        error: 'Only Facebook and Instagram sources are supported in this phase.'
+      };
+    }
+
+    // Best-effort public metadata resolution. This does not imply that the server can
+    // continuously monitor the source. Monitoring still belongs to the device session
+    // unless an optional public provider was explicitly enabled by the operator.
     try {
       const metaResult = await this.metaResolver.resolve(input);
-      if (metaResult && metaResult.valid && metaResult.name) {
-        return metaResult;
+      if (metaResult?.valid && metaResult.name) {
+        if (this.optionalPublicProviderEnabled()) {
+          return {
+            ...metaResult,
+            connectorType: 'public_cloud',
+            connectorStatus: 'connected',
+            requiresAuthentication: false
+          };
+        }
+
+        return {
+          ...metaResult,
+          visibilityType: 'authenticated',
+          connectorType: 'device_session',
+          connectorStatus: 'needs_relogin',
+          requiresAuthentication: true
+        };
       }
-    } catch (e) {
-      // Continue to Apify
+    } catch {
+      // Device resolution is the next supported path.
     }
 
-    // Second, try Apify if configured
-    if (this.apifyConnector.isConfigured()) {
-      const apifyResult = await this.apifyConnector.resolveSource(input);
-      if (apifyResult.valid) {
-        return apifyResult;
-      }
-      // If Apify gave a specific error, return it
-      if (apifyResult.error) {
-        return apifyResult;
-      }
+    // Optional operator-selected public provider. Never required by default.
+    if (this.optionalPublicProviderEnabled()) {
+      const providerResult = await this.apifyConnector.resolveSource(input);
+      if (providerResult.valid || providerResult.error) return providerResult;
     }
 
-    // If both failed in production mode: NEVER invent fake content
+    // The authenticated Android device must resolve the source using the user's own
+    // local Facebook/Instagram session. Returning this state is not an error/fake success.
     return {
       valid: false,
-      platform: rawUrl.includes('instagram.com') ? 'instagram' : 'facebook',
+      platform,
       externalId: '',
       name: '',
       handle: '',
       url: rawUrl,
-      visibilityType: 'public',
-      connectorType: 'public_cloud',
-      connectorStatus: 'error',
-      requiresAuthentication: false,
-      error: this.apifyConnector.isConfigured()
-        ? 'Could not resolve public page details from Facebook/Instagram. Please check the URL and ensure the page is public.'
-        : 'APIFY_API_TOKEN is not configured on the server, and direct public page metadata was blocked by the platform. Please provide APIFY_API_TOKEN in Settings.'
+      visibilityType: 'authenticated',
+      connectorType: 'device_session',
+      connectorStatus: 'needs_relogin',
+      requiresAuthentication: true,
+      error: 'This source requires resolution from a connected Android device session.'
     };
   }
 
-  async fetchLatest(source: { 
-    id: string; 
-    url: string; 
-    platform: SourcePlatform; 
-    externalId: string 
+  async fetchLatest(source: {
+    id: string;
+    url: string;
+    platform: SourcePlatform;
+    externalId: string;
+    connectorType?: ConnectorType;
   }, isDemoMode: boolean = false): Promise<RawProviderPost[]> {
     if (isDemoMode) {
       return [
@@ -101,11 +152,15 @@ export class SourceConnectorManager {
       ];
     }
 
-    if (!this.apifyConnector.isConfigured()) {
-      throw new Error('APIFY_API_TOKEN is not configured. Cannot fetch live posts in production mode.');
+    if (source.connectorType === 'device_session' || !source.connectorType) {
+      throw new Error('DEVICE_SESSION_SOURCE: authenticated sources are collected on the connected Android device and ingested through /api/device/ingest.');
     }
 
-    return await this.apifyConnector.fetchLatestPosts(source);
+    if (source.connectorType === 'public_cloud' && this.optionalPublicProviderEnabled()) {
+      return await this.apifyConnector.fetchLatestPosts(source);
+    }
+
+    throw new Error('No server-side provider is configured for this source. Connect an Android device session.');
   }
 }
 
