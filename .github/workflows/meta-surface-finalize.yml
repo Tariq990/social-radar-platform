@@ -45,6 +45,7 @@ jobs:
       - name: Prepare Capacitor Android project
         run: |
           npm install --no-audit --no-fund
+          APP_MODE=production npm run build
           npx cap sync android
 
       - name: Setup Java 21
