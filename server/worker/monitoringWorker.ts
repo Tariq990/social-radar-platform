@@ -13,6 +13,13 @@ export interface MonitoringJobResult {
   timestamp: string;
 }
 
+function sanitizePublishedAt(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  const millis = Date.parse(value);
+  if (!Number.isFinite(millis) || millis > Date.now() + 24 * 60 * 60 * 1000) return undefined;
+  return new Date(millis).toISOString();
+}
+
 /**
  * Server-side monitoring worker.
  *
@@ -56,8 +63,6 @@ export class MonitoringWorker {
       const activeRules = allRules.filter(rule => rule.enabled);
 
       for (const source of activeSources) {
-        // Device-session content must be collected locally. Treat this as a healthy routing
-        // decision rather than repeatedly producing a server-side connector failure.
         if (!isDemoMode && source.connector_type === 'device_session') {
           result.deviceManagedSources++;
           await db.logConnectorEvent(
@@ -87,12 +92,13 @@ export class MonitoringWorker {
 
           for (const raw of rawPosts) {
             const canonicalUrl = canonicalizeSocialUrl(raw.url || source.url);
-            const fingerprint = computePostFingerprint(
+            const contentFingerprint = computePostFingerprint(
               source.platform,
               raw.externalId,
               canonicalUrl,
               raw.text
             );
+            const fingerprint = `${source.id}:${contentFingerprint}`.slice(0, 255);
 
             if (await db.hasPostFingerprint(fingerprint)) continue;
 
@@ -107,13 +113,11 @@ export class MonitoringWorker {
               author_avatar: raw.authorAvatar || source.avatar_url,
               text: raw.text || '',
               media: raw.media || [],
-              published_at: raw.publishedAt || new Date().toISOString(),
+              published_at: sanitizePublishedAt(raw.publishedAt),
               fingerprint,
               metadata: raw.metadata || {}
             });
 
-            // The fingerprint constraint is authoritative. If another concurrent execution
-            // inserted this post first, createPost returns that existing row; do not re-evaluate it.
             if (savedPost.id !== candidatePostId) continue;
 
             result.newPostsFound++;
@@ -139,8 +143,6 @@ export class MonitoringWorker {
                   is_saved: false
                 });
 
-                // The DB guarantees uniqueness by (rule_id, post_id). Avoid duplicate delivery
-                // when a concurrent worker won that match insert.
                 if (createdMatch.id !== candidateMatchId) continue;
 
                 createdMatch.source_name = source.name;
