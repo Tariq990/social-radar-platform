@@ -1,5 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 
+import { handleReleasePreRoute, isReleasePreRoute } from '../releases/releaseMiddleware';
+
 function normalizeOrigin(value: string): string | null {
   try {
     const parsed = new URL(value.trim());
@@ -37,8 +39,18 @@ function configuredOrigins(): Set<string> {
   return origins;
 }
 
-const ALLOWED_METHODS = 'GET,POST,PATCH,DELETE,OPTIONS';
+const ALLOWED_METHODS = 'GET,POST,PATCH,PUT,DELETE,OPTIONS';
 const ALLOWED_HEADERS = 'Content-Type,Authorization,X-MR-SCRAP-CLIENT,X-MR-SCRAP-ADMIN-TOKEN';
+
+function continueRequest(req: Request, res: Response, next: NextFunction) {
+  // The APK publisher uploads a raw binary body. This middleware is installed before express.json,
+  // so updater endpoints are intentionally handled here before any body parser can consume them.
+  if (isReleasePreRoute(req)) {
+    void handleReleasePreRoute(req, res, next);
+    return;
+  }
+  return next();
+}
 
 /**
  * Strict credentialed CORS for the hosted API used by the web/Capacitor clients.
@@ -50,7 +62,7 @@ export function strictCors(req: Request, res: Response, next: NextFunction) {
 
   if (!origin) {
     if (req.method === 'OPTIONS') return res.sendStatus(204);
-    return next();
+    return continueRequest(req, res, next);
   }
 
   const allowed = configuredOrigins();
@@ -69,5 +81,5 @@ export function strictCors(req: Request, res: Response, next: NextFunction) {
   res.setHeader('Access-Control-Max-Age', '600');
 
   if (req.method === 'OPTIONS') return res.sendStatus(204);
-  return next();
+  return continueRequest(req, res, next);
 }
