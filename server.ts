@@ -1,5 +1,6 @@
 import express from 'express';
 import path from 'path';
+import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
 
@@ -45,30 +46,72 @@ function rateLimiter(limit: number = 30, windowMs: number = 60_000) {
   };
 }
 
+// Bound the in-memory limiter map during long-running service operation.
+const rateLimitCleanup = setInterval(() => {
+  const now = Date.now();
+  for (const [key, value] of rateLimitMap) {
+    if (value.resetTime + 60_000 < now) rateLimitMap.delete(key);
+  }
+}, 5 * 60_000);
+rateLimitCleanup.unref();
+
 function safeError(error: any): string {
   return error?.message || 'Unexpected server error';
+}
+
+function secureEquals(a: string, b: string): boolean {
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
+function requireInternalAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+  if (APP_MODE !== 'production') return next();
+  const expected = (process.env.ADMIN_API_TOKEN || '').trim();
+  const supplied = String(req.headers['x-mr-scrap-admin-token'] || '').trim();
+  if (!expected || !supplied || !secureEquals(expected, supplied)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  return next();
 }
 
 interface SocialUrlValidation {
   ok: boolean;
   url: string;
+  platform: 'facebook' | 'instagram' | 'other';
   error: string;
 }
 
 function validateSocialUrl(input: unknown): SocialUrlValidation {
-  if (typeof input !== 'string' || !input.trim()) return { ok: false, url: '', error: 'URL is required' };
+  if (typeof input !== 'string' || !input.trim()) {
+    return { ok: false, url: '', platform: 'other', error: 'URL is required' };
+  }
   try {
     const parsed = new URL(input.trim());
     if (!['http:', 'https:'].includes(parsed.protocol)) {
-      return { ok: false, url: '', error: 'Only http/https URLs are allowed' };
+      return { ok: false, url: '', platform: 'other', error: 'Only http/https URLs are allowed' };
     }
     const host = parsed.hostname.toLowerCase();
-    const allowed = host === 'facebook.com' || host.endsWith('.facebook.com') || host === 'fb.com' || host.endsWith('.fb.com') || host === 'fb.watch' || host === 'instagram.com' || host.endsWith('.instagram.com') || host === 'instagr.am' || host.endsWith('.instagr.am');
-    if (!allowed) return { ok: false, url: '', error: 'Only Facebook and Instagram URLs are supported' };
+    const facebook = host === 'facebook.com' || host.endsWith('.facebook.com') || host === 'fb.com' || host.endsWith('.fb.com') || host === 'fb.watch';
+    const instagram = host === 'instagram.com' || host.endsWith('.instagram.com') || host === 'instagr.am' || host.endsWith('.instagr.am');
+    if (!facebook && !instagram) {
+      return { ok: false, url: '', platform: 'other', error: 'Only Facebook and Instagram URLs are supported' };
+    }
     parsed.hash = '';
-    return { ok: true, url: parsed.toString(), error: '' };
+    return { ok: true, url: parsed.toString(), platform: instagram ? 'instagram' : 'facebook', error: '' };
   } catch {
-    return { ok: false, url: '', error: 'Invalid URL' };
+    return { ok: false, url: '', platform: 'other', error: 'Invalid URL' };
+  }
+}
+
+function sanitizeOptionalUrl(input: unknown): string | undefined {
+  if (typeof input !== 'string' || !input.trim()) return undefined;
+  try {
+    const parsed = new URL(input.trim());
+    if (!['http:', 'https:'].includes(parsed.protocol)) return undefined;
+    return parsed.toString().slice(0, 4096);
+  } catch {
+    return undefined;
   }
 }
 
@@ -79,9 +122,6 @@ app.get('/api/health', (_req, res) => {
     service: 'MR SCRAP Social Radar Server',
     databaseType: db.isUsingPostgres() ? 'postgresql' : 'file_persistence',
     aiConfigured: ai.configured,
-    aiProvider: ai.providerName,
-    aiModel: ai.model,
-    aiFormat: ai.format,
     monitoringMode: sourceConnectorManager.getPrimaryMonitoringMode(),
     optionalPublicProviderConfigured: sourceConnectorManager.isApifyConfigured(),
     appMode: APP_MODE,
@@ -95,9 +135,6 @@ app.get('/api/config', (_req, res) => {
     appMode: APP_MODE,
     isPostgres: db.isUsingPostgres(),
     aiConfigured: ai.configured,
-    aiProvider: ai.providerName,
-    aiModel: ai.model,
-    aiFormat: ai.format,
     monitoringMode: sourceConnectorManager.getPrimaryMonitoringMode(),
     optionalPublicProviderConfigured: sourceConnectorManager.isApifyConfigured()
   });
@@ -112,7 +149,7 @@ app.post('/api/auth/device/register', rateLimiter(8, 60_000), async (req, res) =
   }
 });
 
-app.get('/api/internal/ai/health', rateLimiter(5, 60_000), async (_req, res) => {
+app.get('/api/internal/ai/health', rateLimiter(5, 60_000), requireInternalAdmin, async (_req, res) => {
   const result = await testConfiguredAIProvider();
   res.status(result.reachable ? 200 : 503).json(result);
 });
@@ -127,28 +164,32 @@ app.get('/api/sources', async (_req, res) => {
 
 app.post('/api/sources', rateLimiter(30, 60_000), async (req, res) => {
   try {
-    const { platform, externalId, url, name, handle, avatarUrl, bio, visibilityType, connectorType } = req.body || {};
+    const { externalId, url, name, handle, avatarUrl, bio, visibilityType, connectorType } = req.body || {};
     const checkedUrl = validateSocialUrl(url);
     if (!checkedUrl.ok) return res.status(400).json({ error: checkedUrl.error });
     if (typeof name !== 'string' || !name.trim()) return res.status(400).json({ error: 'name is required' });
 
-    const normalizedPlatform = platform === 'instagram' ? 'instagram' : 'facebook';
     const normalizedConnector = connectorType === 'public_cloud' || connectorType === 'official_meta' ? connectorType : 'device_session';
-    const normalizedExternalId = typeof externalId === 'string' && externalId.trim()
+    const resolvedExternalId = typeof externalId === 'string' && externalId.trim()
       ? externalId.trim().slice(0, 255)
       : typeof handle === 'string' && handle.trim()
         ? handle.replace(/^@/, '').trim().slice(0, 255)
-        : `device_source_${Date.now()}`;
+        : '';
+
+    if (!resolvedExternalId && !isDemoMode()) {
+      return res.status(400).json({ error: 'A real resolved source externalId or handle is required in production' });
+    }
+    const normalizedExternalId = resolvedExternalId || `demo_source_${Date.now()}`;
 
     const source = await db.createSource({
       id: `src_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       user_id: 'user_default',
-      platform: normalizedPlatform,
+      platform: checkedUrl.platform === 'instagram' ? 'instagram' : 'facebook',
       external_id: normalizedExternalId,
       url: checkedUrl.url,
       name: name.trim().slice(0, 255),
       handle: typeof handle === 'string' ? handle.slice(0, 255) : undefined,
-      avatar_url: typeof avatarUrl === 'string' ? avatarUrl.slice(0, 4096) : undefined,
+      avatar_url: sanitizeOptionalUrl(avatarUrl),
       bio: typeof bio === 'string' ? bio.slice(0, 5000) : undefined,
       visibility_type: visibilityType === 'public' ? 'public' : 'authenticated',
       connector_type: normalizedConnector,
@@ -233,7 +274,7 @@ app.post('/api/rules', rateLimiter(40, 60_000), async (req, res) => {
       min_confidence: typeof minConfidence === 'number' ? Math.max(0, Math.min(1, minConfidence)) : 0.8,
       alert_mode: ['instant', 'digest', 'silent'].includes(alertMode) ? alertMode : 'instant',
       enabled: true,
-      collection_id: typeof collectionId === 'string' ? collectionId : undefined
+      collection_id: typeof collectionId === 'string' ? collectionId.slice(0, 255) : undefined
     }, Array.isArray(sourceIds) ? sourceIds.filter((v: any) => typeof v === 'string').slice(0, 250) : []);
 
     res.status(201).json(rule);
@@ -271,8 +312,9 @@ app.get('/api/alerts', async (_req, res) => {
 app.patch('/api/alerts/:id', async (req, res) => {
   try {
     const { feedback, isRead, isSaved } = req.body || {};
+    const normalizedFeedback = feedback === 'relevant' || feedback === 'not_relevant' ? feedback : undefined;
     await db.updateMatch(req.params.id, {
-      feedback,
+      feedback: normalizedFeedback,
       is_read: typeof isRead === 'boolean' ? isRead : undefined,
       is_saved: typeof isSaved === 'boolean' ? isSaved : undefined
     });
@@ -320,7 +362,8 @@ app.post('/api/device/ingest', rateLimiter(30, 60_000), requireDeviceAuth, async
   }
 });
 
-app.post('/api/ai/evaluate-post', rateLimiter(30, 60_000), async (req, res) => {
+// Raw classifier probing is an operator/development function, not a public user endpoint.
+app.post('/api/ai/evaluate-post', rateLimiter(10, 60_000), requireInternalAdmin, async (req, res) => {
   try {
     const { post, rule, locale } = req.body || {};
     if (!post || !rule) return res.status(400).json({ error: 'post and rule are required' });
@@ -345,9 +388,9 @@ app.post('/api/ai/rule-suggestions', rateLimiter(20, 60_000), async (req, res) =
     }
 
     const suggestions = await aiService.generateRuleSuggestions({
-      sourceName: req.body?.sourceName,
-      platform: req.body?.platform,
-      bio: req.body?.bio
+      sourceName: typeof req.body?.sourceName === 'string' ? req.body.sourceName.slice(0, 255) : undefined,
+      platform: typeof req.body?.platform === 'string' ? req.body.platform.slice(0, 50) : undefined,
+      bio: typeof req.body?.bio === 'string' ? req.body.bio.slice(0, 5000) : undefined
     });
     res.json({ suggestions });
   } catch (error) {
@@ -357,7 +400,7 @@ app.post('/api/ai/rule-suggestions', rateLimiter(20, 60_000), async (req, res) =
 
 app.post('/api/ai/generate-digest', rateLimiter(20, 60_000), async (req, res) => {
   try {
-    const matches = Array.isArray(req.body?.matches) ? req.body.matches : [];
+    const matches = Array.isArray(req.body?.matches) ? req.body.matches.slice(0, 20) : [];
     const locale = req.body?.locale === 'ar' ? 'ar' : 'en';
 
     if (matches.length === 0) {
@@ -376,7 +419,7 @@ app.post('/api/ai/generate-digest', rateLimiter(20, 60_000), async (req, res) =>
 
 app.post('/api/ai/preview-match', rateLimiter(20, 60_000), async (req, res) => {
   try {
-    const rule = typeof req.body?.ruleNaturalLanguage === 'string' ? req.body.ruleNaturalLanguage.trim() : '';
+    const rule = typeof req.body?.ruleNaturalLanguage === 'string' ? req.body.ruleNaturalLanguage.trim().slice(0, 10_000) : '';
     if (!rule) return res.status(400).json({ error: 'ruleNaturalLanguage is required' });
 
     if (isDemoMode() && !getAIConfigurationStatus().configured) {
@@ -389,7 +432,8 @@ app.post('/api/ai/preview-match', rateLimiter(20, 60_000), async (req, res) => {
       });
     }
 
-    res.json(await aiService.generatePreview(rule, req.body?.sourceName));
+    const sourceName = typeof req.body?.sourceName === 'string' ? req.body.sourceName.slice(0, 255) : undefined;
+    res.json(await aiService.generatePreview(rule, sourceName));
   } catch (error) {
     res.status(503).json({ error: safeError(error) });
   }
