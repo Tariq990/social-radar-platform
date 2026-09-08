@@ -3,6 +3,7 @@ import { promisify } from 'util';
 import type { Request, Response, NextFunction } from 'express';
 import pg from 'pg';
 import { revokeUserDevices } from './deviceAuth';
+import { postgresSsl } from '../db/pgSsl';
 
 const { Pool } = pg;
 const scryptAsync = promisify(crypto.scrypt);
@@ -39,7 +40,7 @@ function getPool(): pg.Pool {
   if (!dbUrl) throw new Error('Application authentication requires DATABASE_URL in production.');
   pool = new Pool({
     connectionString: dbUrl,
-    ssl: dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1') ? false : { rejectUnauthorized: false }
+    ssl: postgresSsl(dbUrl)
   });
   return pool;
 }
@@ -246,7 +247,13 @@ export async function authenticateAppRequest(req: Request): Promise<SessionIdent
   const row = result.rows[0];
   if (!row) return null;
 
-  await getPool().query('UPDATE app_sessions SET last_seen_at = NOW() WHERE id = $1', [row.session_id]);
+  // Authentication is read-heavy. Persist activity at most once per five minutes instead of
+  // turning every UI/API request into an otherwise useless PostgreSQL write.
+  await getPool().query(
+    `UPDATE app_sessions SET last_seen_at = NOW()
+      WHERE id = $1 AND last_seen_at < NOW() - INTERVAL '5 minutes'`,
+    [row.session_id]
+  );
   return {
     sessionId: row.session_id,
     user: { id: row.id, email: row.email, name: row.name || 'Radar User', tier: row.tier || 'free' }
