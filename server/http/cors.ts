@@ -40,7 +40,7 @@ function configuredOrigins(): Set<string> {
 }
 
 const ALLOWED_METHODS = 'GET,POST,PATCH,DELETE,OPTIONS';
-const ALLOWED_HEADERS = 'Content-Type,Authorization,X-MR-SCRAP-CLIENT';
+const ALLOWED_HEADERS = 'Content-Type,Authorization,X-MR-SCRAP-CLIENT,X-MR-SCRAP-ADMIN-TOKEN';
 
 /**
  * Strict CORS for the separate hosted API used by the bundled Capacitor app.
