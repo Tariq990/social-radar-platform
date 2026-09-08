@@ -1,0 +1,143 @@
+name: Publish Android Alpha
+
+on:
+  push:
+    branches:
+      - work/real-session-ai-provider
+  workflow_dispatch:
+    inputs:
+      backend_base_url:
+        description: Public HTTPS backend origin compiled into the Android app
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-android-alpha
+  cancel-in-progress: true
+
+jobs:
+  build-and-publish:
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.ALPHA_API_BASE_URL != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VITE_API_BASE_URL: ${{ inputs.backend_base_url || vars.ALPHA_API_BASE_URL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate alpha backend origin
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${VITE_API_BASE_URL:-}" ]]; then
+            echo "VITE_API_BASE_URL is required. Set repository variable ALPHA_API_BASE_URL or provide workflow input backend_base_url."
+            exit 1
+          fi
+          if [[ ! "$VITE_API_BASE_URL" =~ ^https://[^/]+ ]]; then
+            echo "Alpha backend must be an absolute HTTPS origin: $VITE_API_BASE_URL"
+            exit 1
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: package.json
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build production web bundle for Android
+        run: npm run build
+        env:
+          APP_MODE: production
+
+      - name: Sync Capacitor Android project
+        run: npx cap sync android
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Build Android debug APK
+        run: gradle -p android :app:assembleDebug --stacktrace
+
+      - name: Prepare alpha assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          cp android/app/build/outputs/apk/debug/app-debug.apk release/MR-SCRAP-android-alpha.apk
+          sha256sum release/MR-SCRAP-android-alpha.apk > release/MR-SCRAP-android-alpha.apk.sha256
+          printf '%s\n' "$GITHUB_SHA" > release/COMMIT_SHA.txt
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mr-scrap-android-alpha-${{ github.sha }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Update mutable android-alpha tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f android-alpha "$GITHUB_SHA"
+          git push origin refs/tags/android-alpha --force
+
+      - name: Create or update Android Alpha prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          NOTES=$(cat <<EOF
+          ## MR SCRAP Android Alpha
+
+          This is the latest **debug/alpha** build from \`work/real-session-ai-provider\`.
+
+          - Commit: \`$GITHUB_SHA\`
+          - Backend compiled into APK: \`$VITE_API_BASE_URL\`
+          - Build type: debug (not Play Store production-signed)
+          - Facebook authenticated monitoring remains subject to physical-device acceptance testing and Meta DOM/login behavior.
+          - Do not treat this prerelease as production-ready.
+
+          Download \`MR-SCRAP-android-alpha.apk\` and verify its SHA-256 with the accompanying checksum file.
+          EOF
+          )
+
+          if gh release view android-alpha >/dev/null 2>&1; then
+            gh release edit android-alpha --title "MR SCRAP Android Alpha" --prerelease --notes "$NOTES"
+          else
+            gh release create android-alpha --target "$GITHUB_SHA" --title "MR SCRAP Android Alpha" --prerelease --notes "$NOTES"
+          fi
+
+          gh release upload android-alpha \
+            release/MR-SCRAP-android-alpha.apk \
+            release/MR-SCRAP-android-alpha.apk.sha256 \
+            release/COMMIT_SHA.txt \
+            --clobber
