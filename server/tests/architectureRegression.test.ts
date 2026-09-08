@@ -165,3 +165,42 @@ test('alpha brand configuration does not advertise unimplemented paid capabiliti
   assert.match(brand, /PLANS_CONFIG = \{\} as const/);
   assert.doesNotMatch(brand, /Instant push notifications|Priority background polling|Export alerts to CSV/);
 });
+
+test('duplicate source identities never overwrite the existing source or create an update path', () => {
+  const database = read('server/db/database.ts');
+  assert.match(database, /ON CONFLICT \(user_id, platform, external_id\) DO NOTHING/);
+  assert.match(database, /throw new Error\('SOURCE_ALREADY_EXISTS'\)/);
+  assert.doesNotMatch(database, /ON CONFLICT \(user_id, platform, external_id\) DO UPDATE SET/);
+});
+
+test('authenticated ingestion can repair placeholder source names and missing avatars', () => {
+  const database = read('server/db/database.ts');
+  const ingestion = read('server/worker/deviceIngestion.ts');
+  const radar = read('src/context/RadarContext.tsx');
+  assert.match(database, /async updateSourceMetadata/);
+  assert.match(ingestion, /healSourceMetadataFromPosts/);
+  assert.match(ingestion, /sourceMetadata/);
+  assert.match(radar, /withHealedSourceMetadata/);
+});
+
+test('all PostgreSQL clients share the centralized TLS policy', () => {
+  const database = read('server/db/database.ts');
+  const auth = read('server/auth/appAuth.ts');
+  const release = read('server/releases/releaseStore.ts');
+  assert.match(database, /ssl: postgresSsl\(dbUrl\)/);
+  assert.match(auth, /ssl: postgresSsl\(dbUrl\)/);
+  assert.match(release, /ssl: postgresSsl\(databaseUrl\)/);
+});
+
+test('inactive Web Push placeholder is removed until end-to-end delivery exists', () => {
+  const worker = read('public/sw.js');
+  assert.doesNotMatch(worker, /addEventListener\('push'/);
+  assert.doesNotMatch(worker, /showNotification/);
+});
+
+test('UI copy does not promise instant or fabricated demo activity', () => {
+  const i18n = read('src/lib/i18n.ts');
+  assert.doesNotMatch(i18n, /Instant Push Alert|إشعار فوري لحظي|رادارك في 30 ثانية|realistic social feeds/);
+  assert.match(i18n, /device check detects a match/);
+  assert.match(i18n, /يكتشف فحص الجهاز تطابقًا/);
+});
