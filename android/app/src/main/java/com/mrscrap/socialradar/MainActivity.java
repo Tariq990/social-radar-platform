@@ -11,6 +11,7 @@ import org.json.JSONObject;
 public class MainActivity extends BridgeActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        registerPlugin(AppUpdatePlugin.class);
         registerPlugin(AuthenticatedSocialSessionPlugin.class);
         super.onCreate(savedInstanceState);
 
