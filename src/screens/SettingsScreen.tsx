@@ -37,9 +37,6 @@ export const SettingsScreen: React.FC = () => {
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [showConfirmReset, setShowConfirmReset] = useState(false);
-  const [pushStatus, setPushStatus] = useState<'prompt' | 'granted'>(() =>
-    typeof Notification !== 'undefined' && Notification.permission === 'granted' ? 'granted' : 'prompt'
-  );
 
   const handleConnectSession = async () => {
     setAuthBusy(true);
@@ -64,16 +61,6 @@ export const SettingsScreen: React.FC = () => {
       setAuthError(error?.message || 'Could not clear the local Facebook session.');
     } finally {
       setAuthBusy(false);
-    }
-  };
-
-  const handleRequestPush = async () => {
-    if (!('Notification' in window)) return;
-    try {
-      const permission = await Notification.requestPermission();
-      setPushStatus(permission === 'granted' ? 'granted' : 'prompt');
-    } catch {
-      setPushStatus('prompt');
     }
   };
 
@@ -194,13 +181,11 @@ export const SettingsScreen: React.FC = () => {
         </h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
           <StatusItem label="Android Share Target" ok={deviceSessionAvailable} detail={deviceSessionAvailable ? 'Native app detected' : 'Web mode'} />
-          <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between gap-3">
-            <div>
-              <span className="font-semibold text-slate-200 block">{t.pushNotificationsTitle}</span>
-              <span className="text-[11px] text-slate-500">{pushStatus === 'granted' ? t.pushEnabled : 'Permission not granted'}</span>
-            </div>
-            {pushStatus !== 'granted' && <button onClick={handleRequestPush} className="px-2.5 py-1 rounded-lg bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 text-[11px]">{t.enablePushBtn}</button>}
-          </div>
+          <StatusItem
+            label={locale === 'ar' ? 'التنبيهات الخارجية' : 'External push delivery'}
+            ok={false}
+            detail={locale === 'ar' ? 'FCM / Web Push غير مفعّل بعد — التنبيهات داخل التطبيق فقط' : 'FCM / Web Push not wired yet — in-app alerts only'}
+          />
         </div>
       </div>
 
