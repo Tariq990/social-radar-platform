@@ -6,9 +6,35 @@ export interface EvaluationResult extends RuleMatchResult {
   isFallback?: boolean;
 }
 
+function normalizeIntent(value: string): string {
+  return value
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[\u064B-\u065F\u0670\u0640]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isLatestPostIntent(value: string): boolean {
+  const text = normalizeIntent(value || '');
+  if (!text) return false;
+
+  const english = [
+    /\b(?:latest|newest)\s+(?:post|update)\b/,
+    /\b(?:every|each|any)\s+new\s+(?:post|update)\b/,
+    /\bnotify\s+me\s+(?:about\s+)?(?:the\s+)?(?:latest|newest)\s+(?:post|update)\b/,
+    /\balert\s+me\s+(?:about\s+)?(?:the\s+)?(?:latest|newest)\s+(?:post|update)\b/
+  ];
+  if (english.some(pattern => pattern.test(text))) return true;
+
+  return /(?:اخر|آخر|احدث|أحدث)\s+(?:بوست|منشور)/.test(text) ||
+    /(?:كل|اي|أي)\s+(?:بوست|منشور)\s+جديد/.test(text) ||
+    /(?:نبهني|نبّهني|اخبرني|أخبرني).*?(?:بوست|منشور).*?(?:جديد|نزل)/.test(text);
+}
+
 /**
  * Production rule evaluation pipeline:
- * 1. Deterministic negative filters to avoid unnecessary AI calls.
+ * 1. Deterministic intent/negative filters to avoid unnecessary AI calls.
  * 2. Provider-neutral semantic classification through the operator-configured AI backend.
  * 3. Apply the rule confidence threshold after schema validation.
  *
@@ -51,6 +77,39 @@ export async function evaluatePostAgainstRule(
         extracted: {}
       };
     }
+  }
+
+  // "Latest/new post" is a transport intent, not a semantic-content filter. A newly ingested
+  // top feed item should therefore match immediately instead of paying for an AI round trip.
+  // Android collector metadata marks pinned/older visible items so only the actual top feed item
+  // is selected when that ordering information is available.
+  if (isLatestPostIntent(rule.natural_language || '')) {
+    const metadata = post.metadata && typeof post.metadata === 'object' ? post.metadata as Record<string, unknown> : {};
+    const pinned = metadata.pinned === true;
+    const feedIndex = Number(metadata.feedIndex);
+    const isOlderVisibleItem = Number.isFinite(feedIndex) && feedIndex > 0;
+
+    if (pinned || isOlderVisibleItem) {
+      return {
+        matched: false,
+        confidence: 1,
+        category: 'New Post',
+        reason: locale === 'ar'
+          ? 'تم تجاهل هذا العنصر لأنه ليس أحدث منشور فعلي في ترتيب الصفحة.'
+          : 'Ignored because this item is not the newest real post in the page order.',
+        extracted: {}
+      };
+    }
+
+    return {
+      matched: true,
+      confidence: 1,
+      category: 'New Post',
+      reason: locale === 'ar'
+        ? 'هذا هو أحدث منشور فعلي جديد تم التقاطه من المصدر.'
+        : 'This is the newest real post newly collected from the source.',
+      extracted: {}
+    };
   }
 
   const result = await aiService.classifyPost(post, rule, locale);
