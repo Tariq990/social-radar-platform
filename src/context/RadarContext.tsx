@@ -3,6 +3,7 @@ import { Source, WatchRule, AlertMatch, Collection, RadarDigest, UserProfile } f
 import { INITIAL_SOURCES, INITIAL_RULES, INITIAL_MATCHES, INITIAL_COLLECTIONS } from '../data/seedData';
 import { DeviceSessionConnector, NativeSessionStatus } from '../connectors/deviceSessionConnector';
 import { Locale } from '../lib/i18n';
+import { extractSupportedSocialUrl } from '../lib/socialUrl';
 import {
   apiCheckHealth,
   apiGetConfig,
@@ -91,11 +92,6 @@ const EMPTY_DIGEST: RadarDigest = {
   id: 'live_digest', scannedCount: 0, matchedCount: 0, sourcesMonitored: 0, summary: '', summaryAr: '', highlights: [], highlightsAr: [], generatedAt: ''
 };
 
-function extractSharedUrl(value: string): string | null {
-  const match = value.match(/https?:\/\/[^\s]+/i);
-  return match ? match[0].replace(/[),.;]+$/, '') : null;
-}
-
 function connectedAccountLabel(status: NativeSessionStatus): string | undefined {
   const facebook = status.facebookConnected === true;
   const instagram = status.instagramConnected === true;
@@ -143,9 +139,6 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       deviceSessionAccount: connectedAccountLabel(status),
       deviceSessionLastChecked: status.lastCheckedAt || status.connectedAt || undefined
     }));
-    // Backend source health describes the last ingest. The Android CookieManager is authoritative
-    // for whether a device-owned session is usable right now, so reconcile cards after every
-    // local session refresh instead of showing a stale server-side "connected" state.
     if (status.available) {
       setSources(previous => previous.map(source => source.connectorType === 'device_session'
         ? {
@@ -163,8 +156,10 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const loadDatabaseState = async () => {
     try {
-      const [health, config, auth, dbSources, dbRules, dbAlerts] = await Promise.all([
-        apiCheckHealth(), apiGetConfig(), apiGetAuthSession(), apiFetchSources(), apiFetchRules(), apiFetchAlerts()
+      // Public landing/bootstrap requests must never depend on authenticated CRUD endpoints.
+      // Otherwise a legitimate 401 for an anonymous visitor makes a healthy backend appear offline.
+      const [health, config, auth] = await Promise.all([
+        apiCheckHealth(), apiGetConfig(), apiGetAuthSession()
       ]);
       const serverDemo = config.appMode === 'demo';
       setIsDemoMode(serverDemo);
@@ -175,6 +170,21 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setMonitoringMode(config.monitoringMode || 'device_session');
       setOptionalPublicProviderConfigured(Boolean(config.optionalPublicProviderConfigured));
 
+      if (!auth.authenticated || !auth.user) {
+        setSources([]);
+        setRules([]);
+        setMatches([]);
+        setDigest(previous => ({ ...previous, matchedCount: 0, sourcesMonitored: 0 }));
+        setUser(previous => ({
+          ...previous,
+          id: '', email: '', displayName: '', plan: 'free', watchedSourcesCount: 0, activeRulesCount: 0
+        }));
+        return;
+      }
+
+      const [dbSources, dbRules, dbAlerts] = await Promise.all([
+        apiFetchSources(), apiFetchRules(), apiFetchAlerts()
+      ]);
       const uniqueMatchedPosts = new Map<string, Set<string>>();
       for (const alert of dbAlerts) {
         const set = uniqueMatchedPosts.get(alert.sourceId) || new Set<string>();
@@ -190,18 +200,15 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setRules(dbRules);
       setMatches(dbAlerts);
       setDigest(previous => ({ ...previous, matchedCount: dbAlerts.length, sourcesMonitored: hydratedSources.length }));
-
-      if (auth.authenticated && auth.user) {
-        setUser(previous => ({
-          ...previous,
-          id: auth.user!.id,
-          email: auth.user!.email,
-          displayName: auth.user!.name || auth.user!.email,
-          plan: auth.user!.tier === 'pro' || auth.user!.tier === 'power' ? auth.user!.tier : 'free',
-          watchedSourcesCount: hydratedSources.length,
-          activeRulesCount: dbRules.filter(rule => rule.enabled).length
-        }));
-      }
+      setUser(previous => ({
+        ...previous,
+        id: auth.user!.id,
+        email: auth.user!.email,
+        displayName: auth.user!.name || auth.user!.email,
+        plan: auth.user!.tier === 'pro' || auth.user!.tier === 'power' ? auth.user!.tier : 'free',
+        watchedSourcesCount: hydratedSources.length,
+        activeRulesCount: dbRules.filter(rule => rule.enabled).length
+      }));
     } catch (error) {
       console.warn('[RadarProvider] Backend state load failed', error);
       setBackendStatus('offline');
@@ -211,9 +218,6 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   useEffect(() => {
     localStorage.removeItem(STORAGE_KEYS.DEMO_MODE);
-    // Load persisted rows first, then reconcile every device-session source against the local
-    // CookieManager state. This avoids a race where a late database response overwrote the local
-    // needs-relogin/authenticated status.
     void (async () => {
       await loadDatabaseState();
       await refreshDeviceSession().catch(() => false);
@@ -238,7 +242,7 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const raw = params.get('url') || params.get('text') || params.get('share_url');
-    const sharedUrl = raw ? extractSharedUrl(raw) : null;
+    const sharedUrl = raw ? extractSupportedSocialUrl(raw) : null;
     if (sharedUrl) {
       setSharedIncomingUrl(sharedUrl);
       setIsAddSourceOpen(true);
@@ -246,7 +250,7 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
     const nativeShareHandler = (event: Event) => {
       const detail = (event as CustomEvent<{ text?: string }>).detail;
-      const url = detail?.text ? extractSharedUrl(detail.text) : null;
+      const url = detail?.text ? extractSupportedSocialUrl(detail.text) : null;
       if (!url) return;
       setSharedIncomingUrl(url);
       setCurrentScreen('radar');
@@ -257,7 +261,14 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, []);
 
   const toggleDemoMode = () => console.warn('[Radar] Demo mode can only be enabled by APP_MODE=demo on the server.');
-  const openAddSource = (url?: string) => { if (url) setSharedIncomingUrl(url); setIsAddSourceOpen(true); };
+  const openAddSource = (url?: string) => {
+    if (url) {
+      const safeUrl = extractSupportedSocialUrl(url);
+      if (!safeUrl) return;
+      setSharedIncomingUrl(safeUrl);
+    }
+    setIsAddSourceOpen(true);
+  };
   const closeAddSource = () => { setIsAddSourceOpen(false); setSharedIncomingUrl(null); };
 
   const addSourceWithRule = async (
@@ -287,8 +298,6 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             applyDeviceStatus(status);
             if (!DeviceSessionConnector.isPlatformConnected(status, persistedSource.platform)) return;
             const posts = await deviceConnector.fetchLatest(persistedSource, 10);
-            // Empty is still a successful authenticated scan. Ingest it so the server persists
-            // healthy connector state instead of leaving a valid source at needs_relogin.
             const ingest = await apiIngestDevicePosts(persistedSource.id, posts, locale);
             if (ingest.matchesCreated.length > 0) setMatches(previous => [...ingest.matchesCreated, ...previous]);
             setSources(previous => previous.map(source => source.id === persistedSource.id
