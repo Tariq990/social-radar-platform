@@ -16,6 +16,19 @@ export interface MediaItem {
   previewUrl?: string;
 }
 
+export interface SocialComment {
+  externalCommentId?: string;
+  authorName: string;
+  authorUrl?: string;
+  authorAvatar?: string;
+  text: string;
+  publishedLabel?: string;
+  originalUrl?: string;
+  isPublisher: boolean;
+  depth: number;
+  media: MediaItem[];
+}
+
 export interface NormalizedPost {
   id: string;
   sourceId: string;
@@ -26,6 +39,9 @@ export interface NormalizedPost {
   authorAvatar?: string;
   text: string;
   media: MediaItem[];
+  comments?: SocialComment[];
+  commentsTruncated?: boolean;
+  videoPresent?: boolean;
   publishedAt: string;
   detectedAt: string;
   fingerprint: string;

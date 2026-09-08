@@ -4,9 +4,23 @@ import { db, DbPost } from '../db/database';
 import { canonicalizeSocialUrl, computePostFingerprint } from './deduplication';
 import type { DeviceNormalizedPostInput } from './deviceIngestion';
 
+export interface DeviceExploreCommentInput {
+  authorName?: string;
+  text?: string;
+  isPublisher?: boolean;
+  depth?: number;
+  publishedLabel?: string;
+}
+
+export interface DeviceExplorePostInput extends DeviceNormalizedPostInput {
+  comments?: DeviceExploreCommentInput[];
+  commentsTruncated?: boolean;
+  videoPresent?: boolean;
+}
+
 export interface DeviceExploreSourceInput {
   sourceId: string;
-  posts: DeviceNormalizedPostInput[];
+  posts: DeviceExplorePostInput[];
 }
 
 export interface DeviceExploreItem {
@@ -47,6 +61,25 @@ function sanitizeMedia(value: unknown): { type: 'image' | 'video'; url: string }
     if (url) result.push({ type: item.type, url });
   }
   return result;
+}
+
+function sanitizeExploreComments(value: unknown): { authorName: string; text: string; isPublisher: boolean; depth: number; publishedLabel?: string }[] {
+  if (!Array.isArray(value)) return [];
+  const output: { authorName: string; text: string; isPublisher: boolean; depth: number; publishedLabel?: string }[] = [];
+  for (const raw of value.slice(0, 200)) {
+    if (!raw || typeof raw !== 'object') continue;
+    const authorName = typeof raw.authorName === 'string' ? raw.authorName.trim().slice(0, 160) : '';
+    const text = typeof raw.text === 'string' ? raw.text.trim().slice(0, 700) : '';
+    if (!authorName || !text) continue;
+    output.push({
+      authorName,
+      text,
+      isPublisher: raw.isPublisher === true,
+      depth: Math.max(0, Math.min(4, Number(raw.depth) || 0)),
+      publishedLabel: typeof raw.publishedLabel === 'string' ? raw.publishedLabel.trim().slice(0, 120) : undefined
+    });
+  }
+  return output;
 }
 
 function sanitizeMetadata(value: unknown): Record<string, unknown> {
@@ -129,6 +162,13 @@ export async function exploreDeviceSnapshots(
         : undefined;
       const fingerprint = `${source.id}:${computePostFingerprint(source.platform, externalId, canonicalUrl, text)}`.slice(0, 255);
       const metadata = { ...sanitizeMetadata(raw.metadata), ingestion: 'android_device_explore' };
+      const exploreComments = sanitizeExploreComments(raw.comments);
+      const analysisMetadata = {
+        ...metadata,
+        exploreComments,
+        commentsTruncated: raw.commentsTruncated === true,
+        videoPresent: raw.videoPresent === true
+      };
       const authorName = typeof raw.authorName === 'string' && raw.authorName.trim() ? raw.authorName.trim().slice(0, 255) : source.name;
       const authorAvatar = safeHttpUrl(raw.authorAvatar) || source.avatar_url;
       const media = sanitizeMedia(raw.media);
@@ -158,7 +198,7 @@ export async function exploreDeviceSnapshots(
         text,
         media,
         published_at: publishedAt || persisted.published_at,
-        metadata: { ...(persisted.metadata || {}), ...metadata }
+        metadata: { ...(persisted.metadata || {}), ...analysisMetadata }
       });
     }
   }

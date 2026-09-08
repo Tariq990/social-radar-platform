@@ -41,6 +41,20 @@ function normalizePost(raw: any): NormalizedPost {
     throw new Error('Explore response contained a malformed post');
   }
   const platform = normalizePlatform(raw.platform);
+  const metadata = raw.metadata && typeof raw.metadata === 'object' ? raw.metadata : {};
+  const comments = Array.isArray(metadata.exploreComments)
+    ? metadata.exploreComments.flatMap((entry: any) => {
+        if (!entry || typeof entry.authorName !== 'string' || typeof entry.text !== 'string') return [];
+        return [{
+          authorName: entry.authorName,
+          text: entry.text,
+          isPublisher: entry.isPublisher === true,
+          depth: Math.max(0, Math.min(4, Number(entry.depth) || 0)),
+          publishedLabel: typeof entry.publishedLabel === 'string' ? entry.publishedLabel : undefined,
+          media: []
+        }];
+      }).slice(0, 200)
+    : [];
   return {
     id: raw.id,
     sourceId: raw.source_id || '',
@@ -53,10 +67,13 @@ function normalizePost(raw: any): NormalizedPost {
     media: Array.isArray(raw.media)
       ? raw.media.filter((item: any) => item && (item.type === 'image' || item.type === 'video') && typeof item.url === 'string')
       : [],
+    comments,
+    commentsTruncated: metadata.commentsTruncated === true,
+    videoPresent: metadata.videoPresent === true,
     publishedAt: raw.published_at || '',
     detectedAt: raw.created_at || '',
     fingerprint: raw.fingerprint || raw.external_id || raw.canonical_url,
-    metadata: raw.metadata && typeof raw.metadata === 'object' ? raw.metadata : {}
+    metadata
   };
 }
 
@@ -82,6 +99,25 @@ function compactMedia(media: NormalizedPost['media']): NormalizedPost['media'] {
   return [];
 }
 
+function compactComments(comments: NormalizedPost['comments']): NonNullable<NormalizedPost['comments']> {
+  if (!Array.isArray(comments)) return [];
+  return comments.slice(0, 200).flatMap(comment => {
+    if (!comment || typeof comment.authorName !== 'string' || typeof comment.text !== 'string') return [];
+    const authorName = comment.authorName.trim().slice(0, 160);
+    const text = comment.text.trim();
+    if (!authorName || !text) return [];
+    const compact = text.length <= 650 ? text : `${text.slice(0, 500)} […] ${text.slice(-100)}`;
+    return [{
+      authorName,
+      text: compact,
+      isPublisher: comment.isPublisher === true,
+      depth: Math.max(0, Math.min(4, Number(comment.depth) || 0)),
+      publishedLabel: typeof comment.publishedLabel === 'string' ? comment.publishedLabel.slice(0, 120) : undefined,
+      media: compactMedia(comment.media || [])
+    }];
+  });
+}
+
 function payloadPost(post: NormalizedPost) {
   const metadata = post.metadata && typeof post.metadata === 'object' ? post.metadata : {};
   return {
@@ -91,6 +127,9 @@ function payloadPost(post: NormalizedPost) {
     // Backend already knows the source avatar, so do not repeat the same long CDN URL 100 times.
     text: compactText(post.text || ''),
     media: compactMedia(post.media || []),
+    comments: compactComments(post.comments),
+    commentsTruncated: post.commentsTruncated === true,
+    videoPresent: post.videoPresent === true,
     publishedAt: post.publishedAt,
     metadata: {
       collector: typeof metadata.collector === 'string' ? metadata.collector : undefined,
