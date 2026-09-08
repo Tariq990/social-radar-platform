@@ -1,48 +1,45 @@
 import React from 'react';
-import { 
-  Sparkles, 
-  RotateCw, 
-  Plus, 
-  Eye, 
-  CheckCircle2, 
-  Clock, 
+import {
+  Sparkles,
+  RotateCw,
+  Plus,
+  CheckCircle2,
   ArrowRight,
   ArrowLeft,
-  SlidersHorizontal,
-  Flame,
-  ShieldCheck,
   Bell
 } from 'lucide-react';
 import { useRadar } from '../context/RadarContext';
 import { AlertCard } from '../components/AlertCard';
 import { translations } from '../lib/i18n';
-import { BRAND } from '../config/brand';
 
 export const RadarHomeScreen: React.FC = () => {
-  const { 
-    matches, 
-    sources, 
-    rules, 
-    digest, 
-    openDigest, 
-    openAddSource, 
-    openAlertDetail, 
-    scanAllSources, 
+  const {
+    matches,
+    sources,
+    openDigest,
+    openAddSource,
+    openAlertDetail,
+    scanAllSources,
     isScanning,
-    locale, 
-    setCurrentScreen 
+    locale,
+    setCurrentScreen
   } = useRadar();
   const t = translations[locale];
 
-  // Priority matches: unread or high-confidence matches
   const priorityMatches = matches.slice(0, 5);
-
   const greeting = new Date().getHours() >= 17 ? t.greetingEvening : t.greetingDay;
-  const summaryText = locale === 'ar' && digest.summaryAr ? digest.summaryAr : digest.summary;
+  const realStoredPosts = sources.reduce((sum, source) => sum + Number(source.recentPostsCount || 0), 0);
+  const latestActivity = matches[0]?.createdAt || sources.find(source => source.lastCheckedAt)?.lastCheckedAt || '';
+  const summaryText = matches.length > 0
+    ? (locale === 'ar'
+      ? `لديك ${matches.length} تطابقات فعلية محفوظة من المصادر التي تراقبها. افتح التنبيهات لرؤية المنشورات والأسباب.`
+      : `You have ${matches.length} real persisted matches from your monitored sources. Open Alerts to review the posts and reasons.`)
+    : (locale === 'ar'
+      ? 'لا توجد تطابقات فعلية بعد. نفّذ فحصًا فوريًا أو انتظر ظهور منشور جديد يطابق قواعدك.'
+      : 'No real matches yet. Run Scan Now or wait for a new post that matches your rules.');
 
   return (
     <div className="space-y-6 pb-12">
-      {/* Top Section: Radar Pulse & Greeting (Section 9) */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-100 tracking-tight flex items-center gap-2.5">
@@ -54,7 +51,6 @@ export const RadarHomeScreen: React.FC = () => {
           </p>
         </div>
 
-        {/* Primary "+ Watch" & "Scan Now" Quick Buttons */}
         <div className="flex items-center gap-2">
           <button
             id="btn-scan-radar-home"
@@ -77,11 +73,10 @@ export const RadarHomeScreen: React.FC = () => {
         </div>
       </div>
 
-      {/* Subtle Counter Stats (Section 9: "Use subtle counters, not giant analytics charts") */}
       <div className="grid grid-cols-3 gap-3">
         <div className="p-3.5 rounded-2xl bg-slate-900/60 border border-slate-800/80 flex flex-col items-center sm:items-start">
-          <span className="text-xl sm:text-2xl font-bold text-slate-100">{digest.scannedCount}</span>
-          <span className="text-[11px] text-slate-400 mt-0.5">{t.scannedLabel}</span>
+          <span className="text-xl sm:text-2xl font-bold text-slate-100">{realStoredPosts}</span>
+          <span className="text-[11px] text-slate-400 mt-0.5">{locale === 'ar' ? 'منشورات فعلية' : 'real posts'}</span>
         </div>
 
         <div className="p-3.5 rounded-2xl bg-cyan-950/20 border border-cyan-500/20 flex flex-col items-center sm:items-start">
@@ -95,8 +90,7 @@ export const RadarHomeScreen: React.FC = () => {
         </div>
       </div>
 
-      {/* Daily AI Summary Card (Section 9: "Your radar in 30 seconds") */}
-      <div 
+      <div
         onClick={openDigest}
         className="group relative rounded-2xl p-4 sm:p-5 bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950 border border-slate-800 hover:border-amber-500/40 transition-all cursor-pointer shadow-lg shadow-black/40"
       >
@@ -107,7 +101,7 @@ export const RadarHomeScreen: React.FC = () => {
             </div>
             <div>
               <h3 className="text-xs font-bold text-amber-400 uppercase tracking-wider">{t.quickDigestTitle}</h3>
-              <p className="text-[11px] text-slate-500">{digest.generatedAt}</p>
+              <p className="text-[11px] text-slate-500">{latestActivity || (locale === 'ar' ? 'بيانات فعلية فقط' : 'Real data only')}</p>
             </div>
           </div>
 
@@ -117,52 +111,36 @@ export const RadarHomeScreen: React.FC = () => {
           </span>
         </div>
 
-        <p className="mt-3 text-xs sm:text-sm text-slate-200 line-clamp-2 leading-relaxed">
-          {summaryText}
-        </p>
+        <p className="mt-3 text-xs sm:text-sm text-slate-200 line-clamp-2 leading-relaxed">{summaryText}</p>
       </div>
 
-      {/* Priority Matches List (Section 9) */}
       <div className="space-y-3">
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
             <Bell className="w-4 h-4 text-cyan-400" />
             <span>{t.priorityMatches}</span>
           </h2>
-          <button
-            onClick={() => setCurrentScreen('alerts')}
-            className="text-xs text-cyan-400 hover:text-cyan-300 font-semibold"
-          >
+          <button onClick={() => setCurrentScreen('alerts')} className="text-xs text-cyan-400 hover:text-cyan-300 font-semibold">
             {locale === 'ar' ? 'عرض الكل' : 'View all'} ({matches.length})
           </button>
         </div>
 
         {priorityMatches.length > 0 ? (
           <div className="space-y-3">
-            {priorityMatches.map((match) => (
-              <AlertCard
-                key={match.id}
-                alert={match}
-                onOpenDetail={openAlertDetail}
-              />
+            {priorityMatches.map(match => (
+              <AlertCard key={match.id} alert={match} onOpenDetail={openAlertDetail} />
             ))}
           </div>
         ) : (
-          /* Section 34: "You're all caught up. We scanned 84 new posts and none matched your rules." */
           <div className="p-8 rounded-2xl bg-slate-900/40 border border-slate-800 text-center space-y-3">
             <div className="w-12 h-12 rounded-full bg-emerald-500/10 text-emerald-400 mx-auto flex items-center justify-center">
               <CheckCircle2 className="w-6 h-6" />
             </div>
             <div>
               <h3 className="text-sm font-bold text-slate-100">{t.noMatchesYet}</h3>
-              <p className="text-xs text-slate-400 max-w-sm mx-auto mt-1">
-                {t.noMatchesSub}
-              </p>
+              <p className="text-xs text-slate-400 max-w-sm mx-auto mt-1">{t.noMatchesSub}</p>
             </div>
-            <button
-              onClick={() => openAddSource()}
-              className="mt-2 inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-cyan-500 text-slate-950 text-xs font-bold"
-            >
+            <button onClick={() => openAddSource()} className="mt-2 inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-cyan-500 text-slate-950 text-xs font-bold">
               <Plus className="w-4 h-4" />
               <span>{t.addFirstSource}</span>
             </button>
