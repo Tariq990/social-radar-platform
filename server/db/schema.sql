@@ -85,8 +85,12 @@ CREATE TABLE IF NOT EXISTS posts (
   published_at TIMESTAMP WITH TIME ZONE,
   fingerprint VARCHAR(255) NOT NULL UNIQUE,
   metadata JSONB DEFAULT '{}'::jsonb,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- Forward-compatible migration for databases created before posts.updated_at existed.
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();
 
 -- 7. Matches Table (AI / Rule Matches)
 CREATE TABLE IF NOT EXISTS matches (
@@ -130,7 +134,9 @@ CREATE TABLE IF NOT EXISTS connector_events (
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 10. Performance & Monitoring Indexes
+-- 10. Performance, integrity & Monitoring Indexes
+CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_token_hash ON devices(device_token);
+CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id);
 CREATE INDEX IF NOT EXISTS idx_sources_user ON sources(user_id);
 CREATE INDEX IF NOT EXISTS idx_sources_active ON sources(is_paused, connector_status);
 CREATE INDEX IF NOT EXISTS idx_rules_user ON rules(user_id);
