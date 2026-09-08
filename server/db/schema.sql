@@ -160,7 +160,25 @@ CREATE TABLE IF NOT EXISTS connector_events (
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 11. Performance, integrity & Monitoring Indexes
+-- 11. Android Alpha Release Distribution
+-- Stores only the current alpha APK. Publishing a newer build replaces the previous row so the
+-- database does not grow by one full APK per release. The binary is served by the authenticated
+-- release publisher / public updater endpoints on the Render backend.
+CREATE TABLE IF NOT EXISTS app_releases (
+  channel VARCHAR(64) PRIMARY KEY,
+  platform VARCHAR(32) NOT NULL,
+  version_code INT NOT NULL,
+  version_name VARCHAR(64) NOT NULL,
+  min_supported_version_code INT NOT NULL,
+  mandatory BOOLEAN NOT NULL DEFAULT TRUE,
+  sha256 CHAR(64) NOT NULL,
+  size_bytes BIGINT NOT NULL,
+  release_notes TEXT,
+  apk BYTEA NOT NULL,
+  published_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- 12. Performance, integrity & Monitoring Indexes
 CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_token_hash ON devices(device_token);
 CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id);
 CREATE INDEX IF NOT EXISTS idx_app_sessions_user ON app_sessions(user_id);
