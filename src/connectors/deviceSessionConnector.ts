@@ -1,84 +1,190 @@
+import { Capacitor, registerPlugin } from '@capacitor/core';
 import { SourceConnector, SourceInput, ValidationResult, ResolvedSource, ConnectorHealth } from './types';
-import { NormalizedPost } from '../types';
+import { NormalizedPost, SourcePlatform } from '../types';
 
-export class DeviceSessionConnector implements SourceConnector {
-  private static STORAGE_KEY = 'mrscrap_secure_device_session';
+interface NativeSessionStatus {
+  available: boolean;
+  connected: boolean;
+  connectedAt?: string;
+  lastCheckedAt?: string;
+  message?: string;
+}
 
-  static getLocalSession(): { active: boolean; accountName?: string; connectedAt?: string } {
-    try {
-      const stored = localStorage.getItem(DeviceSessionConnector.STORAGE_KEY);
-      if (stored) {
-        return JSON.parse(stored);
-      }
-    } catch {
-      // Fallback
+interface NativeResolvedSource {
+  platform: 'facebook' | 'instagram';
+  externalId: string;
+  url: string;
+  displayName: string;
+  handle?: string;
+  avatarUrl?: string;
+  bio?: string;
+  visibilityType?: 'public' | 'authenticated';
+}
+
+interface NativeCollectedPost {
+  externalPostId?: string;
+  originalUrl: string;
+  authorName?: string;
+  authorAvatar?: string;
+  text?: string;
+  media?: { type: 'image' | 'video'; url: string }[];
+  publishedAt?: string;
+  metadata?: Record<string, unknown>;
+}
+
+interface AuthenticatedSocialSessionPlugin {
+  status(): Promise<NativeSessionStatus>;
+  connectFacebook(): Promise<{ opened: boolean }>;
+  disconnect(): Promise<{ disconnected: boolean }>;
+  resolveSource(options: { url: string }): Promise<NativeResolvedSource>;
+  collectSource(options: { sourceId: string; url: string; platform: string }): Promise<{ posts: NativeCollectedPost[]; checkedAt: string }>;
+  scheduleSource(options: { sourceId: string; url: string; platform: string; backendBaseUrl: string }): Promise<{ scheduled: boolean; minimumIntervalMinutes: number }>;
+  cancelSource(options: { sourceId: string }): Promise<{ cancelled: boolean }>;
+}
+
+const NativeSession = registerPlugin<AuthenticatedSocialSessionPlugin>('AuthenticatedSocialSession');
+
+function isAndroidNative(): boolean {
+  return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
+}
+
+function toNormalizedPost(source: { id: string; platform: SourcePlatform; url: string; externalId: string }, post: NativeCollectedPost): NormalizedPost {
+  const detectedAt = new Date().toISOString();
+  return {
+    id: post.externalPostId || `${source.id}:${post.originalUrl}`,
+    sourceId: source.id,
+    platform: source.platform,
+    externalPostId: post.externalPostId,
+    originalUrl: post.originalUrl,
+    authorName: post.authorName || source.externalId,
+    authorAvatar: post.authorAvatar,
+    text: post.text || '',
+    media: Array.isArray(post.media) ? post.media : [],
+    publishedAt: post.publishedAt,
+    detectedAt,
+    fingerprint: post.externalPostId || post.originalUrl,
+    metadata: {
+      ...(post.metadata || {}),
+      ingestion: 'android_device_session'
     }
-    return { active: false };
+  };
+}
+
+/**
+ * Browser-safe wrapper around the real Android native session plugin.
+ * No cookie, password, or raw session value is exposed to JavaScript.
+ */
+export class DeviceSessionConnector implements SourceConnector {
+  static isNativeAvailable(): boolean {
+    return isAndroidNative();
   }
 
-  static saveLocalSession(accountName: string) {
-    const data = {
-      active: true,
-      accountName,
-      connectedAt: new Date().toISOString(),
-      encryptedLocalHash: 'sec_keystore_' + Math.random().toString(36).substring(2, 10)
-    };
-    localStorage.setItem(DeviceSessionConnector.STORAGE_KEY, JSON.stringify(data));
-    return data;
+  static async getLocalSession(): Promise<NativeSessionStatus> {
+    if (!isAndroidNative()) {
+      return {
+        available: false,
+        connected: false,
+        message: 'Authenticated social monitoring requires the Android app.'
+      };
+    }
+    return await NativeSession.status();
   }
 
-  static wipeLocalSession() {
-    localStorage.removeItem(DeviceSessionConnector.STORAGE_KEY);
+  static async connectFacebook(): Promise<void> {
+    if (!isAndroidNative()) throw new Error('Facebook session connection requires the Android app.');
+    await NativeSession.connectFacebook();
+  }
+
+  static async wipeLocalSession(): Promise<void> {
+    if (!isAndroidNative()) return;
+    await NativeSession.disconnect();
+  }
+
+  static async scheduleBackgroundSource(source: { id: string; url: string; platform: SourcePlatform }, backendBaseUrl: string): Promise<void> {
+    if (!isAndroidNative()) throw new Error('Background authenticated monitoring requires the Android app.');
+    await NativeSession.scheduleSource({
+      sourceId: source.id,
+      url: source.url,
+      platform: source.platform,
+      backendBaseUrl
+    });
+  }
+
+  static async cancelBackgroundSource(sourceId: string): Promise<void> {
+    if (!isAndroidNative()) return;
+    await NativeSession.cancelSource({ sourceId });
   }
 
   async validate(input: SourceInput): Promise<ValidationResult> {
     const raw = (input.url || '').trim();
-    return {
-      valid: Boolean(raw),
-      platform: 'facebook',
-      cleanedUrl: raw.startsWith('http') ? raw : `https://${raw}`,
-      handleOrId: raw.split('/').filter(Boolean).pop() || 'private_source',
-      isPostUrl: false
-    };
+    try {
+      const parsed = new URL(raw);
+      const host = parsed.hostname.toLowerCase();
+      const isFacebook = host === 'facebook.com' || host.endsWith('.facebook.com') || host === 'fb.com' || host.endsWith('.fb.com') || host === 'fb.watch';
+      const isInstagram = host === 'instagram.com' || host.endsWith('.instagram.com') || host === 'instagr.am';
+      if (!isFacebook && !isInstagram) {
+        return { valid: false, platform: 'other', cleanedUrl: raw, handleOrId: '', isPostUrl: false, error: 'Only Facebook and Instagram URLs are supported.' };
+      }
+      parsed.hash = '';
+      const segments = parsed.pathname.split('/').filter(Boolean);
+      return {
+        valid: true,
+        platform: isInstagram ? 'instagram' : 'facebook',
+        cleanedUrl: parsed.toString(),
+        handleOrId: segments[0] || '',
+        isPostUrl: /\/(posts|reel|reels|p|permalink)\//i.test(parsed.pathname)
+      };
+    } catch {
+      return { valid: false, platform: 'other', cleanedUrl: raw, handleOrId: '', isPostUrl: false, error: 'Invalid URL' };
+    }
   }
 
   async resolveSource(input: SourceInput): Promise<ResolvedSource> {
     const validation = await this.validate(input);
-    const session = DeviceSessionConnector.getLocalSession();
+    if (!validation.valid) throw new Error(validation.error || 'Invalid source URL');
+    if (!isAndroidNative()) throw new Error('This source requires a connected Android device session.');
 
+    const status = await NativeSession.status();
+    if (!status.connected) throw new Error('Facebook session is not connected.');
+
+    const resolved = await NativeSession.resolveSource({ url: validation.cleanedUrl });
     return {
-      platform: 'facebook',
-      externalId: validation.handleOrId,
-      url: validation.cleanedUrl,
-      displayName: `Private/Group Source (${validation.handleOrId})`,
-      handle: `@${validation.handleOrId}`,
-      avatarUrl: 'https://images.unsplash.com/photo-1522071820081-009f0129c71c?w=150&auto=format&fit=crop&q=80',
-      bio: 'Monitored via local authenticated Android/Device session.',
-      visibilityType: 'authenticated',
+      platform: resolved.platform,
+      externalId: resolved.externalId,
+      url: resolved.url,
+      displayName: resolved.displayName,
+      handle: resolved.handle || '',
+      avatarUrl: resolved.avatarUrl || '',
+      bio: resolved.bio || '',
+      visibilityType: resolved.visibilityType || 'authenticated',
       connectorType: 'device_session',
-      connectorStatus: session.active ? 'authenticated_monitoring' : 'needs_relogin',
+      connectorStatus: 'authenticated_monitoring',
       samplePosts: []
     };
   }
 
-  async fetchLatest(source: { id: string; url: string; platform: any; externalId: string }): Promise<NormalizedPost[]> {
-    const session = DeviceSessionConnector.getLocalSession();
-    if (!session.active) {
-      throw new Error('Device session expired or not authenticated. Reconnect required.');
-    }
-    return [];
+  async fetchLatest(source: { id: string; url: string; platform: SourcePlatform; externalId: string }): Promise<NormalizedPost[]> {
+    if (!isAndroidNative()) throw new Error('Authenticated source collection requires the Android app.');
+    const status = await NativeSession.status();
+    if (!status.connected) throw new Error('Facebook session expired or is not connected.');
+
+    const result = await NativeSession.collectSource({
+      sourceId: source.id,
+      url: source.url,
+      platform: source.platform
+    });
+    return (result.posts || []).map(post => toNormalizedPost(source, post));
   }
 
-  async healthCheck(source: { id: string; url: string; platform: any }): Promise<ConnectorHealth> {
-    const session = DeviceSessionConnector.getLocalSession();
+  async healthCheck(_source: { id: string; url: string; platform: SourcePlatform }): Promise<ConnectorHealth> {
+    const startedAt = performance.now();
+    const status = await DeviceSessionConnector.getLocalSession();
     return {
-      status: session.active ? 'authenticated_monitoring' : 'needs_relogin',
-      latencyMs: 80,
-      lastSuccessfulCheck: session.active ? '12 min ago' : 'Disconnected',
-      errorCount: session.active ? 0 : 1,
-      message: session.active 
-        ? 'Local encrypted session active on this device.'
-        : 'Session expired or disconnected. Tap to reconnect.'
+      status: status.connected ? 'authenticated_monitoring' : 'needs_relogin',
+      latencyMs: Math.round(performance.now() - startedAt),
+      lastSuccessfulCheck: status.lastCheckedAt || status.connectedAt || 'Never',
+      errorCount: status.connected ? 0 : 1,
+      message: status.message || (status.connected ? 'Authenticated Android session is available on this device.' : 'Connect Facebook on the Android device.')
     };
   }
 }
