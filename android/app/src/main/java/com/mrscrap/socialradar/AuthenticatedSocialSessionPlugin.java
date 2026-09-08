@@ -133,9 +133,14 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
         String url = call.getString("url");
         String platform = call.getString("platform", "facebook");
         String backendBaseUrl = call.getString("backendBaseUrl");
+        String authToken = call.getString("authToken");
 
         if (sourceId == null || sourceId.isBlank() || url == null || backendBaseUrl == null || backendBaseUrl.isBlank()) {
             call.reject("sourceId, url and backendBaseUrl are required");
+            return;
+        }
+        if (authToken == null || authToken.length() < 24 || authToken.length() > 512) {
+            call.reject("Valid backend device authorization is required");
             return;
         }
         if (!AuthenticatedWebCollector.isAllowedSocialUrl(url)) {
@@ -148,6 +153,7 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
             .putString(AuthenticatedSourceWorker.KEY_SOURCE_URL, url)
             .putString(AuthenticatedSourceWorker.KEY_PLATFORM, platform)
             .putString(AuthenticatedSourceWorker.KEY_BACKEND_BASE_URL, backendBaseUrl)
+            .putString(AuthenticatedSourceWorker.KEY_AUTH_TOKEN, authToken)
             .build();
 
         Constraints constraints = new Constraints.Builder()
