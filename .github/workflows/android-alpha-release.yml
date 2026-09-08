@@ -82,6 +82,77 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      - name: Detect Android SDK on self-hosted runner
+        id: detect-android-sdk
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk=""
+
+          for candidate in \
+            "${ANDROID_HOME:-}" \
+            "${ANDROID_SDK_ROOT:-}" \
+            "$HOME/Android/Sdk" \
+            "$HOME/Android/sdk" \
+            "$HOME/.android/sdk" \
+            "/opt/android-sdk" \
+            "/usr/local/lib/android/sdk"
+          do
+            if [[ -n "$candidate" && -d "$candidate" ]]; then
+              sdk="$(realpath "$candidate")"
+              break
+            fi
+          done
+
+          if [[ -z "$sdk" ]]; then
+            platform_tools="$(find "$HOME" /opt /usr/local -maxdepth 6 -type d -name platform-tools -print -quit 2>/dev/null || true)"
+            if [[ -n "$platform_tools" ]]; then
+              sdk="$(realpath "$(dirname "$platform_tools")")"
+            fi
+          fi
+
+          if [[ -n "$sdk" ]]; then
+            echo "Detected existing Android SDK: $sdk"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "sdk=$sdk" >> "$GITHUB_OUTPUT"
+            echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
+            echo "ANDROID_SDK_ROOT=$sdk" >> "$GITHUB_ENV"
+          else
+            echo "No existing Android SDK detected; setup step will provision it once in the persistent runner home."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
+          log-accepted-android-sdk-licenses: false
+
+      - name: Configure Android SDK path
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          if [[ -z "$sdk" || ! -d "$sdk" ]]; then
+            echo "Android SDK setup completed without a usable SDK root."
+            exit 1
+          fi
+
+          sdk="$(realpath "$sdk")"
+          echo "Resolved Android SDK: $sdk"
+          echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$sdk" >> "$GITHUB_ENV"
+          printf 'sdk.dir=%s\n' "$sdk" > android/local.properties
+
+          if [[ ! -d "$sdk/platforms/android-36" ]]; then
+            echo "Required Android platform 36 is missing from $sdk/platforms."
+            exit 1
+          fi
+          if [[ ! -d "$sdk/build-tools/36.0.0" ]]; then
+            echo "Required Android build-tools 36.0.0 are missing from $sdk/build-tools."
+            exit 1
+          fi
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -119,7 +190,7 @@ jobs:
           curl --fail-with-body --retry 18 --retry-delay 10 --retry-all-errors \
             --connect-timeout 10 --max-time 120 \
             -X PUT \
-            -H "Authorization: Bearer ${OIDC_TOKEN}" \
+            -H "Authorization: Bearer ${OIDIDC_TOKEN:-$OIDC_TOKEN}" \
             -H "Content-Type: application/vnd.android.package-archive" \
             -H "X-MR-SCRAP-Version-Code: ${ANDROID_VERSION_CODE}" \
             -H "X-MR-SCRAP-Version-Name: ${ANDROID_VERSION_NAME}" \
