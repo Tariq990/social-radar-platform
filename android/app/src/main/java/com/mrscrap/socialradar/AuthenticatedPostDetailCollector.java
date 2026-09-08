@@ -69,7 +69,7 @@ final class AuthenticatedPostDetailCollector {
             int[] lastCommentCount = new int[] { -1 };
             int[] stablePasses = new int[] { 0 };
 
-            WebView webView = new WebView(context.getApplicationContext());
+            WebView webView = new WebView(ForegroundWebViewHost.contextFor(context));
             WebSettings settings = webView.getSettings();
             settings.setJavaScriptEnabled(true);
             settings.setDomStorageEnabled(true);
@@ -87,6 +87,7 @@ final class AuthenticatedPostDetailCollector {
                 View.MeasureSpec.makeMeasureSpec(viewportHeight, View.MeasureSpec.EXACTLY)
             );
             webView.layout(0, 0, viewportWidth, viewportHeight);
+            ForegroundWebViewHost.attachIfPossible(context, webView, viewportWidth, viewportHeight);
 
             CookieManager cookies = CookieManager.getInstance();
             cookies.setAcceptCookie(true);
@@ -264,15 +265,6 @@ final class AuthenticatedPostDetailCollector {
     }
 
     private static void destroy(WebView webView) {
-        new Handler(Looper.getMainLooper()).post(() -> {
-            try {
-                webView.stopLoading();
-                webView.clearHistory();
-                android.view.ViewParent parent = webView.getParent();
-                if (parent instanceof android.view.ViewGroup) ((android.view.ViewGroup) parent).removeView(webView);
-                webView.removeAllViews();
-                webView.destroy();
-            } catch (Exception ignored) {}
-        });
+        new Handler(Looper.getMainLooper()).post(() -> ForegroundWebViewHost.destroy(webView));
     }
 }

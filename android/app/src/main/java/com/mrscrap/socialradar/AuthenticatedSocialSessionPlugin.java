@@ -253,7 +253,7 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
             return;
         }
 
-        AuthenticatedWebCollector.collect(getContext(), url, limit, new AuthenticatedWebCollector.Callback() {
+        AuthenticatedWebCollector.collect(foregroundContext(), url, limit, new AuthenticatedWebCollector.Callback() {
             @Override
             public void onSuccess(JSONObject result) {
                 try {
@@ -292,7 +292,7 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
         }
 
         AuthenticatedPostDetailCollector.collect(
-            getContext(),
+            foregroundContext(),
             url,
             publisherName,
             commentsMode,
@@ -370,6 +370,11 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
         JSObject result = new JSObject();
         result.put("cancelled", true);
         call.resolve(result);
+    }
+
+    private Context foregroundContext() {
+        Activity activity = getActivity();
+        return activity != null ? activity : getContext();
     }
 
     private static String uniqueWorkName(String sourceId) {
