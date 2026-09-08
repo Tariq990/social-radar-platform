@@ -272,6 +272,50 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void collectPostDetails(PluginCall call) {
+        String url = call.getString("url");
+        String publisherName = call.getString("publisherName", "");
+        String commentsMode = call.getString("commentsMode", "none");
+        Integer requestedCommentLimit = call.getInt("commentLimit", 20);
+        int commentLimit = requestedCommentLimit == null ? 20 : Math.max(1, Math.min(200, requestedCommentLimit));
+        Boolean requestedReplies = call.getBoolean("includeReplies", true);
+        boolean includeReplies = requestedReplies == null || requestedReplies;
+
+        if (url == null || !AuthenticatedWebCollector.isAllowedSocialUrl(url)) {
+            call.reject("Invalid Facebook/Instagram post URL");
+            return;
+        }
+        String platform = SessionStateStore.platformForUrl(url);
+        if (!SessionStateStore.isConnectedForPlatform(platform)) {
+            call.reject(("instagram".equals(platform) ? "Instagram" : "Facebook") + " session is not connected");
+            return;
+        }
+
+        AuthenticatedPostDetailCollector.collect(
+            getContext(),
+            url,
+            publisherName,
+            commentsMode,
+            commentLimit,
+            includeReplies,
+            new AuthenticatedWebCollector.Callback() {
+                @Override
+                public void onSuccess(JSONObject result) {
+                    try {
+                        SessionStateStore.markChecked(getContext());
+                        JSObject output = JSObject.fromJSONObject(result);
+                        output.put("checkedAt", java.time.Instant.now().toString());
+                        call.resolve(output);
+                    } catch (Exception error) {
+                        call.reject("Could not normalize collected post details");
+                    }
+                }
+                @Override public void onError(String message) { call.reject(message); }
+            }
+        );
+    }
+
+    @PluginMethod
     public void scheduleSource(PluginCall call) {
         String sourceId = call.getString("sourceId");
         String url = call.getString("url");

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, Check, ExternalLink, Search, Sparkles, Tags, WandSparkles } from 'lucide-react';
 import { useRadar } from '../context/RadarContext';
-import { DeviceSessionConnector } from '../connectors/deviceSessionConnector';
+import { CommentGrabMode, DeviceSessionConnector } from '../connectors/deviceSessionConnector';
 import { Source } from '../types';
 import { apiExploreDevicePosts, ExploreMode, ExploreResponse, ExploreSourceBatch } from '../services/explore';
 import { SourceAvatar } from './SourceAvatar';
@@ -34,6 +34,9 @@ export const SmartGrabPanel: React.FC = () => {
   const [mode, setMode] = useState<ExploreMode>('filter');
   const [prompt, setPrompt] = useState(locale === 'ar' ? 'عروض AI أو إرشادات في التصميم' : 'AI offers or design guidance');
   const [categoryText, setCategoryText] = useState(locale === 'ar' ? 'عروض، تعليم، أخبار، إرشادات، أخرى' : 'Offers, Education, News, Guidance, Other');
+  const [commentsMode, setCommentsMode] = useState<CommentGrabMode>('none');
+  const [commentLimit, setCommentLimit] = useState(20);
+  const [includeReplies, setIncludeReplies] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -90,6 +93,14 @@ export const SmartGrabPanel: React.FC = () => {
       setError(locale === 'ar' ? `الحد الأقصى للتحليل في العملية الواحدة 100 منشور. اختر ${Math.floor(100 / limit)} مصادر أو أقل لهذا العدد.` : `One analysis run is limited to 100 posts. Select ${Math.floor(100 / limit)} sources or fewer at this per-source limit.`);
       return;
     }
+    if (commentsMode !== 'none' && chosen.length * limit > 20) {
+      setError(locale === 'ar' ? 'عند جلب التعليقات، الحد الأقصى 20 منشور في العملية الواحدة.' : 'Comment collection is limited to 20 posts per operation.');
+      return;
+    }
+    if (commentsMode === 'all' && chosen.length * limit > 5) {
+      setError(locale === 'ar' ? 'جلب كل التعليقات المتاحة محدود إلى 5 منشورات في العملية الواحدة.' : 'Collecting all accessible comments is limited to 5 posts per operation.');
+      return;
+    }
     if (mode === 'filter' && !prompt.trim()) {
       setError(locale === 'ar' ? 'اكتب ما الذي تريد البحث عنه في المنشورات.' : 'Describe what you want to find in the posts.');
       return;
@@ -114,7 +125,11 @@ export const SmartGrabPanel: React.FC = () => {
         2,
         async source => {
           try {
-            const posts = await connector.fetchLatest(source, limit);
+            const posts = await connector.fetchLatest(source, limit, {
+              commentsMode,
+              commentLimit: commentsMode === 'all' ? 200 : commentLimit,
+              includeReplies
+            });
             return { source, posts };
           } catch (err: any) {
             return { source, posts: [], error: err?.message || 'Collection failed' };
@@ -182,15 +197,24 @@ export const SmartGrabPanel: React.FC = () => {
           {mode === 'auto' && <div className="rounded-xl bg-slate-950 border border-slate-800 px-3 py-2.5 text-xs text-slate-400 flex items-center">{locale === 'ar' ? 'سيختار AI تصنيفًا عامًا مناسبًا لكل منشور بدون اختراع معلومات.' : 'AI will assign a useful general category to every post without inventing facts.'}</div>}
         </div>
 
+        <div className="rounded-xl border border-slate-800 bg-slate-950 p-3 space-y-3">
+          <div className="grid sm:grid-cols-2 gap-3">
+            <label className="space-y-1"><span className="text-[11px] font-semibold text-slate-400">{locale === 'ar' ? 'التعليقات' : 'Comments'}</span><select value={commentsMode} onChange={event => { setCommentsMode(event.target.value as CommentGrabMode); setResult(null); }} className="w-full px-3 py-2.5 rounded-xl bg-slate-900 border border-slate-800 text-sm text-slate-200 outline-none focus:border-cyan-500"><option value="none">{locale === 'ar' ? 'بدون تعليقات' : 'No comments'}</option><option value="publisher">{locale === 'ar' ? 'تعليقات الناشر فقط' : 'Publisher comments only'}</option><option value="top">{locale === 'ar' ? 'أول تعليقات ظاهرة' : 'Top visible comments'}</option><option value="all">{locale === 'ar' ? 'كل التعليقات المتاحة' : 'All accessible comments'}</option></select></label>
+            {commentsMode !== 'none' && commentsMode !== 'all' && <label className="space-y-1"><span className="text-[11px] font-semibold text-slate-400">{locale === 'ar' ? 'عدد التعليقات لكل منشور' : 'Comments per post'}</span><select value={commentLimit} onChange={event => { setCommentLimit(Number(event.target.value)); setResult(null); }} className="w-full px-3 py-2.5 rounded-xl bg-slate-900 border border-slate-800 text-sm text-slate-200 outline-none focus:border-cyan-500"><option value={10}>10</option><option value={20}>20</option><option value={50}>50</option></select></label>}
+          </div>
+          {commentsMode !== 'none' && <label className="flex items-center gap-2 text-xs text-slate-300"><input type="checkbox" checked={includeReplies} onChange={event => { setIncludeReplies(event.target.checked); setResult(null); }} className="accent-cyan-500" />{locale === 'ar' ? 'تضمين الردود على التعليقات' : 'Include comment replies'}</label>}
+          <p className="text-[10px] leading-4 text-slate-500">{locale === 'ar' ? 'صور وفيديو المنشور تُجمع تلقائيًا عند توفرها. «كل التعليقات المتاحة» يعني ما تستطيع جلستك الحالية رؤيته فعليًا، وبحد أقصى 200 تعليق لكل منشور.' : 'Post images/video are collected automatically when available. “All accessible comments” means what the current session can actually view, capped at 200 comments per post.'}</p>
+        </div>
+
         {error && <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-xs text-rose-300 flex gap-2"><AlertCircle className="w-4 h-4 flex-none" /><span>{error}</span></div>}
         {notice && <div className="p-3 rounded-xl bg-cyan-500/5 border border-cyan-500/15 text-xs text-slate-300">{notice}</div>}
 
-        <button type="button" onClick={() => void run()} disabled={busy || selectedIds.length === 0 || requestedTotal > 100} className="w-full py-3 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-sm font-black disabled:opacity-40 flex items-center justify-center gap-2"><Sparkles className={`w-4 h-4 ${busy ? 'animate-pulse' : ''}`} />{busy ? (locale === 'ar' ? 'جاري جلب وتحليل المنشورات...' : 'Grabbing and analyzing posts...') : (locale === 'ar' ? `اجلب آخر ${limit} وحللها` : `Grab latest ${limit} and analyze`)}</button>
+        <button type="button" onClick={() => void run()} disabled={busy || selectedIds.length === 0 || requestedTotal > 100 || (commentsMode !== 'none' && requestedTotal > 20) || (commentsMode === 'all' && requestedTotal > 5)} className="w-full py-3 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-sm font-black disabled:opacity-40 flex items-center justify-center gap-2"><Sparkles className={`w-4 h-4 ${busy ? 'animate-pulse' : ''}`} />{busy ? (locale === 'ar' ? 'جاري جلب وتحليل المنشورات...' : 'Grabbing and analyzing posts...') : (locale === 'ar' ? `اجلب آخر ${limit} وحللها` : `Grab latest ${limit} and analyze`)}</button>
 
         {result && (
           <div className="pt-2 space-y-4">
             <div className="flex flex-wrap gap-2 text-[11px]"><span className="px-2.5 py-1 rounded-full bg-slate-950 border border-slate-800 text-slate-300">{locale === 'ar' ? `${result.postsAnalyzed} تم تحليلها` : `${result.postsAnalyzed} analyzed`}</span>{mode === 'filter' && <span className="px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-300">{locale === 'ar' ? `${visibleItems.length} مطابق` : `${visibleItems.length} matched`}</span>}</div>
-            {groupedItems.length === 0 ? <div className="p-5 rounded-xl bg-slate-950 border border-slate-800 text-center text-xs text-slate-500">{locale === 'ar' ? 'لم يطابق أي منشور حقيقي شرط البحث.' : 'No real post matched this search.'}</div> : groupedItems.map(([category, items]) => <div key={category} className="space-y-2"><div className="flex items-center gap-2"><span className="text-xs font-bold text-cyan-300">{category}</span><span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">{items.length}</span></div><div className="grid gap-2">{items.map(item => <article key={`${item.post.sourceId}:${item.post.id}`} className="p-3.5 rounded-xl bg-slate-950 border border-slate-800"><div className="flex items-start gap-3"><SourceAvatar src={item.sourceAvatar || item.post.authorAvatar} name={item.sourceName} platform={item.post.platform} className="w-9 h-9 rounded-lg" /><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-2"><h3 className="text-xs font-bold text-slate-200 truncate">{item.sourceName}</h3><span className="text-[10px] text-cyan-400">{Math.round(item.confidence * 100)}%</span></div><p className="text-xs text-slate-300 mt-1.5 leading-5 line-clamp-3">{item.post.text}</p><p className="text-[11px] text-slate-500 mt-2">{item.reason}</p><div className="mt-2 flex items-center justify-between"><span className="text-[10px] text-slate-600">{item.post.publishedAt || (locale === 'ar' ? 'التاريخ غير ظاهر' : 'Date unavailable')}</span><a href={item.post.originalUrl} target="_blank" rel="noopener noreferrer" className="text-[11px] text-cyan-400 inline-flex items-center gap-1">{locale === 'ar' ? 'فتح المنشور' : 'Open post'}<ExternalLink className="w-3 h-3" /></a></div></div></div></article>)}</div></div>)}
+            {groupedItems.length === 0 ? <div className="p-5 rounded-xl bg-slate-950 border border-slate-800 text-center text-xs text-slate-500">{locale === 'ar' ? 'لم يطابق أي منشور حقيقي شرط البحث.' : 'No real post matched this search.'}</div> : groupedItems.map(([category, items]) => <div key={category} className="space-y-2"><div className="flex items-center gap-2"><span className="text-xs font-bold text-cyan-300">{category}</span><span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">{items.length}</span></div><div className="grid gap-2">{items.map(item => <article key={`${item.post.sourceId}:${item.post.id}`} className="p-3.5 rounded-xl bg-slate-950 border border-slate-800"><div className="flex items-start gap-3"><SourceAvatar src={item.sourceAvatar || item.post.authorAvatar} name={item.sourceName} platform={item.post.platform} className="w-9 h-9 rounded-lg" /><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-2"><h3 className="text-xs font-bold text-slate-200 truncate">{item.sourceName}</h3><span className="text-[10px] text-cyan-400">{Math.round(item.confidence * 100)}%</span></div><p className="text-xs text-slate-300 mt-1.5 leading-5 line-clamp-3">{item.post.text}</p><p className="text-[11px] text-slate-500 mt-2">{item.reason}</p>{Array.isArray(item.post.comments) && item.post.comments.length > 0 && <div className="mt-2 rounded-lg border border-slate-800 bg-slate-900/70 p-2 space-y-1.5"><div className="flex items-center justify-between text-[10px] text-slate-500"><span>{locale === 'ar' ? `${item.post.comments.length} تعليق` : `${item.post.comments.length} comments`}</span>{item.post.commentsTruncated && <span>{locale === 'ar' ? 'جزئي' : 'partial'}</span>}</div>{item.post.comments.slice(0, 3).map((comment, index) => <p key={`${comment.externalCommentId || index}`} className="text-[10px] leading-4 text-slate-400 line-clamp-2"><span className={comment.isPublisher ? 'text-cyan-300 font-semibold' : 'text-slate-300 font-semibold'}>{comment.authorName}: </span>{comment.text}</p>)}</div>}<div className="mt-2 flex items-center justify-between"><span className="text-[10px] text-slate-600">{item.post.publishedAt || (locale === 'ar' ? 'التاريخ غير ظاهر' : 'Date unavailable')}</span><a href={item.post.originalUrl} target="_blank" rel="noopener noreferrer" className="text-[11px] text-cyan-400 inline-flex items-center gap-1">{locale === 'ar' ? 'فتح المنشور' : 'Open post'}<ExternalLink className="w-3 h-3" /></a></div></div></div></article>)}</div></div>)}
           </div>
         )}
       </div>
