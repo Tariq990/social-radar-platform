@@ -1,6 +1,6 @@
 # Android Physical-Device Acceptance Test
 
-This test is a **required P0 launch gate** for the authenticated Facebook monitoring architecture.
+This test is a **required P0 launch gate** for the authenticated MR SCRAP + Facebook monitoring architecture.
 
 Passing CI/Gradle compilation is not enough. The following flow must be verified on a real Android device against a real deployed backend.
 
@@ -13,12 +13,14 @@ Before testing, confirm:
 - `APP_MODE=production` on the backend.
 - PostgreSQL is reachable through `DATABASE_URL`.
 - The centrally configured AI provider is reachable through `AI_BASE_URL` / `AI_API_KEY` / `AI_MODEL` / `AI_API_FORMAT`.
+- The production app/API origins are correctly allowlisted through `APP_URL` / `CORS_ALLOWED_ORIGINS`.
 - The APK was compiled with:
 
 ```env
 VITE_API_BASE_URL=https://your-real-backend.example
 ```
 
+- Tester has a test email they control for the MR SCRAP account.
 - Tester uses a Facebook account they are authorized to use.
 - At least one Facebook page/source is available for the test.
 
@@ -49,7 +51,7 @@ Record these values before starting:
 1. Install the current alpha APK.
 2. Launch MR SCRAP.
 3. Confirm the application loads without a blank screen/crash.
-4. Confirm backend status becomes online.
+4. Confirm the public backend status is reachable.
 5. Confirm production mode does not display seeded demo alerts.
 6. Confirm the backend health endpoint reports PostgreSQL and configured AI successfully.
 
@@ -59,7 +61,52 @@ Record these values before starting:
 
 ---
 
-## B. Facebook login
+## B. MR SCRAP account authentication
+
+1. Open the private Radar/dashboard flow.
+2. Confirm an anonymous user is prompted to sign in or create an MR SCRAP account.
+3. Create a new test account with a unique email and a password of at least 10 characters.
+4. Confirm registration succeeds and the private Radar opens.
+5. Force-close MR SCRAP and reopen it.
+6. Confirm the MR SCRAP application session is still authenticated.
+7. Confirm the installed Capacitor app can send the HttpOnly credential cookie to the real HTTPS backend from the bundled `https://localhost` origin.
+8. Confirm direct anonymous requests to private APIs such as `/api/sources` return 401.
+9. Sign out from MR SCRAP.
+10. Confirm the old application session can no longer access private APIs.
+11. Sign back in with the same account.
+
+### Security observation
+
+Verify:
+
+- MR SCRAP password is not logged in plaintext;
+- application session cookie is HttpOnly;
+- production cookie is Secure;
+- disallowed browser origins are rejected;
+- Facebook credentials are not involved in MR SCRAP account authentication.
+
+**Pass:** registration/login/session/logout operate on the physical app with the real backend and private APIs remain authenticated.
+
+**Fail:** the Capacitor WebView cannot retain/send the production app session, anonymous private API access works, or logout leaves the old session usable.
+
+---
+
+## C. User-bound backend device authorization
+
+1. While logged into MR SCRAP, connect/schedule an authenticated Android source so the app registers its backend device credential.
+2. Confirm the backend `devices.user_id` is the currently logged-in MR SCRAP user.
+3. Confirm only the SHA-256 digest of the device bearer is stored server-side.
+4. Confirm Android stores the raw device bearer only in AndroidKeyStore-backed encrypted app storage.
+5. Sign out of MR SCRAP.
+6. Attempt to reuse the old backend device bearer in a controlled test.
+7. Confirm it is rejected.
+8. Sign back in and confirm the app can register a fresh device credential.
+
+**Pass:** device authorization is tenant-bound and revoked by logout.
+
+---
+
+## D. Facebook login
 
 1. Open **Settings → Connect Facebook**.
 2. Confirm the dedicated WebView opens Facebook's real domain.
@@ -72,8 +119,8 @@ Record these values before starting:
 
 During this step verify:
 
-- MR SCRAP does not show a custom password form.
-- no password value appears in application logs.
+- MR SCRAP does not show a custom Facebook password form.
+- no Facebook password value appears in application logs.
 - no raw Facebook cookie is copied into the React UI.
 
 **Pass:** Facebook's own page accepts login and MR SCRAP detects the authenticated session.
@@ -82,22 +129,22 @@ During this step verify:
 
 ---
 
-## C. Session persistence
+## E. Facebook session persistence
 
 1. Force-close MR SCRAP.
 2. Reopen it.
 3. Confirm Facebook session still reports connected.
 4. Reboot the Android device.
 5. Reopen MR SCRAP.
-6. Confirm the session is still usable if Facebook has not independently expired it.
+6. Confirm the Facebook session is still usable if Facebook has not independently expired it.
 
-**Pass:** normal app/device restart does not force unnecessary re-login.
+**Pass:** normal app/device restart does not force unnecessary Facebook re-login.
 
-**Fail:** session disappears immediately after app restart without Facebook invalidating it.
+**Fail:** Facebook session disappears immediately after app restart without Facebook invalidating it.
 
 ---
 
-## D. Android Share Target
+## F. Android Share Target
 
 1. Open Facebook on the test device.
 2. Choose a real Facebook page/post.
@@ -105,6 +152,7 @@ During this step verify:
 4. Select **MR SCRAP**.
 5. Confirm MR SCRAP opens and receives the real shared URL/text.
 6. Confirm the Add Source flow opens with the shared target.
+7. Repeat while signed out of MR SCRAP and confirm authentication is required before the private source workflow continues; after login, confirm the shared URL is preserved.
 
 Repeat with at least:
 
@@ -112,27 +160,43 @@ Repeat with at least:
 - Facebook post URL;
 - Facebook `story.php?story_fbid=...&id=...` style URL if available.
 
-**Pass:** shared links arrive intact, including identity-bearing query parameters.
+**Pass:** shared links arrive intact, including identity-bearing query parameters, without bypassing MR SCRAP authentication.
 
-**Fail:** URL is missing, corrupted, or identity parameters are stripped.
+**Fail:** URL is missing/corrupted, identity parameters are stripped, or the share path bypasses private-app authentication.
 
 ---
 
-## E. Real source resolution
+## G. Real source resolution
 
 1. Resolve the shared source while Facebook session is connected.
 2. Confirm displayed source name matches the real page/account.
 3. Confirm avatar/handle are real when available.
 4. Confirm the stored source has a real `externalId`/handle rather than a generated placeholder.
 5. Confirm no Unsplash/demo avatar is substituted in production.
+6. Confirm the source row belongs to the current MR SCRAP `user_id`.
 
-**Pass:** source metadata originates from the real loaded page/source.
+**Pass:** source metadata originates from the real loaded page/source and is tenant-owned.
 
-**Fail:** fabricated metadata is shown or production silently falls back to demo content.
+**Fail:** fabricated metadata is shown, production silently falls back to demo content, or source ownership is wrong.
 
 ---
 
-## F. Rule creation
+## H. Tenant-isolation spot check
+
+Use two MR SCRAP test accounts A and B on controlled clients if practical.
+
+1. User A creates a real monitored source and rule.
+2. User B logs in.
+3. Confirm B cannot see A's source/rule/alerts.
+4. Confirm B cannot pause/delete A's source via API.
+5. Confirm B cannot create a rule bound to A's source ID.
+6. Confirm B's device bearer cannot ingest posts into A's source.
+
+**Pass:** API behavior matches automated cross-tenant integration tests.
+
+---
+
+## I. Rule creation
 
 Create a deterministic test rule, for example:
 
@@ -144,13 +208,13 @@ Use a source/post you control when possible so a matching test post can be creat
 
 Confirm:
 
-- source persists in PostgreSQL;
-- rule persists in PostgreSQL;
+- source persists in PostgreSQL under the correct user;
+- rule persists in PostgreSQL under the correct user;
 - restarting the app does not remove either record.
 
 ---
 
-## G. Real post collection
+## J. Real post collection
 
 1. Trigger **Scan Now** / initial collection.
 2. Confirm the Android collector loads the watched source with the local Facebook session.
@@ -170,7 +234,7 @@ Confirm:
 
 ---
 
-## H. Privacy / network boundary
+## K. Privacy / network boundary
 
 Inspect Android/network/backend logs during collection.
 
@@ -183,9 +247,12 @@ The request to `/api/device/ingest` must **not** contain:
 - Facebook session/token export;
 - raw WebView cookie dump.
 
-The request **should** contain the separate MR SCRAP backend bearer token in the Authorization header.
+The request **should** contain the separate MR SCRAP backend device bearer token in the Authorization header.
 
-Confirm the backend stores only the SHA-256 digest of that MR SCRAP device token.
+Confirm:
+
+- backend stores only the SHA-256 digest of the MR SCRAP device token;
+- the MR SCRAP application cookie and Facebook CookieManager values remain separate credential domains.
 
 **Pass:** social session material stays on device.
 
@@ -193,7 +260,7 @@ Confirm the backend stores only the SHA-256 digest of that MR SCRAP device token
 
 ---
 
-## I. Deduplication
+## L. Deduplication
 
 1. Run collection once.
 2. Record accepted post count and resulting alerts.
@@ -201,6 +268,7 @@ Confirm the backend stores only the SHA-256 digest of that MR SCRAP device token
 4. Confirm the second run reports those posts as duplicates/no new posts.
 5. Confirm no duplicate alert is created for the same `(rule, post)` pair.
 6. Repeat using a Facebook query-based post URL to confirm `story_fbid` identity is preserved.
+7. Compare equivalent `facebook.com` / `www.facebook.com` URL forms and confirm they dedupe to one URL identity when no external post ID is available.
 
 **Pass:** repeated scans are idempotent.
 
@@ -208,7 +276,7 @@ Confirm the backend stores only the SHA-256 digest of that MR SCRAP device token
 
 ---
 
-## J. AI matching
+## M. AI matching
 
 ### Negative case
 
@@ -234,7 +302,7 @@ Confirm the backend stores only the SHA-256 digest of that MR SCRAP device token
 
 ---
 
-## K. Background WorkManager monitoring
+## N. Background WorkManager monitoring
 
 1. Ensure source monitoring is enabled.
 2. Close MR SCRAP normally.
@@ -254,9 +322,9 @@ Also test:
 
 ---
 
-## L. Session expiry / reconnect
+## O. Facebook session expiry / reconnect
 
-1. Invalidate the Facebook session (logout from the WebView or invalidate the account session through normal Facebook controls).
+1. Invalidate the Facebook session through normal Facebook controls.
 2. Run a source check.
 3. Confirm MR SCRAP reports re-login/reconnect required instead of fake successful monitoring.
 4. Reconnect through the real Facebook WebView.
@@ -264,7 +332,7 @@ Also test:
 
 ---
 
-## M. Disconnect privacy test
+## P. Disconnect privacy test
 
 1. In MR SCRAP choose **Disconnect Facebook**.
 2. Confirm WorkManager jobs for authenticated sources are cancelled.
@@ -272,11 +340,11 @@ Also test:
 4. Reopen the Connect Facebook screen.
 5. Confirm the previous Facebook authenticated session is no longer available.
 
-**Pass:** Disconnect genuinely removes the local Facebook session.
+**Pass:** Disconnect genuinely removes the local Facebook session without confusing it with the separate MR SCRAP account session.
 
 ---
 
-## N. Source pause/delete
+## Q. Source pause/delete
 
 1. Pause a monitored source.
 2. Confirm its background work is cancelled/disabled.
@@ -292,9 +360,14 @@ Also test:
 |---|---|---|
 | App installs/launches | ⬜ | |
 | Real HTTPS backend | ⬜ | |
+| MR SCRAP register/login works | ⬜ | |
+| MR SCRAP session survives restart | ⬜ | |
+| Anonymous private API denied | ⬜ | |
+| Logout revokes app/device auth | ⬜ | |
+| Physical tenant-isolation spot check | ⬜ | |
 | Facebook WebView login works | ⬜ | |
-| Session survives restart | ⬜ | |
-| Share Target works | ⬜ | |
+| Facebook session survives restart | ⬜ | |
+| Share Target works through auth gate | ⬜ | |
 | Real source metadata | ⬜ | |
 | Real posts extracted | ⬜ | |
 | No Facebook secrets leave device | ⬜ | |
@@ -304,7 +377,7 @@ Also test:
 | Positive AI case | ⬜ | |
 | AI failure does not fake match | ⬜ | |
 | WorkManager background check | ⬜ | |
-| Session expiry/reconnect | ⬜ | |
+| Facebook session expiry/reconnect | ⬜ | |
 | Disconnect clears Facebook session | ⬜ | |
 
 ## Release decision
