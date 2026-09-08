@@ -101,6 +101,23 @@ function connectedAccountLabel(status: NativeSessionStatus): string | undefined 
   return undefined;
 }
 
+interface IngestSourceMetadata {
+  displayName?: string;
+  avatarUrl?: string;
+  handle?: string;
+}
+
+function withHealedSourceMetadata(source: Source, ingest: unknown): Source {
+  const metadata = (ingest as { sourceMetadata?: IngestSourceMetadata } | null)?.sourceMetadata;
+  if (!metadata) return source;
+  return {
+    ...source,
+    displayName: metadata.displayName?.trim() || source.displayName,
+    avatarUrl: metadata.avatarUrl?.trim() || source.avatarUrl,
+    handle: metadata.handle?.trim() || source.handle
+  };
+}
+
 export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [locale, setLocaleState] = useState<Locale>(() => (localStorage.getItem(STORAGE_KEYS.LOCALE) as Locale) || 'en');
   const [theme, setThemeState] = useState<'dark' | 'light'>(() => (localStorage.getItem(STORAGE_KEYS.THEME) as 'dark' | 'light') || 'dark');
@@ -156,8 +173,6 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const loadDatabaseState = async () => {
     try {
-      // Public landing/bootstrap requests must never depend on authenticated CRUD endpoints.
-      // Otherwise a legitimate 401 for an anonymous visitor makes a healthy backend appear offline.
       const [health, config, auth] = await Promise.all([
         apiCheckHealth(), apiGetConfig(), apiGetAuthSession()
       ]);
@@ -302,7 +317,7 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             if (ingest.matchesCreated.length > 0) setMatches(previous => [...ingest.matchesCreated, ...previous]);
             setSources(previous => previous.map(source => source.id === persistedSource.id
               ? {
-                  ...source,
+                  ...withHealedSourceMetadata(source, ingest),
                   connectorStatus: 'authenticated_monitoring',
                   recentPostsCount: Number(source.recentPostsCount || 0) + ingest.accepted,
                   lastCheckedAt: locale === 'ar' ? 'الآن' : 'Just now'
@@ -440,7 +455,7 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             if (ingest.matchesCreated.length > 0) setMatches(previous => [...ingest.matchesCreated, ...previous]);
             setSources(previous => previous.map(item => item.id === source.id
               ? {
-                  ...item,
+                  ...withHealedSourceMetadata(item, ingest),
                   connectorStatus: 'authenticated_monitoring',
                   recentPostsCount: Number(item.recentPostsCount || 0) + ingest.accepted,
                   lastCheckedAt: locale === 'ar' ? 'الآن' : 'Just now'
