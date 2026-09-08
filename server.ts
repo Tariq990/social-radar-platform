@@ -33,6 +33,9 @@ const APP_MODE = (process.env.APP_MODE || 'production').trim().toLowerCase();
 const isDemoMode = () => APP_MODE === 'demo';
 
 app.disable('x-powered-by');
+// Render terminates HTTPS one proxy hop in front of this Express service. Trust exactly that hop
+// so req.ip represents the client rather than collapsing all users into the proxy socket address.
+app.set('trust proxy', APP_MODE === 'production' ? 1 : false);
 app.use(strictCors);
 // Release upload/download must be registered before the JSON parser. The publisher uploads a
 // binary APK body and the updater endpoints are intentionally public read-only routes.
@@ -43,17 +46,22 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '1mb' }));
 
 const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
+let rateLimiterSequence = 0;
 function rateLimiter(limit: number = 30, windowMs: number = 60_000) {
+  // Every middleware instance gets an independent bucket. Login traffic must never consume the
+  // Smart Grab quota (or vice versa) merely because both requests came from the same client IP.
+  const bucket = `rl_${++rateLimiterSequence}`;
   return (req: express.Request, res: express.Response, next: express.NextFunction) => {
     const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    const key = `${bucket}:${ip}`;
     const now = Date.now();
-    const entry = rateLimitMap.get(ip) || { count: 0, resetTime: now + windowMs };
+    const entry = rateLimitMap.get(key) || { count: 0, resetTime: now + windowMs };
     if (now > entry.resetTime) {
       entry.count = 0;
       entry.resetTime = now + windowMs;
     }
     entry.count++;
-    rateLimitMap.set(ip, entry);
+    rateLimitMap.set(key, entry);
     if (entry.count > limit) return res.status(429).json({ error: 'Too many requests. Please wait a moment.' });
     next();
   };
