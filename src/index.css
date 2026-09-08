@@ -1,65 +1,78 @@
 @import "tailwindcss";
 
-@layer base {
-  :root {
-    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-    color-scheme: dark;
-  }
+:root {
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  color-scheme: dark;
+}
 
-  html.dark {
-    color-scheme: dark;
-  }
+[dir="rtl"] {
+  font-family: 'Cairo', 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+}
 
-  /* Light Mode Color Overrides */
-  html:not(.dark),
-  html.light,
-  .light {
-    color-scheme: light;
+html.dark,
+body.dark,
+[data-theme="dark"] {
+  color-scheme: dark;
+}
 
-    /* Slate palette inverted for light mode */
-    --color-slate-950: #f8fafc; /* Main background */
-    --color-slate-900: #ffffff; /* Card / Surface background */
-    --color-slate-800: #e2e8f0; /* Border color */
-    --color-slate-700: #cbd5e1; /* Stronger border / divider */
-    --color-slate-600: #94a3b8; /* Placeholder / subtle icons */
-    --color-slate-500: #64748b; /* Muted label text */
-    --color-slate-400: #475569; /* Secondary body text */
-    --color-slate-300: #334155; /* Normal text */
-    --color-slate-200: #1e293b; /* High contrast text */
-    --color-slate-100: #0f172a; /* Main headings and titles */
-    --color-slate-50: #020617;  /* High contrast dark headings */
+/* Light Mode Overrides: unlayered and high-priority so Tailwind v4 inherits inverted slate palette */
+html.light,
+html[data-theme="light"],
+body.light,
+.light {
+  color-scheme: light !important;
 
-    /* Accent & Chip backgrounds in light mode */
-    --color-cyan-950: #ecfeff;
-    --color-cyan-900: #cffafe;
-    --color-cyan-800: #a5f3fc;
-    --color-cyan-400: #0284c7;
-    --color-cyan-300: #0369a1;
+  /* Slate palette inverted for light mode */
+  --color-slate-950: #f8fafc !important; /* Main canvas background */
+  --color-slate-900: #ffffff !important; /* Card / Surface background */
+  --color-slate-850: #f1f5f9 !important; /* Subtle hover surfaces */
+  --color-slate-800: #e2e8f0 !important; /* Border color */
+  --color-slate-700: #cbd5e1 !important; /* Stronger border / divider */
+  --color-slate-600: #94a3b8 !important; /* Placeholder / subtle icons */
+  --color-slate-500: #64748b !important; /* Muted label text */
+  --color-slate-400: #475569 !important; /* Secondary body text */
+  --color-slate-300: #334155 !important; /* Normal text */
+  --color-slate-200: #1e293b !important; /* High contrast text */
+  --color-slate-100: #0f172a !important; /* Main headings and titles */
+  --color-slate-50: #020617 !important;  /* High contrast dark headings */
 
-    --color-emerald-950: #ecfdf5;
-    --color-emerald-900: #d1fae5;
-    --color-emerald-800: #a7f3d0;
-    --color-emerald-400: #059669;
+  /* Accent & Chip backgrounds in light mode */
+  --color-cyan-950: #ecfeff !important;
+  --color-cyan-900: #cffafe !important;
+  --color-cyan-800: #a5f3fc !important;
+  --color-cyan-400: #0284c7 !important;
+  --color-cyan-300: #0369a1 !important;
 
-    --color-amber-950: #fffbeb;
-    --color-amber-900: #fef3c7;
-    --color-amber-800: #fde68a;
-    --color-amber-400: #b45309;
+  --color-emerald-950: #ecfdf5 !important;
+  --color-emerald-900: #d1fae5 !important;
+  --color-emerald-800: #a7f3d0 !important;
+  --color-emerald-400: #059669 !important;
 
-    --color-rose-950: #fff1f2;
-    --color-rose-900: #ffe4e6;
-    --color-rose-800: #fecdd3;
-    --color-rose-400: #e11d48;
+  --color-amber-950: #fffbeb !important;
+  --color-amber-900: #fef3c7 !important;
+  --color-amber-800: #fde68a !important;
+  --color-amber-400: #b45309 !important;
 
-    --color-blue-950: #eff6ff;
-    --color-blue-900: #dbeafe;
-    --color-blue-800: #bfdbfe;
-    --color-blue-400: #2563eb;
-  }
-  
-  [dir="rtl"] {
-    font-family: 'Cairo', 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-  }
+  --color-rose-950: #fff1f2 !important;
+  --color-rose-900: #ffe4e6 !important;
+  --color-rose-800: #fecdd3 !important;
+  --color-rose-400: #e11d48 !important;
+
+  --color-blue-950: #eff6ff !important;
+  --color-blue-900: #dbeafe !important;
+  --color-blue-800: #bfdbfe !important;
+  --color-blue-400: #2563eb !important;
+}
+
+/* Ensure light mode body background updates */
+body.light {
+  background-color: #f8fafc !important;
+  color: #0f172a !important;
+}
+
+body.dark {
+  background-color: #020617 !important;
+  color: #f8fafc !important;
 }
 
 /* Ensure buttons with cyan background always keep high-contrast dark text */
