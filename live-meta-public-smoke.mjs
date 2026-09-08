@@ -1,7 +1,10 @@
+const pagePluginUrl = 'https://www.facebook.com/plugins/page.php?href=https%3A%2F%2Fwww.facebook.com%2FNASA%2F&tabs=timeline&width=500&height=800&small_header=false&adapt_container_width=true&hide_cover=false&show_facepile=false';
+
 const targets = [
   'https://www.facebook.com/NASA/',
   'https://m.facebook.com/NASA/',
   'https://www.facebook.com/NASA/posts',
+  pagePluginUrl,
   'https://www.instagram.com/nasa/'
 ];
 
