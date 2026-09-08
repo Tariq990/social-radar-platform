@@ -1,4 +1,4 @@
-const CACHE_NAME = 'mr-scrap-v2';
+const CACHE_NAME = 'mr-scrap-v3';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -46,25 +46,7 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
-self.addEventListener('push', (event) => {
-  let data = {};
-  try {
-    data = event.data ? event.data.json() : {};
-  } catch {
-    data = { body: event.data ? event.data.text() : '' };
-  }
-
-  const title = data.title || 'Social Radar Alert';
-  const options = {
-    body: data.body || 'A new post matched your radar rule.',
-    icon: '/icon.svg',
-    badge: '/icon.svg',
-    data: data.url || '/'
-  };
-  event.waitUntil(self.registration.showNotification(title, options));
-});
-
-self.addEventListener('notificationclick', (event) => {
-  event.notification.close();
-  event.waitUntil(self.clients.openWindow(event.notification.data || '/'));
-});
+// Web Push is intentionally not registered in this alpha. The backend does not yet persist
+// PushSubscription records or dispatch VAPID messages, so keeping dormant push handlers here
+// would imply a delivery path that does not exist. Android background matches use native local
+// notifications instead; Web Push will be added end-to-end under the dedicated notification work.
