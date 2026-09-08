@@ -277,6 +277,7 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
         String url = call.getString("url");
         String platform = call.getString("platform", SessionStateStore.platformForUrl(url));
         String backendBaseUrl = call.getString("backendBaseUrl");
+        String locale = "ar".equalsIgnoreCase(call.getString("locale", "en")) ? "ar" : "en";
         if (sourceId == null || sourceId.isBlank() || url == null || backendBaseUrl == null || backendBaseUrl.isBlank()) {
             call.reject("sourceId, url and backendBaseUrl are required");
             return;
@@ -295,6 +296,7 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
             .putString(AuthenticatedSourceWorker.KEY_SOURCE_URL, url)
             .putString(AuthenticatedSourceWorker.KEY_PLATFORM, platform)
             .putString(AuthenticatedSourceWorker.KEY_BACKEND_BASE_URL, backendBaseUrl)
+            .putString(AuthenticatedSourceWorker.KEY_LOCALE, locale)
             .build();
         Constraints constraints = new Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build();
         PeriodicWorkRequest request = new PeriodicWorkRequest.Builder(

@@ -2,11 +2,11 @@ import React, { useEffect, useState } from 'react';
 import { Facebook, Instagram, Lock, LogOut, Moon, ShieldCheck, Sun, Trash2, CheckCircle2, AlertCircle, RotateCcw, Languages } from 'lucide-react';
 import { useRadar } from '../context/RadarContext';
 import { translations } from '../lib/i18n';
-import { apiLogout } from '../services/api';
+import { apiLogout, getApiBaseUrl } from '../services/api';
 import { DeviceSessionConnector, NativeSessionStatus } from '../connectors/deviceSessionConnector';
 
 export const SettingsScreen: React.FC = () => {
-  const { locale, setLocale, theme, setTheme, deviceSessionAvailable, refreshDeviceSession, resetToDemo, isDemoMode } = useRadar();
+  const { locale, setLocale, theme, setTheme, deviceSessionAvailable, refreshDeviceSession, resetToDemo, isDemoMode, sources } = useRadar();
   const t = translations[locale];
   const [status, setStatus] = useState<NativeSessionStatus>({ available: deviceSessionAvailable, connected: false, facebookConnected: false, instagramConnected: false });
   const [busy, setBusy] = useState<'facebook' | 'instagram' | null>(null);
@@ -25,6 +25,23 @@ export const SettingsScreen: React.FC = () => {
 
   useEffect(() => { void refresh(); }, []);
 
+  const platformSources = (platform: 'facebook' | 'instagram') =>
+    sources.filter(source => source.connectorType === 'device_session' && source.platform === platform && !source.isPaused);
+
+  const schedulePlatformSources = async (platform: 'facebook' | 'instagram') => {
+    if (!DeviceSessionConnector.isNativeAvailable()) return;
+    const backendBaseUrl = getApiBaseUrl();
+    if (!backendBaseUrl) return;
+    await Promise.allSettled(platformSources(platform).map(source =>
+      DeviceSessionConnector.scheduleBackgroundSource(source, backendBaseUrl, locale)
+    ));
+  };
+
+  const cancelPlatformSources = async (platform: 'facebook' | 'instagram') => {
+    if (!DeviceSessionConnector.isNativeAvailable()) return;
+    await Promise.allSettled(platformSources(platform).map(source => DeviceSessionConnector.cancelBackgroundSource(source.id)));
+  };
+
   const connect = async (platform: 'facebook' | 'instagram') => {
     setBusy(platform);
     setError(null);
@@ -32,6 +49,9 @@ export const SettingsScreen: React.FC = () => {
       const connected = platform === 'instagram' ? await DeviceSessionConnector.connectInstagram() : await DeviceSessionConnector.connectFacebook();
       if (!connected) throw new Error(locale === 'ar' ? 'لم يكتمل تسجيل الدخول.' : 'Login was not completed.');
       await refresh();
+      // A deliberate disconnect cancels periodic jobs. Reconnecting recreates them for every
+      // active source on this platform, with the currently selected app language.
+      await schedulePlatformSources(platform);
     } catch (err: any) {
       setError(err?.message || (locale === 'ar' ? 'تعذر ربط الحساب.' : 'Could not connect the account.'));
     } finally { setBusy(null); }
@@ -41,6 +61,9 @@ export const SettingsScreen: React.FC = () => {
     setBusy(platform);
     setError(null);
     try {
+      // Stop background work before clearing the local platform session so WorkManager cannot
+      // keep waking up and reporting reconnect failures after an intentional disconnect.
+      await cancelPlatformSources(platform);
       if (platform === 'instagram') await DeviceSessionConnector.disconnectInstagram();
       else await DeviceSessionConnector.disconnectFacebook();
       await refresh();
@@ -52,7 +75,15 @@ export const SettingsScreen: React.FC = () => {
   const logout = async () => {
     if (loggingOut) return;
     setLoggingOut(true);
-    try { await apiLogout(); } finally { window.location.replace('/'); }
+    try {
+      if (DeviceSessionConnector.isNativeAvailable()) {
+        await Promise.allSettled(
+          sources.filter(source => source.connectorType === 'device_session')
+            .map(source => DeviceSessionConnector.cancelBackgroundSource(source.id))
+        );
+      }
+      await apiLogout();
+    } finally { window.location.replace('/'); }
   };
 
   return (

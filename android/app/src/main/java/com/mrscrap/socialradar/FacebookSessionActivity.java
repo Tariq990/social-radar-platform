@@ -178,6 +178,10 @@ public class FacebookSessionActivity extends Activity {
     protected void onDestroy() {
         if (webView != null) {
             webView.stopLoading();
+            // Android's WebView lifecycle guidance recommends detaching the WebView from its
+            // parent before destroy() so the Activity hierarchy cannot retain the native view.
+            android.view.ViewParent parent = webView.getParent();
+            if (parent instanceof ViewGroup) ((ViewGroup) parent).removeView(webView);
             webView.removeAllViews();
             webView.destroy();
             webView = null;
