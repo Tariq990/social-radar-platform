@@ -1,24 +1,28 @@
 import express from 'express';
 import path from 'path';
 import dotenv from 'dotenv';
-import { GoogleGenAI, Type } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 
-import { db, DbSource, DbRule } from './server/db/database';
+import { db } from './server/db/database';
 import { sourceConnectorManager } from './server/connectors/sourceConnector';
 import { monitoringWorker } from './server/worker/monitoringWorker';
+import { ingestDevicePosts } from './server/worker/deviceIngestion';
 import { evaluatePostAgainstRule } from './server/ai/ruleEvaluator';
+import { aiService } from './server/ai/aiService';
+import { getAIConfigurationStatus, testConfiguredAIProvider } from './server/ai/providerFactory';
 
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT || 3000);
+const APP_MODE = (process.env.APP_MODE || 'production').trim().toLowerCase();
+const isDemoMode = () => APP_MODE === 'demo';
 
+app.disable('x-powered-by');
 app.use(express.json({ limit: '1mb' }));
 
-// Basic in-memory rate limiter for scraping / resolving / AI endpoints
 const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
-function rateLimiter(limit: number = 30, windowMs: number = 60000) {
+function rateLimiter(limit: number = 30, windowMs: number = 60_000) {
   return (req: express.Request, res: express.Response, next: express.NextFunction) => {
     const ip = req.ip || req.socket.remoteAddress || 'unknown';
     const now = Date.now();
@@ -31,7 +35,6 @@ function rateLimiter(limit: number = 30, windowMs: number = 60000) {
 
     entry.count++;
     rateLimitMap.set(ip, entry);
-
     if (entry.count > limit) {
       return res.status(429).json({ error: 'Too many requests. Please wait a moment.' });
     }
@@ -39,140 +42,112 @@ function rateLimiter(limit: number = 30, windowMs: number = 60000) {
   };
 }
 
-// Initialize Gemini SDK with recommended user-agent header
-let geminiClient: GoogleGenAI | null = null;
-function getGeminiClient(): GoogleGenAI | null {
-  if (!geminiClient && process.env.GEMINI_API_KEY) {
-    try {
-      geminiClient = new GoogleGenAI({
-        apiKey: process.env.GEMINI_API_KEY,
-        httpOptions: {
-          headers: {
-            'User-Agent': 'aistudio-build',
-          },
-        },
-      });
-    } catch (e) {
-      console.error('Failed to initialize Gemini client:', e);
-    }
-  }
-  return geminiClient;
+function safeError(error: any): string {
+  return error?.message || 'Unexpected server error';
 }
 
-// Candidate fallback models
-const CANDIDATE_MODELS = [
-  'gemini-2.5-flash',
-  'gemini-flash-latest',
-  'gemini-2.5-flash-lite'
-];
-
-async function generateContentWithFallback(
-  contents: any,
-  config?: any,
-  preferredModel: string = 'gemini-2.5-flash'
-): Promise<{ text: string; modelUsed: string } | null> {
-  const ai = getGeminiClient();
-  if (!ai) return null;
-
-  const modelsToTry = [
-    preferredModel,
-    ...CANDIDATE_MODELS.filter(m => m !== preferredModel)
-  ];
-
-  for (const modelName of modelsToTry) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const response = await ai.models.generateContent({
-          model: modelName,
-          contents,
-          config,
-        });
-        if (response && response.text) {
-          return { text: response.text, modelUsed: modelName };
-        }
-      } catch (err: any) {
-        const statusCode = err?.status || err?.code || err?.error?.code;
-        const errMsg = err?.message || '';
-        const isTransient = statusCode === 503 || statusCode === 429 || errMsg.includes('high demand') || errMsg.includes('UNAVAILABLE');
-
-        if (isTransient && attempt === 0) {
-          await new Promise(resolve => setTimeout(resolve, 400));
-          continue;
-        }
-
-        console.warn(`[Gemini Model ${modelName}] unavailable (${statusCode || 'transient'}), trying next candidate model...`);
-        break;
-      }
-    }
+function validateSocialUrl(input: unknown): { ok: true; url: string } | { ok: false; error: string } {
+  if (typeof input !== 'string' || !input.trim()) return { ok: false, error: 'URL is required' };
+  try {
+    const parsed = new URL(input.trim());
+    if (!['http:', 'https:'].includes(parsed.protocol)) return { ok: false, error: 'Only http/https URLs are allowed' };
+    const host = parsed.hostname.toLowerCase();
+    const allowed = host === 'facebook.com' || host.endsWith('.facebook.com') || host === 'fb.com' || host.endsWith('.fb.com') || host === 'fb.watch' || host === 'instagram.com' || host.endsWith('.instagram.com') || host === 'instagr.am' || host.endsWith('.instagr.am');
+    if (!allowed) return { ok: false, error: 'Only Facebook and Instagram URLs are supported' };
+    parsed.hash = '';
+    return { ok: true, url: parsed.toString() };
+  } catch {
+    return { ok: false, error: 'Invalid URL' };
   }
-
-  return null;
 }
 
-// -------------------------------------------------------------
-// SYSTEM CONFIG & HEALTH
-// -------------------------------------------------------------
-app.get('/api/health', (req, res) => {
+// -----------------------------------------------------------------------------
+// SYSTEM HEALTH / OPERATOR CONFIG
+// -----------------------------------------------------------------------------
+app.get('/api/health', (_req, res) => {
+  const ai = getAIConfigurationStatus();
   res.json({
     status: 'ok',
     service: 'MR SCRAP Social Radar Server',
     databaseType: db.isUsingPostgres() ? 'postgresql' : 'file_persistence',
-    apifyConfigured: sourceConnectorManager.isApifyConfigured(),
-    geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
-    appMode: process.env.APP_MODE || 'production',
+    aiConfigured: ai.configured,
+    aiProvider: ai.providerName,
+    aiModel: ai.model,
+    aiFormat: ai.format,
+    monitoringMode: sourceConnectorManager.getPrimaryMonitoringMode(),
+    optionalPublicProviderConfigured: sourceConnectorManager.isApifyConfigured(),
+    appMode: APP_MODE,
     timestamp: new Date().toISOString()
   });
 });
 
-app.get('/api/config', (req, res) => {
+app.get('/api/config', (_req, res) => {
+  const ai = getAIConfigurationStatus();
   res.json({
-    appMode: process.env.APP_MODE || 'production',
+    appMode: APP_MODE,
     isPostgres: db.isUsingPostgres(),
-    apifyConfigured: sourceConnectorManager.isApifyConfigured(),
-    geminiConfigured: Boolean(process.env.GEMINI_API_KEY)
+    aiConfigured: ai.configured,
+    aiProvider: ai.providerName,
+    aiModel: ai.model,
+    aiFormat: ai.format,
+    monitoringMode: sourceConnectorManager.getPrimaryMonitoringMode(),
+    optionalPublicProviderConfigured: sourceConnectorManager.isApifyConfigured()
   });
 });
 
-// -------------------------------------------------------------
-// SOURCES CRUD (Persistent Database)
-// -------------------------------------------------------------
-app.get('/api/sources', async (req, res) => {
+// This endpoint never returns AI_API_KEY. It is intended for operator diagnostics only.
+app.get('/api/internal/ai/health', rateLimiter(5, 60_000), async (_req, res) => {
+  const result = await testConfiguredAIProvider();
+  res.status(result.reachable ? 200 : 503).json(result);
+});
+
+// -----------------------------------------------------------------------------
+// SOURCES CRUD
+// -----------------------------------------------------------------------------
+app.get('/api/sources', async (_req, res) => {
   try {
-    const sources = await db.getSources('user_default');
-    res.json(sources);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.json(await db.getSources('user_default'));
+  } catch (error) {
+    res.status(500).json({ error: safeError(error) });
   }
 });
 
-app.post('/api/sources', async (req, res) => {
+app.post('/api/sources', rateLimiter(30, 60_000), async (req, res) => {
   try {
-    const { platform, externalId, url, name, handle, avatarUrl, bio, visibilityType, connectorType } = req.body;
-    if (!url || !name) {
-      return res.status(400).json({ error: 'url and name are required' });
-    }
+    const { platform, externalId, url, name, handle, avatarUrl, bio, visibilityType, connectorType } = req.body || {};
+    const checkedUrl = validateSocialUrl(url);
+    if (!checkedUrl.ok) return res.status(400).json({ error: checkedUrl.error });
+    if (typeof name !== 'string' || !name.trim()) return res.status(400).json({ error: 'name is required' });
 
-    const newSource = await db.createSource({
-      id: `src_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+    const normalizedPlatform = platform === 'instagram' ? 'instagram' : 'facebook';
+    const normalizedConnector = connectorType === 'public_cloud' || connectorType === 'official_meta' ? connectorType : 'device_session';
+    const normalizedExternalId = typeof externalId === 'string' && externalId.trim()
+      ? externalId.trim().slice(0, 255)
+      : typeof handle === 'string' && handle.trim()
+        ? handle.replace(/^@/, '').trim().slice(0, 255)
+        : `device_source_${Date.now()}`;
+
+    const source = await db.createSource({
+      id: `src_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       user_id: 'user_default',
-      platform: platform || (url.includes('instagram.com') ? 'instagram' : 'facebook'),
-      external_id: externalId || handle?.replace('@', '') || name.toLowerCase().replace(/\s+/g, '_'),
-      url,
-      name,
-      handle,
-      avatar_url: avatarUrl,
-      bio,
-      visibility_type: visibilityType || 'public',
-      connector_type: connectorType || 'public_cloud',
-      connector_status: 'connected',
+      platform: normalizedPlatform,
+      external_id: normalizedExternalId,
+      url: checkedUrl.url,
+      name: name.trim().slice(0, 255),
+      handle: typeof handle === 'string' ? handle.slice(0, 255) : undefined,
+      avatar_url: typeof avatarUrl === 'string' ? avatarUrl.slice(0, 4096) : undefined,
+      bio: typeof bio === 'string' ? bio.slice(0, 5000) : undefined,
+      visibility_type: visibilityType === 'public' ? 'public' : 'authenticated',
+      connector_type: normalizedConnector,
+      connector_status: normalizedConnector === 'device_session' ? 'needs_relogin' : 'connected',
       is_paused: false,
       consecutive_failures: 0,
       metadata: {}
     });
 
-    res.status(201).json(newSource);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(201).json(source);
+  } catch (error) {
+    res.status(500).json({ error: safeError(error) });
   }
 });
 
@@ -180,115 +155,27 @@ app.delete('/api/sources/:id', async (req, res) => {
   try {
     await db.deleteSource(req.params.id);
     res.json({ success: true });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (error) {
+    res.status(500).json({ error: safeError(error) });
   }
 });
 
 app.patch('/api/sources/:id/pause', async (req, res) => {
   try {
-    const isPaused = await db.toggleSourcePause(req.params.id);
-    res.json({ success: true, isPaused });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    const paused = await db.toggleSourcePause(req.params.id);
+    res.json({ success: true, isPaused: paused });
+  } catch (error) {
+    res.status(500).json({ error: safeError(error) });
   }
 });
 
-// -------------------------------------------------------------
-// RULES CRUD (Persistent Database)
-// -------------------------------------------------------------
-app.get('/api/rules', async (req, res) => {
+app.post('/api/sources/resolve', rateLimiter(20, 60_000), async (req, res) => {
   try {
-    const rules = await db.getRules('user_default');
-    res.json(rules);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
+    const checked = validateSocialUrl(req.body?.url);
+    if (!checked.ok) return res.status(400).json({ error: checked.error });
 
-app.post('/api/rules', async (req, res) => {
-  try {
-    const { name, naturalLanguage, includeTerms, excludeTerms, minConfidence, alertMode, collectionId, sourceIds } = req.body;
-    if (!naturalLanguage) {
-      return res.status(400).json({ error: 'naturalLanguage is required' });
-    }
-
-    const newRule = await db.createRule({
-      id: `rule_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-      user_id: 'user_default',
-      name: name || 'Watch Rule',
-      natural_language: naturalLanguage,
-      include_terms: Array.isArray(includeTerms) ? includeTerms : [],
-      exclude_terms: Array.isArray(excludeTerms) ? excludeTerms : [],
-      min_confidence: typeof minConfidence === 'number' ? minConfidence : 0.80,
-      alert_mode: alertMode || 'instant',
-      enabled: true,
-      collection_id: collectionId
-    }, Array.isArray(sourceIds) ? sourceIds : []);
-
-    res.status(201).json(newRule);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.delete('/api/rules/:id', async (req, res) => {
-  try {
-    await db.deleteRule(req.params.id);
-    res.json({ success: true });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.patch('/api/rules/:id/toggle', async (req, res) => {
-  try {
-    const enabled = await db.toggleRule(req.params.id);
-    res.json({ success: true, enabled });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// -------------------------------------------------------------
-// ALERTS / MATCHES (Persistent Database)
-// -------------------------------------------------------------
-app.get('/api/alerts', async (req, res) => {
-  try {
-    const matches = await db.getMatches('user_default');
-    res.json(matches);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.patch('/api/alerts/:id', async (req, res) => {
-  try {
-    const { feedback, isRead, isSaved } = req.body;
-    await db.updateMatch(req.params.id, {
-      feedback,
-      is_read: isRead,
-      is_saved: isSaved
-    });
-    res.json({ success: true });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// -------------------------------------------------------------
-// PHASE 1 & 2: SOURCE RESOLUTION (No fake data in production)
-// -------------------------------------------------------------
-app.post('/api/sources/resolve', rateLimiter(20, 60000), async (req, res) => {
-  try {
-    const { url, demo } = req.body;
-    if (!url || typeof url !== 'string') {
-      return res.status(400).json({ error: 'URL is required' });
-    }
-
-    const isDemo = Boolean(demo || process.env.APP_MODE === 'demo');
-    const result = await sourceConnectorManager.resolve({ url }, isDemo);
-
+    const demo = Boolean(req.body?.demo || isDemoMode());
+    const result = await sourceConnectorManager.resolve({ url: checked.url }, demo);
     res.json({
       valid: result.valid,
       platform: result.platform,
@@ -303,251 +190,250 @@ app.post('/api/sources/resolve', rateLimiter(20, 60000), async (req, res) => {
       requiresAuthentication: result.requiresAuthentication,
       error: result.error
     });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (error) {
+    res.status(500).json({ error: safeError(error) });
   }
 });
 
-// -------------------------------------------------------------
-// PHASE 4 & 7: REAL MONITORING SCAN WORKER
-// -------------------------------------------------------------
-app.post('/api/alerts/scan', rateLimiter(15, 60000), async (req, res) => {
+// -----------------------------------------------------------------------------
+// RULES CRUD
+// -----------------------------------------------------------------------------
+app.get('/api/rules', async (_req, res) => {
   try {
-    const isDemo = Boolean(req.body?.demo || process.env.APP_MODE === 'demo');
-    const scanResult = await monitoringWorker.runScan('user_default', isDemo);
-
-    res.json({
-      scanned: scanResult.sourcesScanned,
-      newPosts: scanResult.newPostsFound,
-      matches: scanResult.matchesCreated,
-      errors: scanResult.errors,
-      timestamp: scanResult.timestamp
-    });
-  } catch (err: any) {
-    console.error('[Scan Worker Error]', err);
-    res.status(500).json({ error: err.message });
+    res.json(await db.getRules('user_default'));
+  } catch (error) {
+    res.status(500).json({ error: safeError(error) });
   }
 });
 
-// -------------------------------------------------------------
-// AI SUGGESTIONS & PREVIEW
-// -------------------------------------------------------------
-app.post('/api/ai/rule-suggestions', rateLimiter(20, 60000), async (req, res) => {
+app.post('/api/rules', rateLimiter(40, 60_000), async (req, res) => {
   try {
-    const { sourceName, platform, bio } = req.body;
-
-    if (getGeminiClient()) {
-      const prompt = `Suggest 4 high-value natural language watch rules for someone monitoring this social account:
-Source: "${sourceName || 'Social Account'}" on ${platform || 'Facebook/Instagram'}.
-Bio: "${bio || 'Business or creator page'}"
-Examples of good rules:
-- "Notify me when they announce discounts over 25%"
-- "Alert me when a new product or menu item launches"
-- "Tell me when they post about job vacancies"
-
-Return a JSON array of 4 short strings.`;
-
-      try {
-        const response = await generateContentWithFallback(prompt, {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING }
-          }
-        });
-        if (response && response.text) {
-          const suggestions = JSON.parse(response.text);
-          if (Array.isArray(suggestions) && suggestions.length > 0) {
-            return res.json({ suggestions });
-          }
-        }
-      } catch (e) {
-        // Fallback below
-      }
+    const { name, naturalLanguage, includeTerms, excludeTerms, minConfidence, alertMode, collectionId, sourceIds } = req.body || {};
+    if (typeof naturalLanguage !== 'string' || !naturalLanguage.trim()) {
+      return res.status(400).json({ error: 'naturalLanguage is required' });
     }
 
-    // Default suggestions tailored to source name
-    const lower = (sourceName || '').toLowerCase();
-    if (lower.includes('car') || lower.includes('motor') || lower.includes('bmw') || lower.includes('auto')) {
+    const rule = await db.createRule({
+      id: `rule_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      user_id: 'user_default',
+      name: typeof name === 'string' && name.trim() ? name.trim().slice(0, 255) : 'Watch Rule',
+      natural_language: naturalLanguage.trim().slice(0, 10_000),
+      include_terms: Array.isArray(includeTerms) ? includeTerms.filter((v: any) => typeof v === 'string').slice(0, 50) : [],
+      exclude_terms: Array.isArray(excludeTerms) ? excludeTerms.filter((v: any) => typeof v === 'string').slice(0, 50) : [],
+      min_confidence: typeof minConfidence === 'number' ? Math.max(0, Math.min(1, minConfidence)) : 0.8,
+      alert_mode: ['instant', 'digest', 'silent'].includes(alertMode) ? alertMode : 'instant',
+      enabled: true,
+      collection_id: typeof collectionId === 'string' ? collectionId : undefined
+    }, Array.isArray(sourceIds) ? sourceIds.filter((v: any) => typeof v === 'string').slice(0, 250) : []);
+
+    res.status(201).json(rule);
+  } catch (error) {
+    res.status(500).json({ error: safeError(error) });
+  }
+});
+
+app.delete('/api/rules/:id', async (req, res) => {
+  try {
+    await db.deleteRule(req.params.id);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: safeError(error) });
+  }
+});
+
+app.patch('/api/rules/:id/toggle', async (req, res) => {
+  try {
+    const enabled = await db.toggleRule(req.params.id);
+    res.json({ success: true, enabled });
+  } catch (error) {
+    res.status(500).json({ error: safeError(error) });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// ALERTS / MATCHES
+// -----------------------------------------------------------------------------
+app.get('/api/alerts', async (_req, res) => {
+  try {
+    res.json(await db.getMatches('user_default'));
+  } catch (error) {
+    res.status(500).json({ error: safeError(error) });
+  }
+});
+
+app.patch('/api/alerts/:id', async (req, res) => {
+  try {
+    const { feedback, isRead, isSaved } = req.body || {};
+    await db.updateMatch(req.params.id, {
+      feedback,
+      is_read: typeof isRead === 'boolean' ? isRead : undefined,
+      is_saved: typeof isSaved === 'boolean' ? isSaved : undefined
+    });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: safeError(error) });
+  }
+});
+
+// Server-side scan only processes explicitly configured server-side providers.
+// device_session sources are collected on Android and arrive through /api/device/ingest.
+app.post('/api/alerts/scan', rateLimiter(15, 60_000), async (req, res) => {
+  try {
+    const demo = Boolean(req.body?.demo || isDemoMode());
+    const scan = await monitoringWorker.runScan('user_default', demo);
+    res.json({
+      scanned: scan.sourcesScanned,
+      deviceManagedSources: scan.deviceManagedSources,
+      newPosts: scan.newPostsFound,
+      matches: scan.matchesCreated,
+      errors: scan.errors,
+      timestamp: scan.timestamp
+    });
+  } catch (error) {
+    res.status(500).json({ error: safeError(error) });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// AUTHENTICATED ANDROID DEVICE INGESTION
+// -----------------------------------------------------------------------------
+app.post('/api/device/ingest', rateLimiter(30, 60_000), async (req, res) => {
+  try {
+    const { sourceId, posts, locale } = req.body || {};
+    if (typeof sourceId !== 'string' || !sourceId.trim()) return res.status(400).json({ error: 'sourceId is required' });
+    if (!Array.isArray(posts)) return res.status(400).json({ error: 'posts must be an array' });
+    if (posts.length > 50) return res.status(413).json({ error: 'Maximum 50 posts per ingestion request' });
+
+    const result = await ingestDevicePosts(
+      sourceId,
+      posts,
+      'user_default',
+      locale === 'ar' ? 'ar' : 'en'
+    );
+    res.json(result);
+  } catch (error) {
+    const message = safeError(error);
+    const status = message === 'Source not found' ? 404 : 400;
+    res.status(status).json({ error: message });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// PROVIDER-NEUTRAL AI ENDPOINTS
+// -----------------------------------------------------------------------------
+app.post('/api/ai/evaluate-post', rateLimiter(30, 60_000), async (req, res) => {
+  try {
+    const { post, rule, locale } = req.body || {};
+    if (!post || !rule) return res.status(400).json({ error: 'post and rule are required' });
+    res.json(await evaluatePostAgainstRule(post, rule, locale === 'ar' ? 'ar' : 'en'));
+  } catch (error) {
+    res.status(503).json({ error: safeError(error) });
+  }
+});
+
+app.post('/api/ai/rule-suggestions', rateLimiter(20, 60_000), async (req, res) => {
+  try {
+    if (isDemoMode() && !getAIConfigurationStatus().configured) {
       return res.json({
         suggestions: [
-          'Notify me when they post any vehicle under $20,000',
-          'Alert me about certified pre-owned warranty deals',
-          'Tell me when new 2025/2026 models arrive',
-          'Notify me about trade-in promotions'
-        ]
+          'Notify me when they announce discounts or limited offers',
+          'Alert me when a major new product or service launches',
+          'Tell me when they post important price changes',
+          'Notify me about job vacancies or hiring announcements'
+        ],
+        demo: true
       });
     }
 
-    if (lower.includes('burger') || lower.includes('food') || lower.includes('restaurant') || lower.includes('grill') || lower.includes('cafe')) {
+    const suggestions = await aiService.generateRuleSuggestions({
+      sourceName: req.body?.sourceName,
+      platform: req.body?.platform,
+      bio: req.body?.bio
+    });
+    res.json({ suggestions });
+  } catch (error) {
+    res.status(503).json({ error: safeError(error), suggestions: [] });
+  }
+});
+
+app.post('/api/ai/generate-digest', rateLimiter(20, 60_000), async (req, res) => {
+  try {
+    const matches = Array.isArray(req.body?.matches) ? req.body.matches : [];
+    const locale = req.body?.locale === 'ar' ? 'ar' : 'en';
+
+    if (matches.length === 0) {
       return res.json({
-        suggestions: [
-          'Notify me when they announce discounts over 25%',
-          'Alert me about new menu items or seasonal dishes',
-          'Tell me about buy-one-get-one weekend offers',
-          'Notify me when they post exclusive discount voucher codes'
-        ]
+        summary: locale === 'ar' ? 'لا توجد إشارات مطابقة جديدة لتلخيصها.' : 'There are no new matched signals to summarize.',
+        highlights: [],
+        topAction: locale === 'ar' ? 'لا يلزم أي إجراء الآن.' : 'No action is required right now.'
       });
     }
 
-    return res.json({
-      suggestions: [
-        'Notify me when they announce discounts or limited offers',
-        'Alert me when a major new product or service launches',
-        'Tell me when they post important policy or price changes',
-        'Notify me about upcoming events or workshops'
-      ]
-    });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.json(await aiService.generateDigest(matches, locale));
+  } catch (error) {
+    res.status(503).json({ error: safeError(error) });
   }
 });
 
-// Single post evaluation endpoint
-app.post('/api/ai/evaluate-post', async (req, res) => {
+app.post('/api/ai/preview-match', rateLimiter(20, 60_000), async (req, res) => {
   try {
-    const { post, rule, locale } = req.body;
-    if (!post || !rule) {
-      return res.status(400).json({ error: 'post and rule are required' });
+    const rule = typeof req.body?.ruleNaturalLanguage === 'string' ? req.body.ruleNaturalLanguage.trim() : '';
+    if (!rule) return res.status(400).json({ error: 'ruleNaturalLanguage is required' });
+
+    if (isDemoMode() && !getAIConfigurationStatus().configured) {
+      return res.json({
+        headline: 'Example matching alert',
+        excerpt: 'Hypothetical preview content that satisfies your selected watch rule.',
+        whyMatched: `Preview only: this example was generated to demonstrate the rule "${rule}".`,
+        category: 'Demo Preview',
+        demo: true
+      });
     }
 
-    const evalResult = await evaluatePostAgainstRule(post, rule, locale || 'en');
-    res.json(evalResult);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.json(await aiService.generatePreview(rule, req.body?.sourceName));
+  } catch (error) {
+    res.status(503).json({ error: safeError(error) });
   }
 });
 
-// AI 30-Second Digest Generator
-app.post('/api/ai/generate-digest', async (req, res) => {
-  try {
-    const { matches, locale } = req.body;
-
-    const matchesList = Array.isArray(matches) ? matches.slice(0, 8) : [];
-    const snippets = matchesList.map((m: any) => `[${m.sourceName || m.source_name}]: ${m.post?.text || m.reason}`).join('\n');
-
-    if (getGeminiClient() && snippets.length > 0) {
-      const prompt = `You are the executive intelligence analyst for "MR SCRAP Social Radar".
-Summarize these recent monitored social updates in a 30-second morning briefing in ${locale === 'ar' ? 'Arabic' : 'English'}.
-
-Raw Signals:
-${snippets}
-
-Format strictly as JSON:
-{
-  "summary": "1 punchy summary sentence",
-  "highlights": ["bullet point 1", "bullet point 2", "bullet point 3"],
-  "topAction": "1 clear recommendation or key opportunity"
-}`;
-
-      try {
-        const response = await generateContentWithFallback(prompt, {
-          responseMimeType: 'application/json'
-        });
-        if (response && response.text) {
-          const parsed = JSON.parse(response.text);
-          return res.json(parsed);
-        }
-      } catch (e) {
-        // Fallback below
-      }
-    }
-
-    res.json({
-      summary: locale === 'ar' 
-        ? 'تم رصد الإشارات ذات الأولوية العالية من صفحاتك المراقبة بدون انقطاع.'
-        : 'Active monitoring signals updated across your watched sources.',
-      highlights: locale === 'ar'
-        ? [
-            'التحقق من منشورات المصادر وتطبيق مرشحات الرصد الذكية.',
-            'لا توجد تعارضات في قواعد المراقبة المحددة.',
-            'نظام الرادار جاهز لتوليد التنبيهات فور نشر عروض جديدة.'
-          ]
-        : [
-            'Source posts verified through semantic radar rules.',
-            'Deduplication engine active with zero duplicate alerts.',
-            'Radar standing by for real matching posts.'
-          ],
-      topAction: locale === 'ar'
-        ? 'أضف المزيد من مصادر فيسبوك وإنستغرام لتوسيع نطاق التغطية.'
-        : 'Add monitored public sources to expand radar coverage.'
-    });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Magic preview generator
-app.post('/api/ai/preview-match', async (req, res) => {
-  try {
-    const { ruleNaturalLanguage, sourceName } = req.body;
-
-    if (getGeminiClient()) {
-      const prompt = `Given the user's watch rule: "${ruleNaturalLanguage}" for account "${sourceName || 'Monitored Account'}", create a realistic mock alert preview demonstrating what an alert looks like when this rule triggers.
-Respond in JSON:
-{
-  "headline": "e.g. 30% discount detected or BMW under $20,000",
-  "excerpt": "a realistic sample post text of 1-2 sentences",
-  "whyMatched": "a clear 1-sentence explanation of why it matched the rule",
-  "category": "e.g. Deals, Price Target, Launch, Jobs"
-}`;
-
-      try {
-        const response = await generateContentWithFallback(prompt, {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              headline: { type: Type.STRING },
-              excerpt: { type: Type.STRING },
-              whyMatched: { type: Type.STRING },
-              category: { type: Type.STRING }
-            },
-            required: ['headline', 'excerpt', 'whyMatched', 'category']
-          }
-        });
-        if (response && response.text) {
-          const data = JSON.parse(response.text);
-          return res.json(data);
-        }
-      } catch (e) {
-        // Fallback
-      }
-    }
-
-    res.json({
-      headline: `Matching alert for "${sourceName || 'Source'}"`,
-      excerpt: `Special announcement: Meeting your specific conditions on ${sourceName || 'this page'}.`,
-      whyMatched: `Matched because the post content aligns directly with "${ruleNaturalLanguage}".`,
-      category: 'Smart Alert'
-    });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Start server with Vite middleware for dev / static in prod
 async function startServer() {
-  // Initialize Database repository
   await db.init();
+
+  // Production must never silently run on the local JSON fallback.
+  if (APP_MODE === 'production' && !db.isUsingPostgres()) {
+    throw new Error('Production startup aborted: DATABASE_URL is missing/unreachable. Local JSON persistence is allowed only outside APP_MODE=production.');
+  }
+
+  const aiStatus = getAIConfigurationStatus();
+  if (APP_MODE === 'production' && !aiStatus.configured) {
+    throw new Error(`Production startup aborted: ${aiStatus.error || 'AI provider is not configured'}`);
+  }
 
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
-      appType: 'spa',
+      appType: 'spa'
     });
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.get('*', (req, res) => {
+    app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`MR SCRAP Social Radar Server running on http://0.0.0.0:${PORT}`);
+    console.log(`[Mode] ${APP_MODE}`);
+    console.log(`[Database] ${db.isUsingPostgres() ? 'PostgreSQL' : 'local development store'}`);
+    if (aiStatus.configured) {
+      console.log(`[AI] ${aiStatus.providerName} / ${aiStatus.model} / ${aiStatus.format}`);
+    }
   });
 }
 
-startServer();
+startServer().catch(error => {
+  console.error('[Fatal startup error]', safeError(error));
+  process.exitCode = 1;
+});
