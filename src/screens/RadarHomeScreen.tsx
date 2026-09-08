@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Sparkles,
   RotateCw,
@@ -14,6 +14,7 @@ import { translations } from '../lib/i18n';
 
 export const RadarHomeScreen: React.FC = () => {
   const {
+    user,
     matches,
     sources,
     openDigest,
@@ -21,15 +22,18 @@ export const RadarHomeScreen: React.FC = () => {
     openAlertDetail,
     scanAllSources,
     isScanning,
+    deviceSessionAvailable,
     locale,
     setCurrentScreen
   } = useRadar();
   const t = translations[locale];
+  const [scanNotice, setScanNotice] = useState<string | null>(null);
 
   const priorityMatches = matches.slice(0, 5);
   const greeting = new Date().getHours() >= 17 ? t.greetingEvening : t.greetingDay;
   const realStoredPosts = sources.reduce((sum, source) => sum + Number(source.recentPostsCount || 0), 0);
   const latestActivity = matches[0]?.createdAt || sources.find(source => source.lastCheckedAt)?.lastCheckedAt || '';
+  const hasDeviceSources = sources.some(source => source.connectorType === 'device_session' && !source.isPaused);
   const summaryText = matches.length > 0
     ? (locale === 'ar'
       ? `لديك ${matches.length} تطابقات فعلية محفوظة من المصادر التي تراقبها. افتح التنبيهات لرؤية المنشورات والأسباب.`
@@ -37,6 +41,40 @@ export const RadarHomeScreen: React.FC = () => {
     : (locale === 'ar'
       ? 'لا توجد تطابقات فعلية بعد. نفّذ فحصًا فوريًا أو انتظر ظهور منشور جديد يطابق قواعدك.'
       : 'No real matches yet. Run Scan Now or wait for a new post that matches your rules.');
+
+  const handleScan = async () => {
+    setScanNotice(null);
+    const result = await scanAllSources();
+
+    if (result.scanned === 0 && hasDeviceSources && !deviceSessionAvailable) {
+      setScanNotice(locale === 'ar'
+        ? 'الفحص المباشر لمصادر Facebook وInstagram يتم من تطبيق Android.'
+        : 'Direct Facebook and Instagram scans run from the Android app.');
+      return;
+    }
+
+    if (result.scanned === 0 && hasDeviceSources && deviceSessionAvailable && !user.deviceSessionConnected) {
+      setScanNotice(locale === 'ar'
+        ? 'اربط Facebook ثم أعد الفحص.'
+        : 'Connect Facebook, then scan again.');
+      return;
+    }
+
+    if (result.scanned === 0) {
+      setScanNotice(locale === 'ar' ? 'لا توجد مصادر جاهزة للفحص الآن.' : 'No sources are ready to scan right now.');
+      return;
+    }
+
+    if (result.matched > 0) {
+      setScanNotice(locale === 'ar'
+        ? `تم الفحص — ${result.matched} تنبيه جديد.`
+        : `Scan complete — ${result.matched} new alert${result.matched === 1 ? '' : 's'}.`);
+    } else {
+      setScanNotice(locale === 'ar'
+        ? 'تم الفحص — لا توجد تنبيهات جديدة.'
+        : 'Scan complete — no new alerts.');
+    }
+  };
 
   return (
     <div className="space-y-6 pb-12">
@@ -54,7 +92,7 @@ export const RadarHomeScreen: React.FC = () => {
         <div className="flex items-center gap-2">
           <button
             id="btn-scan-radar-home"
-            onClick={scanAllSources}
+            onClick={() => void handleScan()}
             disabled={isScanning}
             className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-800 text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-50"
           >
@@ -72,6 +110,12 @@ export const RadarHomeScreen: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {scanNotice && (
+        <div role="status" className="px-4 py-3 rounded-2xl bg-slate-900/80 border border-slate-800 text-sm text-slate-300">
+          {scanNotice}
+        </div>
+      )}
 
       <div className="grid grid-cols-3 gap-3">
         <div className="p-3.5 rounded-2xl bg-slate-900/60 border border-slate-800/80 flex flex-col items-center sm:items-start">
