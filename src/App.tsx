@@ -50,7 +50,18 @@ const RadarAppContent: React.FC = () => {
   useEffect(() => {
     try {
       const params = new URLSearchParams(window.location.search);
-      const sharedUrl = extractSupportedSocialUrl(params.get('url') || params.get('text') || params.get('share_url') || '');
+      let rawShare = params.get('url') || params.get('text') || params.get('share_url') || '';
+      if (!rawShare) {
+        const pending = sessionStorage.getItem('mrscrap_pending_share');
+        if (pending) {
+          try {
+            const parsed = JSON.parse(pending);
+            rawShare = typeof parsed?.text === 'string' ? parsed.text : '';
+          } catch { /* ignore malformed pending native share */ }
+          sessionStorage.removeItem('mrscrap_pending_share');
+        }
+      }
+      const sharedUrl = extractSupportedSocialUrl(rawShare);
       if (sharedUrl) openAddSource(sharedUrl);
     } catch {
       // Ignore malformed share parameters. Unsupported URLs never open the source flow.
@@ -58,9 +69,20 @@ const RadarAppContent: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    try {
+      const pending = sessionStorage.getItem('mrscrap_pending_screen');
+      if (pending === 'alerts' || pending === 'radar' || pending === 'watchlist') {
+        setCurrentScreen(pending);
+        sessionStorage.removeItem('mrscrap_pending_screen');
+      }
+    } catch { /* sessionStorage may be unavailable on hardened WebViews */ }
+
     const navigate = (event: Event) => {
       const screen = (event as CustomEvent<{ screen?: string }>).detail?.screen;
-      if (screen === 'alerts' || screen === 'radar' || screen === 'watchlist') setCurrentScreen(screen);
+      if (screen === 'alerts' || screen === 'radar' || screen === 'watchlist') {
+        setCurrentScreen(screen);
+        try { sessionStorage.removeItem('mrscrap_pending_screen'); } catch { }
+      }
     };
     window.addEventListener('mrscrap:navigate', navigate as EventListener);
     return () => window.removeEventListener('mrscrap:navigate', navigate as EventListener);
@@ -68,7 +90,7 @@ const RadarAppContent: React.FC = () => {
 
   const completeAuthentication = () => {
     const params = new URLSearchParams();
-    params.set('screen', 'radar');
+    params.set('screen', currentScreen === 'alerts' || currentScreen === 'watchlist' ? currentScreen : 'radar');
     if (sharedIncomingUrl) params.set('url', sharedIncomingUrl);
     window.location.replace(`/?${params.toString()}`);
   };

@@ -82,7 +82,8 @@ public class MainActivity extends BridgeActivity {
         try {
             JSONObject payload = new JSONObject();
             payload.put("screen", screen);
-            String javascript = "window.dispatchEvent(new CustomEvent('mrscrap:navigate',{detail:" + payload.toString() + "}));";
+            String javascript = "sessionStorage.setItem('mrscrap_pending_screen'," + JSONObject.quote(screen) + ");" +
+                "window.dispatchEvent(new CustomEvent('mrscrap:navigate',{detail:" + payload.toString() + "}));";
             bridge.getWebView().post(() -> bridge.getWebView().evaluateJavascript(javascript, null));
         } catch (Exception ignored) { }
     }
@@ -96,7 +97,9 @@ public class MainActivity extends BridgeActivity {
             JSONObject payload = new JSONObject();
             payload.put("text", text);
             if (subject != null) payload.put("subject", subject);
-            String javascript = "window.dispatchEvent(new CustomEvent('mrscrap:share',{detail:" + payload.toString() + "}));";
+            String javascript = "const d=" + payload.toString() + ";" +
+                "sessionStorage.setItem('mrscrap_pending_share',JSON.stringify(d));" +
+                "window.dispatchEvent(new CustomEvent('mrscrap:share',{detail:d}));";
             bridge.getWebView().post(() -> bridge.getWebView().evaluateJavascript(javascript, null));
         } catch (Exception ignored) {
             // Shared text is non-critical; user can still paste the URL manually.
