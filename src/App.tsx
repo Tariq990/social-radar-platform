@@ -8,17 +8,20 @@ import { AlertsScreen } from './screens/AlertsScreen';
 import { RulesScreen } from './screens/RulesScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { LandingScreen } from './screens/LandingScreen';
+import { AuthScreen } from './screens/AuthScreen';
 import { AddSourceModal } from './components/AddSourceModal';
 import { AlertDetailModal } from './components/AlertDetailModal';
 import { DigestModal } from './components/DigestModal';
 import { PaywallModal } from './components/PaywallModal';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { apiGetAuthSession } from './services/api';
 
 const RadarAppContent: React.FC = () => {
-  const { 
-    currentScreen, 
-    isAddSourceOpen, 
-    closeAddSource, 
+  const {
+    currentScreen,
+    setCurrentScreen,
+    isAddSourceOpen,
+    closeAddSource,
     sharedIncomingUrl,
     selectedAlert,
     closeAlertDetail,
@@ -28,23 +31,48 @@ const RadarAppContent: React.FC = () => {
   } = useRadar();
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [authState, setAuthState] = useState<'checking' | 'authenticated' | 'anonymous'>('checking');
 
-  // Check URL query parameters for Android Share Target (e.g. ?url=... or ?text=...)
+  useEffect(() => {
+    let cancelled = false;
+    apiGetAuthSession()
+      .then(session => {
+        if (!cancelled) setAuthState(session.authenticated && session.user ? 'authenticated' : 'anonymous');
+      })
+      .catch(() => {
+        if (!cancelled) setAuthState('anonymous');
+      });
+    return () => { cancelled = true; };
+  }, []);
+
   useEffect(() => {
     try {
       const params = new URLSearchParams(window.location.search);
       const sharedUrl = params.get('url') || params.get('text');
       if (sharedUrl && (sharedUrl.includes('facebook.com') || sharedUrl.includes('instagram.com') || sharedUrl.startsWith('http'))) {
         openAddSource(sharedUrl);
-        // Clear search param to prevent re-opening on reload
-        window.history.replaceState({}, document.title, window.location.pathname);
       }
     } catch {
-      // Ignore
+      // Ignore malformed share parameters.
     }
   }, []);
 
-  // If on landing screen, show full-page public website before the dashboard
+  const completeAuthentication = () => {
+    const params = new URLSearchParams();
+    params.set('screen', 'radar');
+    if (sharedIncomingUrl) params.set('url', sharedIncomingUrl);
+    window.location.replace(`/?${params.toString()}`);
+  };
+
+  const loadingAuth = (
+    <div className="min-h-screen flex items-center justify-center bg-slate-950 text-slate-400">
+      <div className="flex items-center gap-3 text-xs font-semibold">
+        <span className="w-4 h-4 rounded-full border-2 border-cyan-500 border-r-transparent animate-spin" />
+        {locale === 'ar' ? 'جاري التحقق من الجلسة...' : 'Checking your session...'}
+      </div>
+    </div>
+  );
+
   if (currentScreen === 'landing') {
     return (
       <div className={`min-h-screen bg-slate-950 text-slate-100 font-sans selection:bg-cyan-500 selection:text-slate-950 transition-colors duration-200 ${theme}`}>
@@ -52,19 +80,38 @@ const RadarAppContent: React.FC = () => {
           <LandingScreen />
         </ErrorBoundary>
 
-        {/* Global Modals if triggered from landing page */}
-        {isAddSourceOpen && (
-          <AddSourceModal 
-            initialUrl={sharedIncomingUrl || undefined} 
-            onClose={closeAddSource} 
+        {isAddSourceOpen && authState === 'authenticated' && (
+          <AddSourceModal
+            initialUrl={sharedIncomingUrl || undefined}
+            onClose={closeAddSource}
           />
         )}
+
+        {isAddSourceOpen && authState === 'checking' && (
+          <div className="fixed inset-0 z-[70] bg-slate-950/85 backdrop-blur-sm">{loadingAuth}</div>
+        )}
+
+        {isAddSourceOpen && authState === 'anonymous' && (
+          <AuthScreen locale={locale} onSuccess={completeAuthentication} onCancel={closeAddSource} modal />
+        )}
+
         <PaywallModal />
       </div>
     );
   }
 
-  // Render current dashboard screen safely with fallback
+  if (authState === 'checking') return loadingAuth;
+
+  if (authState === 'anonymous') {
+    return (
+      <AuthScreen
+        locale={locale}
+        onSuccess={completeAuthentication}
+        onCancel={() => setCurrentScreen('landing')}
+      />
+    );
+  }
+
   const renderDashboardScreen = () => {
     switch (currentScreen) {
       case 'watchlist':
@@ -83,13 +130,11 @@ const RadarAppContent: React.FC = () => {
 
   return (
     <div className={`min-h-screen flex bg-slate-950 text-slate-100 font-sans selection:bg-cyan-500 selection:text-slate-950 transition-colors duration-200 ${theme}`}>
-      {/* Desktop Sidebar */}
-      <Navigation 
-        collapsed={sidebarCollapsed} 
-        onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)} 
+      <Navigation
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
       />
 
-      {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0 pb-16 lg:pb-0">
         <Header />
 
@@ -100,18 +145,17 @@ const RadarAppContent: React.FC = () => {
         </main>
       </div>
 
-      {/* Global Modals */}
       {isAddSourceOpen && (
-        <AddSourceModal 
-          initialUrl={sharedIncomingUrl || undefined} 
-          onClose={closeAddSource} 
+        <AddSourceModal
+          initialUrl={sharedIncomingUrl || undefined}
+          onClose={closeAddSource}
         />
       )}
 
       {selectedAlert && (
-        <AlertDetailModal 
-          alert={selectedAlert} 
-          onClose={closeAlertDetail} 
+        <AlertDetailModal
+          alert={selectedAlert}
+          onClose={closeAlertDetail}
         />
       )}
 
