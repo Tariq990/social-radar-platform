@@ -20,6 +20,41 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, worker:
   return output;
 }
 
+function describeCollectionFailure(raw: string | undefined, source: Source, locale: 'ar' | 'en'): string {
+  const message = String(raw || '').trim();
+  const platform = source.platform === 'instagram' ? 'Instagram' : 'Facebook';
+  if (/SESSION_CHECKPOINT/i.test(message)) {
+    return locale === 'ar'
+      ? `${platform} يطلب تحققًا إضافيًا على الجهاز. افتح الاتصال من الإعدادات وأكمل التحقق ثم أعد المحاولة.`
+      : `${platform} requires an additional on-device verification. Open the connection in Settings, complete it, then retry.`;
+  }
+  if (/SESSION_REQUIRED|session expired|session is not connected/i.test(message)) {
+    return locale === 'ar'
+      ? `انتهت جلسة ${platform} على الجهاز أو لم تعد صالحة. أعد ربط ${platform} من الإعدادات.`
+      : `The on-device ${platform} session expired or is no longer usable. Reconnect ${platform} in Settings.`;
+  }
+  if (message.startsWith('NO_EXTRACTABLE_POSTS')) {
+    const safeDiagnostics = message.split('|').slice(1).filter(part => /^(surface|containers|anchors|postLinks|body)=[A-Za-z0-9._:-]+$/.test(part));
+    const suffix = safeDiagnostics.length ? ` [${safeDiagnostics.join(' · ')}]` : '';
+    return locale === 'ar'
+      ? `فتح الجهاز صفحة ${platform} لكنه لم يجد منشورات قابلة للاستخراج.${suffix}`
+      : `The device opened the ${platform} page but found no extractable posts.${suffix}`;
+  }
+  if (/timed out/i.test(message)) {
+    return locale === 'ar'
+      ? `انتهت مهلة تحميل صفحة ${platform} على الجهاز قبل اكتمال الجلب.`
+      : `The on-device ${platform} page timed out before collection completed.`;
+  }
+  if (/SOURCE_METADATA_UNAVAILABLE|Could not resolve reliable source metadata/i.test(message)) {
+    return locale === 'ar'
+      ? `تم فتح ${platform} لكن تعذر تثبيت هوية المصدر من الصفحة الحالية.`
+      : `${platform} opened, but the source identity could not be resolved from the current page.`;
+  }
+  return locale === 'ar'
+    ? `تعذر استخراج منشورات حقيقية من ${platform} على الجهاز الآن.`
+    : `Could not extract real ${platform} posts on this device right now.`;
+}
+
 export const SmartGrabPanel: React.FC = () => {
   const { sources, locale } = useRadar();
   const connector = useRef(new DeviceSessionConnector()).current;
@@ -140,7 +175,9 @@ export const SmartGrabPanel: React.FC = () => {
       const batches: ExploreSourceBatch[] = collected.filter(item => item.posts.length > 0).map(item => ({ sourceId: item.source.id, posts: item.posts }));
       const failed = collected.filter(item => item.posts.length === 0);
       if (batches.length === 0) {
-        throw new Error(locale === 'ar' ? 'لم يتمكن الجهاز من استخراج منشورات حقيقية من المصادر المختارة الآن.' : 'The device could not extract real posts from the selected sources right now.');
+        const firstFailure = failed.find(item => item.error);
+        if (firstFailure) throw new Error(describeCollectionFailure(firstFailure.error, firstFailure.source, locale));
+        throw new Error(locale === 'ar' ? 'لم يجد الجهاز منشورات متاحة للاستخراج من المصادر المختارة الآن.' : 'The device found no extractable posts in the selected sources right now.');
       }
 
       const response = await apiExploreDevicePosts(batches, { mode, prompt: prompt.trim(), categories, locale });
