@@ -92,7 +92,15 @@ CREATE TABLE IF NOT EXISTS posts (
 );
 
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();
--- Restore the expected unique constraint if an intermediate development migration removed it.
+
+-- Migrate fingerprints created by the earlier prototype. Existing rows used a global content
+-- fingerprint. Prefix with source_id so future processing is tenant/source-safe while keeping
+-- one atomic UNIQUE target for ON CONFLICT(fingerprint).
+UPDATE posts
+SET fingerprint = LEFT(source_id || ':' || fingerprint, 255)
+WHERE fingerprint NOT LIKE (source_id || ':%');
+
+-- Restore the expected unique index if an intermediate development migration removed it.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_posts_fingerprint ON posts(fingerprint);
 
 -- 7. Matches Table (AI / Rule Matches)
