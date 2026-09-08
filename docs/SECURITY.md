@@ -4,9 +4,7 @@
 
 This document describes the security/trust boundaries of the current `work/real-session-ai-provider` implementation. It is not a claim that the application is production-ready.
 
-## Trust boundaries
-
-### 1. Facebook authentication boundary
+## 1. Facebook authentication boundary
 
 The Facebook login session belongs to the Android device.
 
@@ -21,15 +19,56 @@ Expected properties:
 
 The application does not claim or implement CAPTCHA bypass, access-control bypass, anti-bot evasion or session export.
 
-## 2. MR SCRAP backend device credential
+## 2. MR SCRAP application authentication
 
-This credential is separate from Facebook authentication.
+MR SCRAP account authentication is separate from Facebook authentication.
+
+Current implementation:
+
+- email/password registration and login;
+- passwords hashed with `scrypt` and random salt before persistence;
+- opaque cryptographically random application session token;
+- only SHA-256 session-token digest stored in PostgreSQL;
+- session expiry persisted in `app_sessions`;
+- application session cookie is `HttpOnly`;
+- production cookie is `Secure` and `SameSite=None` for the Capacitor `https://localhost` → hosted HTTPS API topology;
+- credentialed CORS uses exact approved origins, never wildcard origin;
+- private user-facing API routes use `requireAppAuth`.
+
+Tenant authorization currently covers:
+
+- source list/create/delete/pause;
+- source resolution used by a logged-in app session;
+- rule list/create/delete/toggle;
+- validation that rule source IDs belong to the same tenant;
+- alert list/update;
+- user-scoped scanning;
+- AI suggestions/digest/preview user routes;
+- device registration.
+
+Cross-tenant integration tests verify that user B cannot list, delete, pause, bind rules to, or ingest into user A resources.
+
+Account-recovery follow-up still required before mature consumer launch:
+
+- email verification;
+- password reset/recovery;
+- optional stronger authentication/MFA policy if product risk warrants it.
+
+These are important account-product controls but are distinct from the implemented tenant-isolation boundary.
+
+## 3. MR SCRAP backend device credential
+
+This credential is separate from both Facebook authentication and the MR SCRAP browser/application session.
 
 Server:
 
+- device registration requires an authenticated MR SCRAP application session;
 - creates an opaque random bearer token;
-- stores only SHA-256 token digests in PostgreSQL;
-- `/api/device/ingest` requires a valid bearer token.
+- stores only SHA-256 token digest in PostgreSQL;
+- binds the `devices` row to the authenticated application `user_id`;
+- `/api/device/ingest` derives tenant identity from the validated device token;
+- missing/invalid/revoked device tokens are rejected;
+- application logout revokes the user's associated backend device credentials.
 
 Android:
 
@@ -39,9 +78,22 @@ Android:
 - WorkManager input/output data never contains the bearer token;
 - app backup is disabled.
 
-Remaining risk: device registration is still tied to the current `user_default` backend identity rather than a real authenticated user. This is a **P0 blocker** before external multi-user production use.
+## 4. Session cookies in Capacitor
 
-## 3. AI secrets
+The bundled Capacitor UI runs at `https://localhost` while production API traffic can target a separate HTTPS origin.
+
+To support the `HttpOnly; Secure; SameSite=None` application-session cookie:
+
+- JavaScript fetches use `credentials: include`;
+- server CORS returns `Access-Control-Allow-Credentials: true` only for explicitly allowed origins;
+- the Android main WebView explicitly accepts credential cookies;
+- cookie contents remain inaccessible to normal JavaScript because the session cookie is `HttpOnly`.
+
+This cookie is an MR SCRAP application session, not a Facebook cookie. Facebook session storage remains in the dedicated Facebook WebView boundary.
+
+Physical Android acceptance must confirm this credential-cookie topology on the actual target WebView version.
+
+## 5. AI secrets
 
 `AI_API_KEY` is server-only.
 
@@ -55,14 +107,16 @@ Rules:
 
 End users do not configure AI providers.
 
-## 4. Database behavior
+## 6. Database behavior
 
 Production requires PostgreSQL.
 
 If `DATABASE_URL` is missing/unreachable under `APP_MODE=production`, startup fails. Production must never silently switch to the local JSON store.
 
-Critical uniqueness controls:
+Critical controls include:
 
+- case-insensitive unique application email;
+- unique application session-token digest;
 - sources unique by user/platform/external ID;
 - backend device token digest unique;
 - post fingerprint unique;
@@ -70,9 +124,9 @@ Critical uniqueness controls:
 
 Post fingerprints are prefixed by `source.id` before persistence, preventing the same post monitored by different sources/users from suppressing another tenant's processing.
 
-## 5. Input validation
+## 7. Input validation
 
-Backend validates:
+Backend validates or constrains:
 
 - Facebook/Instagram URL hosts;
 - maximum ingestion batch size;
@@ -80,11 +134,13 @@ Backend validates:
 - timestamps;
 - metadata key names that could resemble session/password/token fields;
 - rule sizes/counts;
-- AI result structure and confidence range.
+- rule-to-source ownership;
+- AI result structure and confidence range;
+- application email/password shape and length.
 
 Production source creation requires a real resolved `externalId` or handle; it does not fabricate an identifier.
 
-## 6. CORS and transport
+## 8. CORS and transport
 
 Production CORS uses explicit origins only.
 
@@ -94,23 +150,26 @@ Allowed native browser origin:
 
 Additional browser origins come from `APP_URL` / `CORS_ALLOWED_ORIGINS`.
 
-WorkManager requests do not carry browser `Origin`; they authenticate with the device bearer credential.
+Credentialed browser requests receive `Access-Control-Allow-Credentials: true` only after origin approval. Disallowed browser origins receive 403 before application route handling.
+
+WorkManager requests do not carry browser `Origin`; they authenticate with the user-bound device bearer credential.
 
 Android cleartext traffic is disabled. The alpha/release Android backend origin must be HTTPS.
 
-## 7. Android WebView controls
+## 9. Android WebView controls
 
 Current hardening includes:
 
 - WebView debugging disabled on the Facebook login activity;
-- file/content access disabled;
+- file/content access disabled for the Facebook login WebView;
 - mixed content blocked;
 - navigation constrained to Facebook during the Facebook login flow;
-- application backup disabled.
+- application backup disabled;
+- main Capacitor WebView accepts the MR SCRAP hosted-API application-session cookie while server exact-origin CORS remains authoritative.
 
-Remaining risk: WebView/platform behavior can change. Login and DOM extraction require physical-device regression testing.
+Remaining risk: WebView/platform behavior can change. Login, cross-origin app session cookies and DOM extraction require physical-device regression testing.
 
-## 8. Data minimization
+## 10. Data minimization
 
 Backend ingestion should contain only normalized source/post information needed for matching.
 
@@ -125,29 +184,25 @@ The ingestion sanitizer rejects secret-looking metadata keys such as:
 
 This sanitizer is defense-in-depth; the Android collector contract should not include these values in the first place.
 
-## 9. Known P0/P1 risks
-
-### P0 — end-user authentication / tenant isolation
-
-Current general CRUD endpoints still operate against `user_default` and are not protected by a full user session. Before external production:
-
-- implement real end-user auth;
-- bind device registration to the authenticated account;
-- authorize every source/rule/alert mutation by tenant;
-- add cross-tenant negative tests;
-- add logout/revocation/expired-session behavior.
+## 11. Remaining P0/P1 risks
 
 ### P0 — physical Android Facebook acceptance test
 
 Must verify on real hardware:
 
-- Facebook permits the WebView login flow;
-- cookies persist across app restart;
+- MR SCRAP application login cookie works from the Capacitor app to the production HTTPS API;
+- Facebook permits the dedicated WebView login flow;
+- Facebook cookies persist across app restart where allowed;
 - collected source metadata is real;
 - post extraction works for supported layouts;
 - expired sessions are detected;
-- disconnect clears the local Facebook session;
-- no raw cookie values appear in logs/network/backend payloads.
+- MR SCRAP logout invalidates application access and backend device authorization;
+- Facebook disconnect clears the local Facebook session;
+- no raw Facebook cookie/password values appear in logs/network/backend payloads.
+
+### P1 — account recovery
+
+Email verification and password-reset/recovery are not yet implemented.
 
 ### P1 — push delivery
 
@@ -157,7 +212,11 @@ FCM/Web Push interfaces exist but external delivery is not complete. Do not mark
 
 Current alpha APK is a debug build. Production signing keys, release keystore handling, Play Integrity/store requirements, privacy declarations and package hardening remain separate release work.
 
-## 10. Operational rules
+### P1 — production scaling controls
+
+The current in-process IP rate limiter is suitable for a single alpha backend instance, not a distributed fleet. Move to a shared store/gateway limiter before horizontal scale and scope limiter buckets per route/action.
+
+## 12. Operational rules
 
 Never commit:
 
@@ -165,17 +224,18 @@ Never commit:
 - AI API keys;
 - PostgreSQL credentials;
 - Android signing keys;
-- `google-services.json` if it contains environment-specific sensitive configuration not intended for the repository;
+- sensitive deployment credentials;
 - Facebook cookies/session exports.
 
 Never add a fallback that turns a failed connector/AI request into a fake successful production result.
 
-## 11. Security review gate
+## 13. Security review gate
 
-Do not merge the architecture PR as production-ready until all P0 items are closed and a new audit confirms:
+Do not merge the architecture PR as production-ready until the physical P0 acceptance gate is closed and a final audit confirms:
 
-1. authenticated tenant-scoped API access;
-2. physical-device session behavior;
+1. authenticated tenant-scoped API access remains enforced;
+2. physical-device application/Facebook session behavior works as documented;
 3. no secret leakage in Android/background storage;
 4. release environment uses HTTPS;
-5. database migrations and dedupe are stable under concurrent ingestion.
+5. database migrations and dedupe are stable under concurrent ingestion;
+6. final candidate CI is green.
