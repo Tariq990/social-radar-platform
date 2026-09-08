@@ -11,7 +11,7 @@ import { evaluatePostAgainstRule } from './server/ai/ruleEvaluator';
 import { aiService } from './server/ai/aiService';
 import { getAIConfigurationStatus, testConfiguredAIProvider } from './server/ai/providerFactory';
 import { strictCors } from './server/http/cors';
-import { registerDevice, requireDeviceAuth } from './server/auth/deviceAuth';
+import { ensureCurrentBackendIdentity, registerDevice, requireDeviceAuth } from './server/auth/deviceAuth';
 
 dotenv.config();
 
@@ -401,6 +401,10 @@ async function startServer() {
   if (APP_MODE === 'production' && !db.isUsingPostgres()) {
     throw new Error('Production startup aborted: DATABASE_URL is missing/unreachable. Local JSON persistence is allowed only outside APP_MODE=production.');
   }
+
+  // The current branch still uses a single application identity for CRUD. Ensure its
+  // PostgreSQL FK row exists before serving requests. Full tenant isolation is a separate migration.
+  await ensureCurrentBackendIdentity();
 
   const aiStatus = getAIConfigurationStatus();
   if (APP_MODE === 'production' && !aiStatus.configured) {
