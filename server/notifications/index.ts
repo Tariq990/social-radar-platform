@@ -15,46 +15,40 @@ export interface INotificationAdapter {
 }
 
 /**
- * Web Push Adapter (standard browser Push API)
+ * Notification delivery is deliberately honest in this phase: the project does not yet
+ * persist browser PushSubscriptions or Android FCM registration tokens end-to-end, so
+ * external adapters are not reported as configured/sent simply because a credential exists.
  */
 export class WebPushAdapter implements INotificationAdapter {
-  readonly channelName = 'web_push';
+  readonly channelName = 'web_push' as const;
 
   isConfigured(): boolean {
-    return Boolean(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY);
+    return false;
   }
 
-  async send(userId: string, payload: NotificationPayload): Promise<{ success: boolean; error?: string }> {
-    if (!this.isConfigured()) {
-      return { success: false, error: 'VAPID keys not configured for Web Push delivery' };
-    }
-    // Web push protocol dispatch
-    return { success: true };
+  async send(_userId: string, _payload: NotificationPayload): Promise<{ success: boolean; error?: string }> {
+    return {
+      success: false,
+      error: 'Web Push delivery is not enabled until PushSubscription persistence and VAPID dispatch are implemented.'
+    };
   }
 }
 
-/**
- * Firebase Cloud Messaging Adapter (for future mobile Android / iOS push)
- */
 export class FcmAdapter implements INotificationAdapter {
-  readonly channelName = 'fcm';
+  readonly channelName = 'fcm' as const;
 
   isConfigured(): boolean {
-    return Boolean(process.env.FIREBASE_SERVER_KEY || process.env.GOOGLE_APPLICATION_CREDENTIALS);
+    return false;
   }
 
-  async send(userId: string, payload: NotificationPayload): Promise<{ success: boolean; error?: string }> {
-    if (!this.isConfigured()) {
-      return { success: false, error: 'FCM credentials not configured' };
-    }
-    return { success: true };
+  async send(_userId: string, _payload: NotificationPayload): Promise<{ success: boolean; error?: string }> {
+    return {
+      success: false,
+      error: 'FCM delivery is not enabled until Android device-token registration and authenticated server dispatch are implemented.'
+    };
   }
 }
 
-/**
- * Notification Service
- * Enqueues notification records into the database upon match creation and dispatches to active adapters.
- */
 export class NotificationService {
   private adapters: Map<string, INotificationAdapter> = new Map();
 
@@ -65,10 +59,10 @@ export class NotificationService {
 
   async dispatchMatchNotification(match: DbMatch): Promise<DbNotification> {
     const payload: NotificationPayload = {
-      title: `⚡ ${match.source_name || 'Social Radar'}: ${match.rule_name || 'New Alert'}`,
+      title: `${match.source_name || 'Social Radar'}: ${match.rule_name || 'New Alert'}`,
       body: match.reason || 'New matching activity detected.',
       url: match.post?.canonical_url || '/',
-      icon: match.source_avatar || '/icon.png',
+      icon: match.source_avatar || undefined,
       data: {
         matchId: match.id,
         ruleId: match.rule_id,
@@ -77,33 +71,26 @@ export class NotificationService {
       }
     };
 
-    const notifId = `notif_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-    
-    // Choose channel
-    const adapter = this.adapters.get('web_push');
-    const isReady = adapter?.isConfigured() ?? false;
-
-    let deliveryStatus: 'pending' | 'sent' | 'failed' = isReady ? 'sent' : 'pending';
-    let deliveryError: string | undefined = isReady ? undefined : 'Web Push adapter waiting for client subscription / VAPID keys';
-
-    if (isReady && adapter) {
-      const result = await adapter.send(match.user_id, payload);
-      deliveryStatus = result.success ? 'sent' : 'failed';
-      deliveryError = result.error;
-    }
-
-    const record = await db.createNotification({
-      id: notifId,
+    // Always create a durable notification record. Until a real delivery adapter is wired,
+    // it stays pending and remains available to the in-app Alerts UI.
+    return await db.createNotification({
+      id: `notif_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       user_id: match.user_id,
       match_id: match.id,
-      channel: 'web_push',
-      status: deliveryStatus,
+      channel: 'in_app',
+      status: 'pending',
       payload,
-      sent_at: deliveryStatus === 'sent' ? new Date().toISOString() : undefined,
-      error: deliveryError
+      sent_at: undefined,
+      error: 'External push delivery is not configured yet; alert is available in-app.'
     });
+  }
 
-    return record;
+  async sendWithAdapter(channel: 'web_push' | 'fcm', userId: string, payload: NotificationPayload) {
+    const adapter = this.adapters.get(channel);
+    if (!adapter || !adapter.isConfigured()) {
+      return { success: false, error: `${channel} adapter is not configured` };
+    }
+    return await adapter.send(userId, payload);
   }
 }
 
