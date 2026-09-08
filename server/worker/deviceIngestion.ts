@@ -43,6 +43,20 @@ function sanitizeMetadata(value: unknown): Record<string, unknown> {
   return result;
 }
 
+function isAllowedPostUrl(raw: string, platform: 'facebook' | 'instagram'): boolean {
+  try {
+    const parsed = new URL(raw);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+    const host = parsed.hostname.toLowerCase();
+    if (platform === 'instagram') {
+      return host === 'instagram.com' || host.endsWith('.instagram.com') || host === 'instagr.am' || host.endsWith('.instagr.am');
+    }
+    return host === 'facebook.com' || host.endsWith('.facebook.com') || host === 'fb.com' || host.endsWith('.fb.com') || host === 'fb.watch';
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Accepts already-normalized content from the user's authenticated Android collector.
  * Raw browser cookies/session material are not part of this contract and are discarded if
@@ -76,7 +90,7 @@ export async function ingestDevicePosts(
 
   for (const raw of posts.slice(0, 50)) {
     const originalUrl = typeof raw.originalUrl === 'string' ? raw.originalUrl.trim() : '';
-    if (!originalUrl) continue;
+    if (!originalUrl || !isAllowedPostUrl(originalUrl, source.platform)) continue;
 
     const canonicalUrl = canonicalizeSocialUrl(originalUrl);
     const text = typeof raw.text === 'string' ? raw.text.slice(0, 100_000) : '';
@@ -88,8 +102,9 @@ export async function ingestDevicePosts(
       continue;
     }
 
+    const candidatePostId = `post_${source.platform}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const savedPost = await db.createPost({
-      id: `post_${source.platform}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      id: candidatePostId,
       source_id: source.id,
       platform: source.platform,
       external_id: externalId,
@@ -105,6 +120,14 @@ export async function ingestDevicePosts(
         ingestion: 'android_device_session'
       }
     });
+
+    // A concurrent worker can win the fingerprint insert after our preflight check.
+    // PostgreSQL createPost returns the already-persisted row in that case; never evaluate
+    // or notify the same social post twice.
+    if (savedPost.id !== candidatePostId) {
+      result.duplicates++;
+      continue;
+    }
 
     result.accepted++;
 
