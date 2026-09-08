@@ -19,6 +19,18 @@ export interface ApiDeviceAuthSession {
   platform: 'web' | 'android' | 'ios';
 }
 
+export interface AppAuthUser {
+  id: string;
+  email: string;
+  name: string;
+  tier: string;
+}
+
+export interface AppAuthSessionResponse {
+  authenticated: boolean;
+  user: AppAuthUser | null;
+}
+
 class ApiRequestError extends Error {
   readonly status: number;
   constructor(status: number, message: string) {
@@ -46,7 +58,10 @@ function apiUrl(path: string): string {
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(apiUrl(path), init);
+  const response = await fetch(apiUrl(path), {
+    credentials: 'include',
+    ...(init || {})
+  });
   const raw = await response.text();
   let body: any = null;
   try {
@@ -127,13 +142,47 @@ async function clearStoredDeviceAuth(): Promise<void> {
   localStorage.removeItem(DEVICE_AUTH_STORAGE_KEY);
 }
 
+export async function apiGetAuthSession(): Promise<AppAuthSessionResponse> {
+  return requestJson<AppAuthSessionResponse>('/api/auth/me');
+}
+
+export async function apiRegister(email: string, password: string, name?: string): Promise<AppAuthSessionResponse> {
+  return requestJson<AppAuthSessionResponse>('/api/auth/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password, name })
+  });
+}
+
+export async function apiLogin(email: string, password: string): Promise<AppAuthSessionResponse> {
+  return requestJson<AppAuthSessionResponse>('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password })
+  });
+}
+
+export async function apiLogout(): Promise<void> {
+  try {
+    await requestJson('/api/auth/logout', { method: 'POST' });
+  } finally {
+    await clearStoredDeviceAuth();
+  }
+}
+
+export async function apiLogoutAll(): Promise<void> {
+  try {
+    await requestJson('/api/auth/logout-all', { method: 'POST' });
+  } finally {
+    await clearStoredDeviceAuth();
+  }
+}
+
 /**
  * Backend application-device authorization. This token is unrelated to Facebook login and
  * never contains Facebook cookies/session material. On Android it is encrypted at rest by an
  * AndroidKeyStore-backed native store rather than localStorage or WorkManager Data.
- *
- * NOTE: registration is still bound to the current single-user backend identity. Full end-user
- * authentication/tenant isolation remains a production blocker tracked separately.
+ * Registration is bound to the currently authenticated MR SCRAP application user.
  */
 export async function ensureApiDeviceAuth(forceRefresh: boolean = false): Promise<ApiDeviceAuthSession> {
   if (!forceRefresh) {
@@ -296,7 +345,7 @@ export function normalizeAlertMatch(raw: any): AlertMatch {
 
   return {
     id,
-    userId: raw.user_id || raw.userId || 'user_default',
+    userId: raw.user_id || raw.userId || '',
     postId,
     ruleId,
     ruleName: raw.rule_name || raw.ruleName || '',
@@ -320,7 +369,7 @@ export async function apiFetchSources(): Promise<Source[]> {
   const data = await requestJson<any[]>('/api/sources');
   return (data || []).map((s: any) => ({
     id: s.id,
-    userId: s.user_id || s.userId || 'user_default',
+    userId: s.user_id || s.userId || '',
     platform: normalizeSourcePlatform(s.platform),
     externalId: s.external_id || s.externalId || '',
     url: s.url || '',
@@ -346,7 +395,7 @@ export async function apiCreateSource(source: any): Promise<Source> {
   });
   return {
     id: s.id,
-    userId: s.user_id || 'user_default',
+    userId: s.user_id || '',
     platform: normalizeSourcePlatform(s.platform),
     externalId: s.external_id || '',
     url: s.url || '',
@@ -376,7 +425,7 @@ export async function apiFetchRules(): Promise<WatchRule[]> {
   const data = await requestJson<any[]>('/api/rules');
   return (data || []).map((r: any) => ({
     id: r.id,
-    userId: r.user_id || r.userId || 'user_default',
+    userId: r.user_id || r.userId || '',
     name: r.name || '',
     naturalLanguage: r.natural_language || r.naturalLanguage || '',
     includeTerms: r.include_terms || r.includeTerms || [],
@@ -398,7 +447,7 @@ export async function apiCreateRule(rule: any, sourceIds: string[] = []): Promis
   });
   return {
     id: r.id,
-    userId: r.user_id || 'user_default',
+    userId: r.user_id || '',
     name: r.name || '',
     naturalLanguage: r.natural_language || '',
     includeTerms: r.include_terms || [],
