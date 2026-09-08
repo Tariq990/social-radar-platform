@@ -1,18 +1,17 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { Source, WatchRule, AlertMatch, Collection, RadarDigest, UserProfile } from '../types';
 import {
-  INITIAL_USER,
   INITIAL_SOURCES,
   INITIAL_RULES,
   INITIAL_MATCHES,
-  INITIAL_COLLECTIONS,
-  INITIAL_DIGEST
+  INITIAL_COLLECTIONS
 } from '../data/seedData';
 import { DeviceSessionConnector } from '../connectors/deviceSessionConnector';
 import { Locale } from '../lib/i18n';
 import {
   apiCheckHealth,
   apiGetConfig,
+  apiGetAuthSession,
   apiFetchSources,
   apiCreateSource,
   apiDeleteSource,
@@ -43,7 +42,6 @@ interface RadarContextType {
   aiConfigured: boolean;
   monitoringMode: 'device_session' | 'optional_public_provider';
   deviceSessionAvailable: boolean;
-  // Legacy aliases kept temporarily so existing UI components do not break.
   apifyConfigured: boolean;
   geminiConfigured: boolean;
   isDemoMode: boolean;
@@ -93,6 +91,35 @@ const STORAGE_KEYS = {
   DEMO_MODE: 'mrscrap_demo_mode_v2'
 };
 
+const EMPTY_USER: UserProfile = {
+  id: '',
+  email: '',
+  displayName: '',
+  avatarUrl: '',
+  plan: 'free',
+  watchedSourcesCount: 0,
+  activeRulesCount: 0,
+  deviceSessionConnected: false,
+  preferences: {
+    language: 'en',
+    theme: 'dark',
+    pushEnabled: false,
+    digestMode: 'instant'
+  }
+};
+
+const EMPTY_DIGEST: RadarDigest = {
+  id: 'live_digest',
+  scannedCount: 0,
+  matchedCount: 0,
+  sourcesMonitored: 0,
+  summary: '',
+  summaryAr: '',
+  highlights: [],
+  highlightsAr: [],
+  generatedAt: ''
+};
+
 function extractSharedUrl(value: string): string | null {
   const match = value.match(/https?:\/\/[^\s]+/i);
   if (!match) return null;
@@ -102,14 +129,15 @@ function extractSharedUrl(value: string): string | null {
 export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [locale, setLocaleState] = useState<Locale>(() => (localStorage.getItem(STORAGE_KEYS.LOCALE) as Locale) || 'en');
   const [theme, setThemeState] = useState<'dark' | 'light'>(() => (localStorage.getItem(STORAGE_KEYS.THEME) as 'dark' | 'light') || 'dark');
-  const [isDemoMode, setIsDemoMode] = useState(() => localStorage.getItem(STORAGE_KEYS.DEMO_MODE) === 'true');
+  // Demo mode is server-controlled. Never trust a stale client localStorage flag in production.
+  const [isDemoMode, setIsDemoMode] = useState(false);
 
-  const [user, setUser] = useState<UserProfile>(INITIAL_USER);
+  const [user, setUser] = useState<UserProfile>(EMPTY_USER);
   const [sources, setSources] = useState<Source[]>([]);
   const [rules, setRules] = useState<WatchRule[]>([]);
   const [matches, setMatches] = useState<AlertMatch[]>([]);
   const [collections] = useState<Collection[]>(INITIAL_COLLECTIONS);
-  const [digest, setDigest] = useState<RadarDigest>(INITIAL_DIGEST);
+  const [digest, setDigest] = useState<RadarDigest>(EMPTY_DIGEST);
 
   const [isScanning, setIsScanning] = useState(false);
   const [backendStatus, setBackendStatus] = useState<'online' | 'offline' | 'checking'>('checking');
@@ -149,13 +177,19 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const loadDatabaseState = async () => {
     try {
-      const [health, config, dbSources, dbRules, dbAlerts] = await Promise.all([
+      const [health, config, auth, dbSources, dbRules, dbAlerts] = await Promise.all([
         apiCheckHealth(),
         apiGetConfig(),
+        apiGetAuthSession(),
         apiFetchSources(),
         apiFetchRules(),
         apiFetchAlerts()
       ]);
+
+      const serverDemo = config.appMode === 'demo';
+      setIsDemoMode(serverDemo);
+      if (serverDemo) localStorage.setItem(STORAGE_KEYS.DEMO_MODE, 'true');
+      else localStorage.removeItem(STORAGE_KEYS.DEMO_MODE);
 
       setBackendStatus(health.status === 'ok' ? 'online' : 'offline');
       setIsPostgres(Boolean(config.isPostgres));
@@ -165,26 +199,38 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setSources(dbSources);
       setRules(dbRules);
       setMatches(dbAlerts);
-      setUser(previous => ({
+      setDigest(previous => ({
         ...previous,
-        watchedSourcesCount: dbSources.length,
-        activeRulesCount: dbRules.filter(rule => rule.enabled).length
+        matchedCount: dbAlerts.length,
+        sourcesMonitored: dbSources.length
       }));
+
+      if (auth.authenticated && auth.user) {
+        setUser(previous => ({
+          ...previous,
+          id: auth.user!.id,
+          email: auth.user!.email,
+          displayName: auth.user!.name || auth.user!.email,
+          plan: auth.user!.tier === 'pro' || auth.user!.tier === 'power' ? auth.user!.tier : 'free',
+          watchedSourcesCount: dbSources.length,
+          activeRulesCount: dbRules.filter(rule => rule.enabled).length
+        }));
+      }
     } catch (error) {
       console.warn('[RadarProvider] Backend state load failed', error);
       setBackendStatus('offline');
-      if (isDemoMode) {
-        setSources(INITIAL_SOURCES);
-        setRules(INITIAL_RULES);
-        setMatches(INITIAL_MATCHES);
-      }
+      // Do not reveal seed/demo social data merely because production networking failed.
+      setSources([]);
+      setRules([]);
+      setMatches([]);
     }
   };
 
   useEffect(() => {
-    loadDatabaseState();
+    localStorage.removeItem(STORAGE_KEYS.DEMO_MODE);
+    void loadDatabaseState();
     refreshDeviceSession().catch(() => {});
-  }, [isDemoMode]);
+  }, []);
 
   useEffect(() => {
     document.documentElement.lang = locale;
@@ -224,9 +270,8 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, []);
 
   const toggleDemoMode = () => {
-    const next = !isDemoMode;
-    setIsDemoMode(next);
-    localStorage.setItem(STORAGE_KEYS.DEMO_MODE, String(next));
+    // Deliberately server-controlled so a stale or manipulated browser flag cannot inject seed data.
+    console.warn('[Radar] Demo mode can only be enabled by APP_MODE=demo on the server.');
   };
 
   const openAddSource = (url?: string) => {
@@ -273,32 +318,42 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }));
 
       if (persistedSource.connectorType === 'device_session' && DeviceSessionConnector.isNativeAvailable()) {
-        const backendBaseUrl = getApiBaseUrl();
-        if (backendBaseUrl) {
-          await DeviceSessionConnector.scheduleBackgroundSource(persistedSource, backendBaseUrl);
-        }
-
-        const connected = await refreshDeviceSession();
-        if (connected) {
+        // Source/rule persistence is the user-visible completion point. Scheduling and the first
+        // authenticated collection continue immediately without holding the setup modal open.
+        void (async () => {
           try {
-            const posts = await deviceConnector.fetchLatest(persistedSource);
-            if (posts.length > 0) {
-              const ingest = await apiIngestDevicePosts(persistedSource.id, posts, locale);
-              if (ingest.matchesCreated.length > 0) {
-                setMatches(previous => [...ingest.matchesCreated, ...previous]);
-              }
+            const backendBaseUrl = getApiBaseUrl();
+            if (backendBaseUrl) {
+              await DeviceSessionConnector.scheduleBackgroundSource(persistedSource, backendBaseUrl);
             }
+
+            const connected = await refreshDeviceSession();
+            if (!connected) return;
+
+            const posts = await deviceConnector.fetchLatest(persistedSource);
+            if (posts.length === 0) return;
+
+            const ingest = await apiIngestDevicePosts(persistedSource.id, posts, locale);
+            if (ingest.matchesCreated.length > 0) {
+              setMatches(previous => [...ingest.matchesCreated, ...previous]);
+            }
+            setSources(previous => previous.map(source => source.id === persistedSource.id
+              ? {
+                  ...source,
+                  recentPostsCount: Number(source.recentPostsCount || 0) + ingest.accepted,
+                  lastCheckedAt: locale === 'ar' ? 'الآن' : 'Just now'
+                }
+              : source));
           } catch (error) {
-            console.warn('[addSourceWithRule] Initial authenticated device collection did not complete', error);
+            console.warn('[addSourceWithRule] Initial authenticated collection did not complete', error);
           }
-        }
+        })();
       } else {
-        apiScanSources(isDemoMode).then(scan => {
+        void apiScanSources(isDemoMode).then(scan => {
           if (scan.matches.length > 0) setMatches(previous => [...scan.matches, ...previous]);
         }).catch(() => {});
       }
     } catch (error) {
-      // Avoid orphaned sources if rule creation fails.
       await apiDeleteSource(persistedSource.id).catch(() => {});
       throw error;
     }
@@ -388,37 +443,51 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     let matched = 0;
     let scanned = 0;
     try {
-      if (DeviceSessionConnector.isNativeAvailable()) {
+      const deviceSources = sources.filter(item => item.connectorType === 'device_session' && !item.isPaused);
+      if (DeviceSessionConnector.isNativeAvailable() && deviceSources.length > 0) {
         const connected = await refreshDeviceSession();
         if (connected) {
-          for (const source of sources.filter(item => item.connectorType === 'device_session' && !item.isPaused)) {
-            scanned++;
+          const results = await Promise.all(deviceSources.map(async source => {
             try {
               const posts = await deviceConnector.fetchLatest(source);
               const ingest = await apiIngestDevicePosts(source.id, posts, locale);
-              matched += ingest.matchesCreated.length;
               if (ingest.matchesCreated.length > 0) {
                 setMatches(previous => [...ingest.matchesCreated, ...previous]);
               }
+              setSources(previous => previous.map(item => item.id === source.id
+                ? {
+                    ...item,
+                    recentPostsCount: Number(item.recentPostsCount || 0) + ingest.accepted,
+                    lastCheckedAt: locale === 'ar' ? 'الآن' : 'Just now'
+                  }
+                : item));
+              return { scanned: 1, matched: ingest.matchesCreated.length };
             } catch (error) {
               console.warn(`[Radar] Authenticated scan failed for ${source.id}`, error);
+              return { scanned: 1, matched: 0 };
             }
-          }
+          }));
+          scanned += results.reduce((sum, result) => sum + result.scanned, 0);
+          matched += results.reduce((sum, result) => sum + result.matched, 0);
         }
       }
 
-      const serverScan = await apiScanSources(isDemoMode);
-      scanned = Math.max(scanned, serverScan.scanned);
-      matched += serverScan.matches.length;
-      if (serverScan.matches.length > 0) setMatches(previous => [...serverScan.matches, ...previous]);
+      const hasServerManagedSources = sources.some(item => item.connectorType !== 'device_session' && !item.isPaused);
+      if (hasServerManagedSources || isDemoMode) {
+        const serverScan = await apiScanSources(isDemoMode);
+        scanned += serverScan.scanned;
+        matched += serverScan.matches.length;
+        if (serverScan.matches.length > 0) setMatches(previous => [...serverScan.matches, ...previous]);
+      }
+
       setBackendStatus('online');
       setDigest(previous => ({
         ...previous,
         scannedCount: previous.scannedCount + scanned,
         matchedCount: previous.matchedCount + matched,
+        sourcesMonitored: sources.length,
         generatedAt: locale === 'ar' ? 'الآن' : 'Just now'
       }));
-      setSources(previous => previous.map(source => ({ ...source, lastCheckedAt: locale === 'ar' ? 'الآن' : 'Just now' })));
     } catch (error) {
       setBackendStatus('offline');
       console.warn('[Radar] Scan failed', error);
@@ -429,13 +498,10 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const resetToDemo = () => {
-    setIsDemoMode(true);
-    localStorage.setItem(STORAGE_KEYS.DEMO_MODE, 'true');
+    if (!isDemoMode) return;
     setSources(INITIAL_SOURCES);
     setRules(INITIAL_RULES);
     setMatches(INITIAL_MATCHES);
-    setUser(INITIAL_USER);
-    setDigest(INITIAL_DIGEST);
   };
 
   const connectFacebookSession = async () => {
@@ -443,13 +509,8 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       throw new Error('Authenticated Facebook monitoring requires the Android app.');
     }
     await DeviceSessionConnector.connectFacebook();
-
-    // The dedicated login activity temporarily covers this activity. Poll after it closes;
-    // timers resume and the local CookieManager session can then be confirmed without cookies
-    // ever crossing the native bridge.
-    for (let attempt = 0; attempt < 30; attempt++) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      if (await refreshDeviceSession()) return;
+    if (!(await refreshDeviceSession())) {
+      throw new Error('Facebook login is not complete yet.');
     }
   };
 
