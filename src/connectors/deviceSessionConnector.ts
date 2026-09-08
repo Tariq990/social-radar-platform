@@ -140,6 +140,11 @@ export class DeviceSessionConnector implements SourceConnector {
     await NativeSession.disconnect();
   }
 
+  static async clearBackendDeviceAuth(): Promise<void> {
+    if (!isAndroidNative()) return;
+    await NativeSession.clearBackendAuth();
+  }
+
   static async scheduleBackgroundSource(
     source: { id: string; url: string; platform: SourcePlatform },
     backendBaseUrl: string,
