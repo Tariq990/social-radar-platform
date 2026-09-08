@@ -12,7 +12,16 @@ import { evaluatePostAgainstRule } from './server/ai/ruleEvaluator';
 import { aiService } from './server/ai/aiService';
 import { getAIConfigurationStatus, testConfiguredAIProvider } from './server/ai/providerFactory';
 import { strictCors } from './server/http/cors';
-import { ensureCurrentBackendIdentity, registerDevice, requireDeviceAuth } from './server/auth/deviceAuth';
+import { registerDevice, requireDeviceAuth } from './server/auth/deviceAuth';
+import {
+  establishAppSession,
+  getCurrentAppUser,
+  loginAppUser,
+  logoutAppUser,
+  registerAppUser,
+  requireAppAuth,
+  revokeAllAppSessions
+} from './server/auth/appAuth';
 
 dotenv.config();
 
@@ -72,6 +81,12 @@ function requireInternalAdmin(req: express.Request, res: express.Response, next:
     return res.status(404).json({ error: 'Not found' });
   }
   return next();
+}
+
+function currentUserId(res: express.Response): string {
+  const userId = res.locals.userId;
+  if (!userId || typeof userId !== 'string') throw new Error('Authenticated user context is missing');
+  return userId;
 }
 
 interface SocialUrlValidation {
@@ -139,9 +154,58 @@ app.get('/api/config', (_req, res) => {
   });
 });
 
-app.post('/api/auth/device/register', rateLimiter(8, 60_000), async (req, res) => {
+app.post('/api/auth/register', rateLimiter(5, 10 * 60_000), async (req, res) => {
   try {
-    const registration = await registerDevice(req.body?.platform);
+    const user = await registerAppUser(req.body?.email, req.body?.password, req.body?.name);
+    await establishAppSession(res, user);
+    res.status(201).json({ authenticated: true, user });
+  } catch (error) {
+    res.status(400).json({ error: safeError(error) });
+  }
+});
+
+app.post('/api/auth/login', rateLimiter(8, 10 * 60_000), async (req, res) => {
+  try {
+    const user = await loginAppUser(req.body?.email, req.body?.password);
+    await establishAppSession(res, user);
+    res.json({ authenticated: true, user });
+  } catch (error) {
+    res.status(401).json({ error: safeError(error) });
+  }
+});
+
+app.get('/api/auth/me', async (req, res) => {
+  try {
+    const user = await getCurrentAppUser(req);
+    res.json(user ? { authenticated: true, user } : { authenticated: false, user: null });
+  } catch (error) {
+    res.status(503).json({ error: safeError(error) });
+  }
+});
+
+app.post('/api/auth/logout', rateLimiter(20, 60_000), async (req, res) => {
+  try {
+    await logoutAppUser(req, res, true);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: safeError(error) });
+  }
+});
+
+app.post('/api/auth/logout-all', rateLimiter(10, 60_000), requireAppAuth, async (req, res) => {
+  try {
+    const userId = currentUserId(res);
+    await logoutAppUser(req, res, false);
+    await revokeAllAppSessions(userId);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: safeError(error) });
+  }
+});
+
+app.post('/api/auth/device/register', rateLimiter(8, 60_000), requireAppAuth, async (req, res) => {
+  try {
+    const registration = await registerDevice(req.body?.platform, currentUserId(res));
     res.status(201).json(registration);
   } catch (error) {
     res.status(503).json({ error: safeError(error) });
@@ -153,16 +217,17 @@ app.get('/api/internal/ai/health', rateLimiter(5, 60_000), requireInternalAdmin,
   res.status(result.reachable ? 200 : 503).json(result);
 });
 
-app.get('/api/sources', async (_req, res) => {
+app.get('/api/sources', requireAppAuth, async (_req, res) => {
   try {
-    res.json(await db.getSources('user_default'));
+    res.json(await db.getSources(currentUserId(res)));
   } catch (error) {
     res.status(500).json({ error: safeError(error) });
   }
 });
 
-app.post('/api/sources', rateLimiter(30, 60_000), async (req, res) => {
+app.post('/api/sources', rateLimiter(30, 60_000), requireAppAuth, async (req, res) => {
   try {
+    const userId = currentUserId(res);
     const { externalId, url, name, handle, avatarUrl, bio, visibilityType, connectorType } = req.body || {};
     const checkedUrl = validateSocialUrl(url);
     if (!checkedUrl.ok) return res.status(400).json({ error: checkedUrl.error });
@@ -182,7 +247,7 @@ app.post('/api/sources', rateLimiter(30, 60_000), async (req, res) => {
 
     const source = await db.createSource({
       id: `src_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-      user_id: 'user_default',
+      user_id: userId,
       platform: checkedUrl.platform === 'instagram' ? 'instagram' : 'facebook',
       external_id: normalizedExternalId,
       url: checkedUrl.url,
@@ -204,8 +269,10 @@ app.post('/api/sources', rateLimiter(30, 60_000), async (req, res) => {
   }
 });
 
-app.delete('/api/sources/:id', async (req, res) => {
+app.delete('/api/sources/:id', requireAppAuth, async (req, res) => {
   try {
+    const source = await db.getSource(req.params.id);
+    if (!source || source.user_id !== currentUserId(res)) return res.status(404).json({ error: 'Source not found' });
     await db.deleteSource(req.params.id);
     res.json({ success: true });
   } catch (error) {
@@ -213,8 +280,10 @@ app.delete('/api/sources/:id', async (req, res) => {
   }
 });
 
-app.patch('/api/sources/:id/pause', async (req, res) => {
+app.patch('/api/sources/:id/pause', requireAppAuth, async (req, res) => {
   try {
+    const source = await db.getSource(req.params.id);
+    if (!source || source.user_id !== currentUserId(res)) return res.status(404).json({ error: 'Source not found' });
     const paused = await db.toggleSourcePause(req.params.id);
     res.json({ success: true, isPaused: paused });
   } catch (error) {
@@ -222,15 +291,12 @@ app.patch('/api/sources/:id/pause', async (req, res) => {
   }
 });
 
-app.post('/api/sources/resolve', rateLimiter(20, 60_000), async (req, res) => {
+app.post('/api/sources/resolve', rateLimiter(20, 60_000), requireAppAuth, async (req, res) => {
   try {
     const checked = validateSocialUrl(req.body?.url);
     if (!checked.ok) return res.status(400).json({ error: checked.error });
 
-    // Demo behavior is controlled only by server APP_MODE. A production client cannot request
-    // fabricated/demo connector behavior by sending { demo: true }.
-    const demo = isDemoMode();
-    const result = await sourceConnectorManager.resolve({ url: checked.url }, demo);
+    const result = await sourceConnectorManager.resolve({ url: checked.url }, isDemoMode());
     res.json({
       valid: result.valid,
       platform: result.platform,
@@ -250,24 +316,36 @@ app.post('/api/sources/resolve', rateLimiter(20, 60_000), async (req, res) => {
   }
 });
 
-app.get('/api/rules', async (_req, res) => {
+app.get('/api/rules', requireAppAuth, async (_req, res) => {
   try {
-    res.json(await db.getRules('user_default'));
+    res.json(await db.getRules(currentUserId(res)));
   } catch (error) {
     res.status(500).json({ error: safeError(error) });
   }
 });
 
-app.post('/api/rules', rateLimiter(40, 60_000), async (req, res) => {
+app.post('/api/rules', rateLimiter(40, 60_000), requireAppAuth, async (req, res) => {
   try {
+    const userId = currentUserId(res);
     const { name, naturalLanguage, includeTerms, excludeTerms, minConfidence, alertMode, collectionId, sourceIds } = req.body || {};
     if (typeof naturalLanguage !== 'string' || !naturalLanguage.trim()) {
       return res.status(400).json({ error: 'naturalLanguage is required' });
     }
 
+    const normalizedSourceIds = Array.isArray(sourceIds)
+      ? sourceIds.filter((v: any) => typeof v === 'string').slice(0, 250)
+      : [];
+    if (normalizedSourceIds.length > 0) {
+      const ownedSources = await db.getSources(userId);
+      const ownedIds = new Set(ownedSources.map(source => source.id));
+      if (normalizedSourceIds.some(sourceId => !ownedIds.has(sourceId))) {
+        return res.status(400).json({ error: 'One or more rule sources are invalid' });
+      }
+    }
+
     const rule = await db.createRule({
       id: `rule_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-      user_id: 'user_default',
+      user_id: userId,
       name: typeof name === 'string' && name.trim() ? name.trim().slice(0, 255) : 'Watch Rule',
       natural_language: naturalLanguage.trim().slice(0, 10_000),
       include_terms: Array.isArray(includeTerms) ? includeTerms.filter((v: any) => typeof v === 'string').slice(0, 50) : [],
@@ -276,7 +354,7 @@ app.post('/api/rules', rateLimiter(40, 60_000), async (req, res) => {
       alert_mode: ['instant', 'digest', 'silent'].includes(alertMode) ? alertMode : 'instant',
       enabled: true,
       collection_id: typeof collectionId === 'string' ? collectionId.slice(0, 255) : undefined
-    }, Array.isArray(sourceIds) ? sourceIds.filter((v: any) => typeof v === 'string').slice(0, 250) : []);
+    }, normalizedSourceIds);
 
     res.status(201).json(rule);
   } catch (error) {
@@ -284,8 +362,10 @@ app.post('/api/rules', rateLimiter(40, 60_000), async (req, res) => {
   }
 });
 
-app.delete('/api/rules/:id', async (req, res) => {
+app.delete('/api/rules/:id', requireAppAuth, async (req, res) => {
   try {
+    const rules = await db.getRules(currentUserId(res));
+    if (!rules.some(rule => rule.id === req.params.id)) return res.status(404).json({ error: 'Rule not found' });
     await db.deleteRule(req.params.id);
     res.json({ success: true });
   } catch (error) {
@@ -293,8 +373,10 @@ app.delete('/api/rules/:id', async (req, res) => {
   }
 });
 
-app.patch('/api/rules/:id/toggle', async (req, res) => {
+app.patch('/api/rules/:id/toggle', requireAppAuth, async (req, res) => {
   try {
+    const rules = await db.getRules(currentUserId(res));
+    if (!rules.some(rule => rule.id === req.params.id)) return res.status(404).json({ error: 'Rule not found' });
     const enabled = await db.toggleRule(req.params.id);
     res.json({ success: true, enabled });
   } catch (error) {
@@ -302,16 +384,20 @@ app.patch('/api/rules/:id/toggle', async (req, res) => {
   }
 });
 
-app.get('/api/alerts', async (_req, res) => {
+app.get('/api/alerts', requireAppAuth, async (_req, res) => {
   try {
-    res.json(await db.getMatches('user_default'));
+    res.json(await db.getMatches(currentUserId(res)));
   } catch (error) {
     res.status(500).json({ error: safeError(error) });
   }
 });
 
-app.patch('/api/alerts/:id', async (req, res) => {
+app.patch('/api/alerts/:id', requireAppAuth, async (req, res) => {
   try {
+    const userId = currentUserId(res);
+    const matches = await db.getMatches(userId);
+    if (!matches.some(match => match.id === req.params.id)) return res.status(404).json({ error: 'Alert not found' });
+
     const { feedback, isRead, isSaved } = req.body || {};
     const normalizedFeedback = feedback === 'relevant' || feedback === 'not_relevant' ? feedback : undefined;
     await db.updateMatch(req.params.id, {
@@ -325,11 +411,9 @@ app.patch('/api/alerts/:id', async (req, res) => {
   }
 });
 
-app.post('/api/alerts/scan', rateLimiter(15, 60_000), async (_req, res) => {
+app.post('/api/alerts/scan', rateLimiter(15, 60_000), requireAppAuth, async (_req, res) => {
   try {
-    // Production can never be switched into demo scanning by a client request.
-    const demo = isDemoMode();
-    const scan = await monitoringWorker.runScan('user_default', demo);
+    const scan = await monitoringWorker.runScan(currentUserId(res), isDemoMode());
     res.json({
       scanned: scan.sourcesScanned,
       deviceManagedSources: scan.deviceManagedSources,
@@ -353,7 +437,7 @@ app.post('/api/device/ingest', rateLimiter(30, 60_000), requireDeviceAuth, async
     const result = await ingestDevicePosts(
       sourceId,
       posts,
-      res.locals.userId || 'user_default',
+      currentUserId(res),
       locale === 'ar' ? 'ar' : 'en'
     );
     res.json(result);
@@ -374,7 +458,7 @@ app.post('/api/ai/evaluate-post', rateLimiter(10, 60_000), requireInternalAdmin,
   }
 });
 
-app.post('/api/ai/rule-suggestions', rateLimiter(20, 60_000), async (req, res) => {
+app.post('/api/ai/rule-suggestions', rateLimiter(20, 60_000), requireAppAuth, async (req, res) => {
   try {
     if (isDemoMode() && !getAIConfigurationStatus().configured) {
       return res.json({
@@ -399,7 +483,7 @@ app.post('/api/ai/rule-suggestions', rateLimiter(20, 60_000), async (req, res) =
   }
 });
 
-app.post('/api/ai/generate-digest', rateLimiter(20, 60_000), async (req, res) => {
+app.post('/api/ai/generate-digest', rateLimiter(20, 60_000), requireAppAuth, async (req, res) => {
   try {
     const matches = Array.isArray(req.body?.matches) ? req.body.matches.slice(0, 20) : [];
     const locale = req.body?.locale === 'ar' ? 'ar' : 'en';
@@ -418,7 +502,7 @@ app.post('/api/ai/generate-digest', rateLimiter(20, 60_000), async (req, res) =>
   }
 });
 
-app.post('/api/ai/preview-match', rateLimiter(20, 60_000), async (req, res) => {
+app.post('/api/ai/preview-match', rateLimiter(20, 60_000), requireAppAuth, async (req, res) => {
   try {
     const rule = typeof req.body?.ruleNaturalLanguage === 'string' ? req.body.ruleNaturalLanguage.trim().slice(0, 10_000) : '';
     if (!rule) return res.status(400).json({ error: 'ruleNaturalLanguage is required' });
@@ -446,8 +530,6 @@ async function startServer() {
   if (APP_MODE === 'production' && !db.isUsingPostgres()) {
     throw new Error('Production startup aborted: DATABASE_URL is missing/unreachable. Local JSON persistence is allowed only outside APP_MODE=production.');
   }
-
-  await ensureCurrentBackendIdentity();
 
   const aiStatus = getAIConfigurationStatus();
   if (APP_MODE === 'production' && !aiStatus.configured) {
