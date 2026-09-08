@@ -158,7 +158,7 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
             return;
         }
 
-        AuthenticatedWebCollector.collect(getContext(), url, new AuthenticatedWebCollector.Callback() {
+        AuthenticatedSourceMetadataResolver.resolve(getContext(), url, new AuthenticatedWebCollector.Callback() {
             @Override
             public void onSuccess(JSONObject result) {
                 try {
