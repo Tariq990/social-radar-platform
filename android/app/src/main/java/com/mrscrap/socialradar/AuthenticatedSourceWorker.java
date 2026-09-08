@@ -11,6 +11,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -26,6 +27,15 @@ public class AuthenticatedSourceWorker extends Worker {
     public static final String KEY_PLATFORM = "platform";
     public static final String KEY_BACKEND_BASE_URL = "backendBaseUrl";
     public static final String KEY_LOCALE = "locale";
+
+    private static final class HttpResult {
+        final int status;
+        final String body;
+        HttpResult(int status, String body) {
+            this.status = status;
+            this.body = body == null ? "" : body;
+        }
+    }
 
     public AuthenticatedSourceWorker(@NonNull Context context, @NonNull WorkerParameters params) {
         super(context, params);
@@ -80,26 +90,36 @@ public class AuthenticatedSourceWorker extends Worker {
             payload.put("posts", posts);
             payload.put("locale", locale);
 
-            int status = postNormalizedData(backendBaseUrl, authToken, payload);
-            if (status >= 200 && status < 300) {
+            HttpResult response = postNormalizedData(backendBaseUrl, authToken, payload);
+            if (response.status >= 200 && response.status < 300) {
                 SessionStateStore.markChecked(getApplicationContext());
+                JSONArray matches = new JSONArray();
+                try {
+                    JSONObject body = response.body.isBlank() ? new JSONObject() : new JSONObject(response.body);
+                    JSONArray parsed = body.optJSONArray("matchesCreated");
+                    if (parsed != null) matches = parsed;
+                } catch (Exception ignored) {
+                    // Successful ingestion remains valid even if a proxy strips or changes the response body.
+                }
+                RadarNotificationHelper.notifyMatches(getApplicationContext(), matches, locale);
                 return Result.success(new Data.Builder()
                     .putInt("postCount", posts.length())
+                    .putInt("matchCount", matches.length())
                     .putString("checkedAt", java.time.Instant.now().toString())
                     .build());
             }
-            if (status == 401 || status == 403) {
+            if (response.status == 401 || response.status == 403) {
                 DeviceCredentialStore.clear(getApplicationContext());
                 return Result.failure(errorData("Backend device authorization was rejected; reopen the app to re-register this device"));
             }
-            if (status == 408 || status == 429 || status >= 500) return Result.retry();
-            return Result.failure(errorData("Backend rejected normalized ingestion with HTTP " + status));
+            if (response.status == 408 || response.status == 429 || response.status >= 500) return Result.retry();
+            return Result.failure(errorData("Backend rejected normalized ingestion with HTTP " + response.status));
         } catch (Exception error) {
             return Result.retry();
         }
     }
 
-    private int postNormalizedData(String backendBaseUrl, String authToken, JSONObject payload) throws Exception {
+    private HttpResult postNormalizedData(String backendBaseUrl, String authToken, JSONObject payload) throws Exception {
         String base = backendBaseUrl.replaceAll("/+$", "");
         HttpURLConnection connection = (HttpURLConnection) new URL(base + "/api/device/ingest").openConnection();
         connection.setRequestMethod("POST");
@@ -115,12 +135,18 @@ public class AuthenticatedSourceWorker extends Worker {
         try (OutputStream output = connection.getOutputStream()) { output.write(bytes); }
 
         int status = connection.getResponseCode();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
-            status >= 400 ? connection.getErrorStream() : connection.getInputStream(), StandardCharsets.UTF_8))) {
-            while (reader.readLine() != null) { }
-        } catch (Exception ignored) { }
+        InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
+        StringBuilder body = new StringBuilder();
+        if (stream != null) {
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (body.length() < 256 * 1024) body.append(line);
+                }
+            }
+        }
         connection.disconnect();
-        return status;
+        return new HttpResult(status, body.toString());
     }
 
     private boolean isAllowedBackendUrl(String raw) {
