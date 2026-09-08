@@ -96,8 +96,9 @@ export class MonitoringWorker {
 
             if (await db.hasPostFingerprint(fingerprint)) continue;
 
+            const candidatePostId = `post_${source.platform}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
             const savedPost = await db.createPost({
-              id: `post_${source.platform}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+              id: candidatePostId,
               source_id: source.id,
               platform: source.platform,
               external_id: raw.externalId,
@@ -111,6 +112,10 @@ export class MonitoringWorker {
               metadata: raw.metadata || {}
             });
 
+            // The fingerprint constraint is authoritative. If another concurrent execution
+            // inserted this post first, createPost returns that existing row; do not re-evaluate it.
+            if (savedPost.id !== candidatePostId) continue;
+
             result.newPostsFound++;
 
             for (const rule of sourceRules) {
@@ -118,8 +123,9 @@ export class MonitoringWorker {
                 const evalResult = await evaluatePostAgainstRule(savedPost, rule, 'en');
                 if (!evalResult.matched) continue;
 
+                const candidateMatchId = `match_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
                 const createdMatch = await db.createMatch({
-                  id: `match_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+                  id: candidateMatchId,
                   user_id: userId,
                   post_id: savedPost.id,
                   rule_id: rule.id,
@@ -132,6 +138,10 @@ export class MonitoringWorker {
                   is_read: false,
                   is_saved: false
                 });
+
+                // The DB guarantees uniqueness by (rule_id, post_id). Avoid duplicate delivery
+                // when a concurrent worker won that match insert.
+                if (createdMatch.id !== candidateMatchId) continue;
 
                 createdMatch.source_name = source.name;
                 createdMatch.source_avatar = source.avatar_url;
