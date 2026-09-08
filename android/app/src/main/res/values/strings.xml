@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MR SCRAP</string>
+    <string name="title_activity_main">MR SCRAP</string>
+    <string name="facebook_session_title">Connect Facebook</string>
+</resources>
