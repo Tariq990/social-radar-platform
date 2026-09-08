@@ -136,8 +136,9 @@ export async function ingestDevicePosts(
         const evaluation = await evaluatePostAgainstRule(savedPost, rule, locale);
         if (!evaluation.matched) continue;
 
+        const candidateMatchId = `match_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         const match = await db.createMatch({
-          id: `match_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          id: candidateMatchId,
           user_id: userId,
           post_id: savedPost.id,
           rule_id: rule.id,
@@ -150,6 +151,10 @@ export async function ingestDevicePosts(
           is_read: false,
           is_saved: false
         });
+
+        // createMatch is idempotent on (rule_id, post_id). If another worker created the
+        // match first, do not emit a second push/notification for the same rule and post.
+        if (match.id !== candidateMatchId) continue;
 
         match.source_name = source.name;
         match.source_avatar = source.avatar_url;
