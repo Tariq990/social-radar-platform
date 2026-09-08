@@ -16,12 +16,9 @@ import org.json.JSONTokener;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Loads a watched Facebook/Instagram URL inside a private app-owned WebView using the local
- * CookieManager session and returns normalized DOM data only. It never exposes cookie values.
- *
- * The selectors intentionally target semantic article/link structures rather than bypassing
- * platform controls. If the platform changes its DOM or blocks the page, collection fails
- * explicitly and the source is marked as needing attention.
+ * Loads a watched Facebook/Instagram URL inside an app-owned WebView using the local
+ * CookieManager session and returns normalized DOM data only. Cookie values never cross the
+ * native bridge. If reliable source metadata cannot be read, collection fails explicitly.
  */
 final class AuthenticatedWebCollector {
     interface Callback {
@@ -90,6 +87,8 @@ final class AuthenticatedWebCollector {
                 @Override
                 public void onPageFinished(WebView view, String loadedUrl) {
                     super.onPageFinished(view, loadedUrl);
+                    if (!isAllowedSocialUrl(loadedUrl)) return;
+
                     main.postDelayed(() -> {
                         if (finished.get()) return;
                         view.evaluateJavascript(extractionScript(), value -> {
@@ -99,6 +98,18 @@ final class AuthenticatedWebCollector {
                                 Object decoded = new JSONTokener(value).nextValue();
                                 String json = decoded instanceof String ? (String) decoded : value;
                                 JSONObject result = new JSONObject(json);
+                                JSONObject source = result.optJSONObject("source");
+                                String sourceUrl = source == null ? "" : source.optString("url", "");
+                                String displayName = source == null ? "" : source.optString("displayName", "");
+                                String externalId = source == null ? "" : source.optString("externalId", "");
+
+                                if (result.has("error") || source == null ||
+                                    !isAllowedSocialUrl(sourceUrl) || isBlank(displayName) || isBlank(externalId)) {
+                                    destroy(view);
+                                    callback.onError("Could not resolve reliable source metadata from this page");
+                                    return;
+                                }
+
                                 destroy(view);
                                 callback.onSuccess(result);
                             } catch (Exception error) {
@@ -114,11 +125,17 @@ final class AuthenticatedWebCollector {
         });
     }
 
+    private static boolean isBlank(String value) {
+        if (value == null) return true;
+        String normalized = value.trim().toLowerCase();
+        return normalized.isEmpty() || normalized.equals("blank") || normalized.equals("about:blank") ||
+            normalized.equals("null") || normalized.equals("undefined");
+    }
+
     private static void destroy(WebView webView) {
         new Handler(Looper.getMainLooper()).post(() -> {
             try {
                 webView.stopLoading();
-                webView.loadUrl("about:blank");
                 webView.clearHistory();
                 webView.removeAllViews();
                 webView.destroy();
@@ -129,29 +146,43 @@ final class AuthenticatedWebCollector {
     private static String extractionScript() {
         return "(() => {" +
             "const abs=(u)=>{try{return new URL(u,location.href).href}catch(e){return ''}};" +
-            "const canonical=abs(document.querySelector('link[rel=canonical]')?.href||location.href);" +
-            "const title=(document.querySelector('meta[property=\"og:title\"]')?.content||document.title||'').trim();" +
-            "const image=abs(document.querySelector('meta[property=\"og:image\"]')?.content||'');" +
-            "const description=(document.querySelector('meta[property=\"og:description\"]')?.content||'').trim();" +
-            "const host=location.hostname.toLowerCase();" +
-            "const platform=host.includes('instagram')?'instagram':'facebook';" +
-            "const pathParts=location.pathname.split('/').filter(Boolean);" +
-            "const fallbackId=pathParts[0]||canonical;" +
-            "const nodes=[...document.querySelectorAll('[role=\"article\"],article')].slice(0,30);" +
+            "const allowed=(u)=>{try{const x=new URL(u);const h=x.hostname.toLowerCase();return (x.protocol==='https:'||x.protocol==='http:')&&(h==='facebook.com'||h.endsWith('.facebook.com')||h==='fb.com'||h.endsWith('.fb.com')||h==='fb.watch'||h==='instagram.com'||h.endsWith('.instagram.com')||h==='instagr.am'||h.endsWith('.instagr.am'))}catch(e){return false}};" +
+            "const current=abs(location.href);" +
+            "const canonicalCandidate=abs(document.querySelector('link[rel=canonical]')?.href||'');" +
+            "const sourceUrl=allowed(canonicalCandidate)?canonicalCandidate:(allowed(current)?current:'');" +
+            "if(!sourceUrl)return JSON.stringify({error:'SOURCE_URL_UNAVAILABLE',source:null,posts:[]});" +
+            "const u=new URL(sourceUrl);" +
+            "const host=u.hostname.toLowerCase();" +
+            "const platform=(host.includes('instagram')||host.includes('instagr.am'))?'instagram':'facebook';" +
+            "const parts=u.pathname.split('/').filter(Boolean).map(v=>{try{return decodeURIComponent(v)}catch(e){return v}});" +
+            "const generic=new Set(['profile.php','groups','posts','permalink','reel','reels','watch','share','photo','photos','story.php']);" +
+            "const first=(parts[0]||'').trim();" +
+            "let handle='';" +
+            "if(first&&!generic.has(first.toLowerCase()))handle=first.replace(/^@/,'');" +
+            "else if(first.toLowerCase()==='groups'&&parts[1])handle=parts[1].replace(/^@/,'');" +
+            "else handle=(u.searchParams.get('id')||'').trim();" +
+            "const externalId=(u.searchParams.get('id')||handle||'').trim();" +
+            "const cleanTitle=(s)=>String(s||'').replace(/\\s*[|·-]\\s*Facebook\\s*$/i,'').replace(/\\s*[|·-]\\s*Instagram\\s*$/i,'').trim();" +
+            "const titleCandidates=[document.querySelector('meta[property=\\\"og:title\\\"]')?.content,document.querySelector('main h1')?.innerText,document.querySelector('[role=\\\"main\\\"] h1')?.innerText,document.querySelector('h1')?.innerText,document.title].map(cleanTitle).filter(Boolean);" +
+            "const title=titleCandidates.find(v=>v.toLowerCase()!=='facebook'&&v.toLowerCase()!=='instagram'&&v.toLowerCase()!=='blank')||(handle?('@'+handle):'');" +
+            "const image=abs(document.querySelector('meta[property=\\\"og:image\\\"]')?.content||'');" +
+            "const description=(document.querySelector('meta[property=\\\"og:description\\\"]')?.content||'').trim();" +
+            "if(!externalId||!title)return JSON.stringify({error:'SOURCE_METADATA_UNAVAILABLE',source:{platform,externalId,url:sourceUrl,displayName:title,handle,avatarUrl:image||'',bio:description||'',visibilityType:'authenticated'},posts:[]});" +
+            "const nodes=[...document.querySelectorAll('[role=\\\"article\\\"],article')].slice(0,30);" +
             "const seen=new Set();const posts=[];" +
             "for(const node of nodes){" +
               "const anchors=[...node.querySelectorAll('a[href]')];" +
-              "const link=anchors.map(a=>abs(a.getAttribute('href')||'')).find(h=>/\\/(posts|permalink|reel|reels|p)\\//i.test(h)||/[?&]story_fbid=/i.test(h));" +
+              "const link=anchors.map(a=>abs(a.getAttribute('href')||'')).find(h=>allowed(h)&&(/\\/(posts|permalink|reel|reels|p)\\//i.test(h)||/[?&]story_fbid=/i.test(h)));" +
               "if(!link||seen.has(link))continue;seen.add(link);" +
               "const text=(node.innerText||'').trim();if(!text)continue;" +
               "const time=node.querySelector('time');const publishedAt=time?.getAttribute('datetime')||time?.dateTime||null;" +
               "const media=[];" +
-              "for(const img of [...node.querySelectorAll('img[src]')].slice(0,6)){const src=abs(img.src);if(src)media.push({type:'image',url:src})}" +
-              "for(const video of [...node.querySelectorAll('video[src]')].slice(0,2)){const src=abs(video.src);if(src)media.push({type:'video',url:src})}" +
+              "for(const img of [...node.querySelectorAll('img[src]')].slice(0,6)){const src=abs(img.src);if(src&&/^https?:/i.test(src))media.push({type:'image',url:src})}" +
+              "for(const video of [...node.querySelectorAll('video[src]')].slice(0,2)){const src=abs(video.src);if(src&&/^https?:/i.test(src))media.push({type:'video',url:src})}" +
               "const idMatch=link.match(/(?:posts|permalink|reel|reels|p)\\/([^/?#]+)/i)||link.match(/[?&]story_fbid=([^&#]+)/i);" +
               "posts.push({externalPostId:idMatch?.[1]||null,originalUrl:link,authorName:title,authorAvatar:image||null,text:text.slice(0,100000),media,publishedAt,metadata:{collector:'android_webview'}});" +
             "}" +
-            "return JSON.stringify({source:{platform,externalId:fallbackId,url:canonical,displayName:title||fallbackId,handle:pathParts[0]||'',avatarUrl:image||'',bio:description||'',visibilityType:'authenticated'},posts});" +
+            "return JSON.stringify({source:{platform,externalId,url:sourceUrl,displayName:title,handle,avatarUrl:image||'',bio:description||'',visibilityType:'authenticated'},posts});" +
           "})()";
     }
 }

@@ -1,8 +1,10 @@
 package com.mrscrap.socialradar;
 
+import android.app.Activity;
 import android.content.Intent;
 import android.webkit.CookieManager;
 
+import androidx.activity.result.ActivityResult;
 import androidx.work.Constraints;
 import androidx.work.Data;
 import androidx.work.ExistingPeriodicWorkPolicy;
@@ -14,6 +16,7 @@ import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
 import org.json.JSONObject;
@@ -40,9 +43,20 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
     @PluginMethod
     public void connectFacebook(PluginCall call) {
         Intent intent = new Intent(getContext(), FacebookSessionActivity.class);
-        getActivity().startActivity(intent);
+        startActivityForResult(call, intent, "facebookSessionResult");
+    }
+
+    @ActivityCallback
+    private void facebookSessionResult(PluginCall call, ActivityResult activityResult) {
+        if (call == null) return;
+        boolean connected = activityResult != null &&
+            activityResult.getResultCode() == Activity.RESULT_OK &&
+            SessionStateStore.isFacebookConnected();
+
         JSObject result = new JSObject();
         result.put("opened", true);
+        result.put("connected", connected);
+        result.put("cancelled", !connected);
         call.resolve(result);
     }
 
