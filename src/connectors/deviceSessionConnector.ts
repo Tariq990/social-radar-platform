@@ -3,9 +3,13 @@ import { SourceConnector, SourceInput, ValidationResult, ResolvedSource, Connect
 import { NormalizedPost, SourcePlatform } from '../types';
 import { ensureApiDeviceAuth } from '../services/api';
 
-interface NativeSessionStatus {
+export interface NativeSessionStatus {
   available: boolean;
   connected: boolean;
+  facebookConnected?: boolean;
+  instagramConnected?: boolean;
+  facebookConnectedAt?: string;
+  instagramConnectedAt?: string;
   connectedAt?: string;
   lastCheckedAt?: string;
   message?: string;
@@ -37,6 +41,9 @@ interface AuthenticatedSocialSessionPlugin {
   status(): Promise<NativeSessionStatus>;
   readClipboard(): Promise<{ text?: string }>;
   connectFacebook(): Promise<{ opened: boolean; connected?: boolean; cancelled?: boolean }>;
+  connectInstagram(): Promise<{ opened: boolean; connected?: boolean; cancelled?: boolean }>;
+  disconnectFacebook(): Promise<{ disconnected: boolean }>;
+  disconnectInstagram(): Promise<{ disconnected: boolean }>;
   disconnect(): Promise<{ disconnected: boolean }>;
   saveBackendAuth(options: { userId: string; deviceId: string; token: string; platform: string }): Promise<{ saved: boolean }>;
   getBackendAuth(): Promise<{ configured: boolean; userId?: string; deviceId?: string; token?: string; platform?: string }>;
@@ -68,10 +75,7 @@ function toNormalizedPost(source: { id: string; platform: SourcePlatform; url: s
     publishedAt: post.publishedAt || '',
     detectedAt,
     fingerprint: post.externalPostId || post.originalUrl,
-    metadata: {
-      ...(post.metadata || {}),
-      ingestion: 'android_device_session'
-    }
+    metadata: { ...(post.metadata || {}), ingestion: 'android_device_session' }
   };
 }
 
@@ -82,13 +86,21 @@ export class DeviceSessionConnector implements SourceConnector {
 
   static async getLocalSession(): Promise<NativeSessionStatus> {
     if (!isAndroidNative()) {
-      return {
-        available: false,
-        connected: false,
-        message: 'Authenticated social monitoring requires the Android app.'
-      };
+      return { available: false, connected: false, facebookConnected: false, instagramConnected: false };
     }
-    return await NativeSession.status();
+    const status = await NativeSession.status();
+    return {
+      ...status,
+      facebookConnected: status.facebookConnected ?? status.connected,
+      // Old APKs only exposed a Facebook-only `connected`; never treat that as Instagram auth.
+      instagramConnected: status.instagramConnected ?? false
+    };
+  }
+
+  static isPlatformConnected(status: NativeSessionStatus, platform: SourcePlatform | null | undefined): boolean {
+    if (platform === 'instagram') return status.instagramConnected === true;
+    if (platform === 'facebook') return status.facebookConnected === true;
+    return false;
   }
 
   static async readClipboardText(): Promise<string> {
@@ -97,9 +109,26 @@ export class DeviceSessionConnector implements SourceConnector {
     return typeof result?.text === 'string' ? result.text : '';
   }
 
-  static async connectFacebook(): Promise<void> {
-    if (!isAndroidNative()) throw new Error('Facebook session connection requires the Android app.');
+  static async connectFacebook(): Promise<boolean> {
+    if (!isAndroidNative()) throw new Error('Facebook connection requires the Android app.');
     await NativeSession.connectFacebook();
+    return DeviceSessionConnector.isPlatformConnected(await DeviceSessionConnector.getLocalSession(), 'facebook');
+  }
+
+  static async connectInstagram(): Promise<boolean> {
+    if (!isAndroidNative()) throw new Error('Instagram connection requires the Android app.');
+    await NativeSession.connectInstagram();
+    return DeviceSessionConnector.isPlatformConnected(await DeviceSessionConnector.getLocalSession(), 'instagram');
+  }
+
+  static async disconnectFacebook(): Promise<void> {
+    if (!isAndroidNative()) return;
+    await NativeSession.disconnectFacebook();
+  }
+
+  static async disconnectInstagram(): Promise<void> {
+    if (!isAndroidNative()) return;
+    await NativeSession.disconnectInstagram();
   }
 
   static async wipeLocalSession(): Promise<void> {
@@ -107,24 +136,11 @@ export class DeviceSessionConnector implements SourceConnector {
     await NativeSession.disconnect();
   }
 
-  static async scheduleBackgroundSource(
-    source: { id: string; url: string; platform: SourcePlatform },
-    backendBaseUrl: string
-  ): Promise<void> {
+  static async scheduleBackgroundSource(source: { id: string; url: string; platform: SourcePlatform }, backendBaseUrl: string): Promise<void> {
     if (!isAndroidNative()) throw new Error('Background authenticated monitoring requires the Android app.');
     const auth = await ensureApiDeviceAuth();
-    await NativeSession.saveBackendAuth({
-      userId: auth.userId,
-      deviceId: auth.deviceId,
-      token: auth.token,
-      platform: auth.platform
-    });
-    await NativeSession.scheduleSource({
-      sourceId: source.id,
-      url: source.url,
-      platform: source.platform,
-      backendBaseUrl
-    });
+    await NativeSession.saveBackendAuth({ userId: auth.userId, deviceId: auth.deviceId, token: auth.token, platform: auth.platform });
+    await NativeSession.scheduleSource({ sourceId: source.id, url: source.url, platform: source.platform, backendBaseUrl });
   }
 
   static async cancelBackgroundSource(sourceId: string): Promise<void> {
@@ -139,7 +155,7 @@ export class DeviceSessionConnector implements SourceConnector {
       const host = parsed.hostname.toLowerCase();
       const isFacebook = host === 'facebook.com' || host.endsWith('.facebook.com') || host === 'fb.com' || host.endsWith('.fb.com') || host === 'fb.watch';
       const isInstagram = host === 'instagram.com' || host.endsWith('.instagram.com') || host === 'instagr.am' || host.endsWith('.instagr.am');
-      if (!isFacebook && !isInstagram) {
+      if (!['http:', 'https:'].includes(parsed.protocol) || (!isFacebook && !isInstagram)) {
         return { valid: false, platform: 'other', cleanedUrl: raw, handleOrId: '', isPostUrl: false, error: 'Only Facebook and Instagram URLs are supported.' };
       }
       parsed.hash = '';
@@ -159,11 +175,11 @@ export class DeviceSessionConnector implements SourceConnector {
   async resolveSource(input: SourceInput): Promise<ResolvedSource> {
     const validation = await this.validate(input);
     if (!validation.valid) throw new Error(validation.error || 'Invalid source URL');
-    if (!isAndroidNative()) throw new Error('This source requires a connected Android device session.');
-
-    const status = await NativeSession.status();
-    if (!status.connected) throw new Error('Facebook session is not connected.');
-
+    if (!isAndroidNative()) throw new Error('This source requires the Android app.');
+    const status = await DeviceSessionConnector.getLocalSession();
+    if (!DeviceSessionConnector.isPlatformConnected(status, validation.platform)) {
+      throw new Error(`${validation.platform === 'instagram' ? 'Instagram' : 'Facebook'} session is not connected.`);
+    }
     const resolved = await NativeSession.resolveSource({ url: validation.cleanedUrl });
     return {
       platform: resolved.platform,
@@ -182,26 +198,24 @@ export class DeviceSessionConnector implements SourceConnector {
 
   async fetchLatest(source: { id: string; url: string; platform: SourcePlatform; externalId: string }): Promise<NormalizedPost[]> {
     if (!isAndroidNative()) throw new Error('Authenticated source collection requires the Android app.');
-    const status = await NativeSession.status();
-    if (!status.connected) throw new Error('Facebook session expired or is not connected.');
-
-    const result = await NativeSession.collectSource({
-      sourceId: source.id,
-      url: source.url,
-      platform: source.platform
-    });
+    const status = await DeviceSessionConnector.getLocalSession();
+    if (!DeviceSessionConnector.isPlatformConnected(status, source.platform)) {
+      throw new Error(`${source.platform === 'instagram' ? 'Instagram' : 'Facebook'} session expired or is not connected.`);
+    }
+    const result = await NativeSession.collectSource({ sourceId: source.id, url: source.url, platform: source.platform });
     return (result.posts || []).map(post => toNormalizedPost(source, post));
   }
 
-  async healthCheck(_source: { id: string; url: string; platform: SourcePlatform }): Promise<ConnectorHealth> {
+  async healthCheck(source: { id: string; url: string; platform: SourcePlatform }): Promise<ConnectorHealth> {
     const startedAt = performance.now();
     const status = await DeviceSessionConnector.getLocalSession();
+    const connected = DeviceSessionConnector.isPlatformConnected(status, source.platform);
     return {
-      status: status.connected ? 'authenticated_monitoring' : 'needs_relogin',
+      status: connected ? 'authenticated_monitoring' : 'needs_relogin',
       latencyMs: Math.round(performance.now() - startedAt),
-      lastSuccessfulCheck: status.lastCheckedAt || status.connectedAt || 'Never',
-      errorCount: status.connected ? 0 : 1,
-      message: status.message || (status.connected ? 'Authenticated Android session is available on this device.' : 'Connect Facebook on the Android device.')
+      lastSuccessfulCheck: status.lastCheckedAt || (source.platform === 'instagram' ? status.instagramConnectedAt : status.facebookConnectedAt) || 'Never',
+      errorCount: connected ? 0 : 1,
+      message: connected ? `${source.platform} session connected` : `${source.platform} login required`
     };
   }
 }

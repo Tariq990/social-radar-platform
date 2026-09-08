@@ -18,8 +18,8 @@ import android.widget.TextView;
 
 import androidx.annotation.Nullable;
 
-/** Dedicated first-party Facebook login surface. Credentials stay on facebook.com. */
-public class FacebookSessionActivity extends Activity {
+/** Dedicated first-party Instagram login surface. Credentials stay on instagram.com. */
+public class InstagramSessionActivity extends Activity {
     private static final int COLOR_CHROME = Color.rgb(2, 6, 23);
     private static final int COLOR_TEXT = Color.rgb(241, 245, 249);
     private static final int COLOR_MUTED = Color.rgb(148, 163, 184);
@@ -53,7 +53,7 @@ public class FacebookSessionActivity extends Activity {
         back.setOnClickListener(v -> navigateBackOrClose());
 
         TextView title = new TextView(this);
-        title.setText("Facebook");
+        title.setText("Instagram");
         title.setTextColor(COLOR_TEXT);
         title.setTextSize(16);
         title.setGravity(Gravity.CENTER_VERTICAL);
@@ -68,7 +68,7 @@ public class FacebookSessionActivity extends Activity {
         privacy.setSingleLine(true);
 
         TextView close = chromeButton("×", 27);
-        close.setContentDescription("Close Facebook login");
+        close.setContentDescription("Close Instagram login");
         close.setOnClickListener(v -> finish());
 
         toolbar.addView(back, new LinearLayout.LayoutParams(dp(44), dp(52)));
@@ -103,8 +103,12 @@ public class FacebookSessionActivity extends Activity {
                 String host = request.getUrl().getHost();
                 if (host == null) return true;
                 String normalized = host.toLowerCase();
-                return !(normalized.equals("facebook.com") || normalized.endsWith(".facebook.com") ||
-                    normalized.equals("fb.com") || normalized.endsWith(".fb.com"));
+                boolean instagram = normalized.equals("instagram.com") || normalized.endsWith(".instagram.com") ||
+                    normalized.equals("instagr.am") || normalized.endsWith(".instagr.am");
+                // Instagram can offer "Continue with Facebook" during authentication.
+                boolean facebook = normalized.equals("facebook.com") || normalized.endsWith(".facebook.com") ||
+                    normalized.equals("fb.com") || normalized.endsWith(".fb.com");
+                return !(instagram || facebook);
             }
 
             @Override
@@ -126,9 +130,9 @@ public class FacebookSessionActivity extends Activity {
         root.addView(webContainer, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         setContentView(root);
 
-        webView.loadUrl(SessionStateStore.isFacebookConnected()
-            ? "https://m.facebook.com/"
-            : "https://m.facebook.com/login/");
+        webView.loadUrl(SessionStateStore.isInstagramConnected()
+            ? "https://www.instagram.com/"
+            : "https://www.instagram.com/accounts/login/");
     }
 
     private TextView chromeButton(String glyph, float sizeSp) {
@@ -153,9 +157,9 @@ public class FacebookSessionActivity extends Activity {
     private void completeIfAuthenticated() {
         if (completed) return;
         CookieManager.getInstance().flush();
-        if (!SessionStateStore.isFacebookConnected()) return;
+        if (!SessionStateStore.isInstagramConnected()) return;
         completed = true;
-        SessionStateStore.markFacebookConnected(this);
+        SessionStateStore.markInstagramConnected(this);
         setResult(RESULT_OK);
         finish();
     }

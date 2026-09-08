@@ -20,15 +20,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-/**
- * Best-effort periodic authenticated source checker.
- *
- * Android controls the exact execution time; the minimum WorkManager interval is 15 minutes.
- * The worker uses the local WebView CookieManager session only for page collection. Backend
- * ingestion is a separate HTTPS request containing normalized post data, never cookies.
- * The MR SCRAP backend bearer token is read from AndroidKeyStore-backed storage at runtime and
- * is never persisted in WorkManager input/output data.
- */
 public class AuthenticatedSourceWorker extends Worker {
     public static final String KEY_SOURCE_ID = "sourceId";
     public static final String KEY_SOURCE_URL = "sourceUrl";
@@ -44,6 +35,7 @@ public class AuthenticatedSourceWorker extends Worker {
     public Result doWork() {
         String sourceId = getInputData().getString(KEY_SOURCE_ID);
         String sourceUrl = getInputData().getString(KEY_SOURCE_URL);
+        String platform = getInputData().getString(KEY_PLATFORM);
         String backendBaseUrl = getInputData().getString(KEY_BACKEND_BASE_URL);
         String authToken = DeviceCredentialStore.token(getApplicationContext());
 
@@ -53,8 +45,9 @@ public class AuthenticatedSourceWorker extends Worker {
         if (authToken == null || authToken.length() < 24 || authToken.length() > 512) {
             return Result.failure(errorData("Backend device authorization is missing; reopen the app to re-register this device"));
         }
-        if (!SessionStateStore.isFacebookConnected()) {
-            return Result.failure(errorData("Facebook session requires reconnect"));
+        if (platform == null || platform.isBlank()) platform = SessionStateStore.platformForUrl(sourceUrl);
+        if (!SessionStateStore.isConnectedForPlatform(platform)) {
+            return Result.failure(errorData(("instagram".equalsIgnoreCase(platform) ? "Instagram" : "Facebook") + " session requires reconnect"));
         }
         if (!AuthenticatedWebCollector.isAllowedSocialUrl(sourceUrl) || !isAllowedBackendUrl(backendBaseUrl)) {
             return Result.failure(errorData("Invalid source/backend URL"));
@@ -63,39 +56,23 @@ public class AuthenticatedSourceWorker extends Worker {
         CountDownLatch latch = new CountDownLatch(1);
         AtomicReference<JSONObject> collected = new AtomicReference<>();
         AtomicReference<String> collectionError = new AtomicReference<>();
-
         AuthenticatedWebCollector.collect(getApplicationContext(), sourceUrl, new AuthenticatedWebCollector.Callback() {
-            @Override
-            public void onSuccess(JSONObject result) {
-                collected.set(result);
-                latch.countDown();
-            }
-
-            @Override
-            public void onError(String message) {
-                collectionError.set(message);
-                latch.countDown();
-            }
+            @Override public void onSuccess(JSONObject result) { collected.set(result); latch.countDown(); }
+            @Override public void onError(String message) { collectionError.set(message); latch.countDown(); }
         });
 
         try {
-            if (!latch.await(35, TimeUnit.SECONDS)) {
-                return Result.retry();
-            }
+            if (!latch.await(35, TimeUnit.SECONDS)) return Result.retry();
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             return Result.retry();
         }
-
-        if (collectionError.get() != null) {
-            return Result.failure(errorData(collectionError.get()));
-        }
+        if (collectionError.get() != null) return Result.failure(errorData(collectionError.get()));
 
         try {
             JSONObject collectedResult = collected.get();
             JSONArray posts = collectedResult != null ? collectedResult.optJSONArray("posts") : new JSONArray();
             if (posts == null) posts = new JSONArray();
-
             JSONObject payload = new JSONObject();
             payload.put("sourceId", sourceId);
             payload.put("posts", posts);
@@ -121,8 +98,7 @@ public class AuthenticatedSourceWorker extends Worker {
 
     private int postNormalizedData(String backendBaseUrl, String authToken, JSONObject payload) throws Exception {
         String base = backendBaseUrl.replaceAll("/+$", "");
-        URL endpoint = new URL(base + "/api/device/ingest");
-        HttpURLConnection connection = (HttpURLConnection) endpoint.openConnection();
+        HttpURLConnection connection = (HttpURLConnection) new URL(base + "/api/device/ingest").openConnection();
         connection.setRequestMethod("POST");
         connection.setConnectTimeout(15_000);
         connection.setReadTimeout(30_000);
@@ -131,20 +107,15 @@ public class AuthenticatedSourceWorker extends Worker {
         connection.setRequestProperty("Accept", "application/json");
         connection.setRequestProperty("X-MR-SCRAP-CLIENT", "android-device-session");
         connection.setRequestProperty("Authorization", "Bearer " + authToken);
-
         byte[] bytes = payload.toString().getBytes(StandardCharsets.UTF_8);
         connection.setFixedLengthStreamingMode(bytes.length);
-        try (OutputStream output = connection.getOutputStream()) {
-            output.write(bytes);
-        }
+        try (OutputStream output = connection.getOutputStream()) { output.write(bytes); }
 
         int status = connection.getResponseCode();
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(
-            status >= 400 ? connection.getErrorStream() : connection.getInputStream(),
-            StandardCharsets.UTF_8
-        ))) {
-            while (reader.readLine() != null) { /* intentionally discarded */ }
-        } catch (Exception ignored) {}
+            status >= 400 ? connection.getErrorStream() : connection.getInputStream(), StandardCharsets.UTF_8))) {
+            while (reader.readLine() != null) { }
+        } catch (Exception ignored) { }
         connection.disconnect();
         return status;
     }
@@ -157,9 +128,7 @@ public class AuthenticatedSourceWorker extends Worker {
                     ("10.0.2.2".equals(url.getHost()) || "localhost".equalsIgnoreCase(url.getHost()));
             }
             return url.getHost() != null && !url.getHost().isBlank();
-        } catch (Exception ignored) {
-            return false;
-        }
+        } catch (Exception ignored) { return false; }
     }
 
     private Data errorData(String message) {

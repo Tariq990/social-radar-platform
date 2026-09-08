@@ -2,5 +2,6 @@
 <resources>
     <string name="app_name">MR SCRAP</string>
     <string name="title_activity_main">MR SCRAP</string>
-    <string name="facebook_session_title">Connect Facebook</string>
+    <string name="facebook_session_title">Facebook — MR SCRAP</string>
+    <string name="instagram_session_title">Instagram — MR SCRAP</string>
 </resources>
