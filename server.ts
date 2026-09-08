@@ -46,7 +46,6 @@ function rateLimiter(limit: number = 30, windowMs: number = 60_000) {
   };
 }
 
-// Bound the in-memory limiter map during long-running service operation.
 const rateLimitCleanup = setInterval(() => {
   const now = Date.now();
   for (const [key, value] of rateLimitMap) {
@@ -228,7 +227,9 @@ app.post('/api/sources/resolve', rateLimiter(20, 60_000), async (req, res) => {
     const checked = validateSocialUrl(req.body?.url);
     if (!checked.ok) return res.status(400).json({ error: checked.error });
 
-    const demo = Boolean(req.body?.demo || isDemoMode());
+    // Demo behavior is controlled only by server APP_MODE. A production client cannot request
+    // fabricated/demo connector behavior by sending { demo: true }.
+    const demo = isDemoMode();
     const result = await sourceConnectorManager.resolve({ url: checked.url }, demo);
     res.json({
       valid: result.valid,
@@ -324,9 +325,10 @@ app.patch('/api/alerts/:id', async (req, res) => {
   }
 });
 
-app.post('/api/alerts/scan', rateLimiter(15, 60_000), async (req, res) => {
+app.post('/api/alerts/scan', rateLimiter(15, 60_000), async (_req, res) => {
   try {
-    const demo = Boolean(req.body?.demo || isDemoMode());
+    // Production can never be switched into demo scanning by a client request.
+    const demo = isDemoMode();
     const scan = await monitoringWorker.runScan('user_default', demo);
     res.json({
       scanned: scan.sourcesScanned,
@@ -362,7 +364,6 @@ app.post('/api/device/ingest', rateLimiter(30, 60_000), requireDeviceAuth, async
   }
 });
 
-// Raw classifier probing is an operator/development function, not a public user endpoint.
 app.post('/api/ai/evaluate-post', rateLimiter(10, 60_000), requireInternalAdmin, async (req, res) => {
   try {
     const { post, rule, locale } = req.body || {};
@@ -446,8 +447,6 @@ async function startServer() {
     throw new Error('Production startup aborted: DATABASE_URL is missing/unreachable. Local JSON persistence is allowed only outside APP_MODE=production.');
   }
 
-  // The current branch still uses a single application identity for CRUD. Ensure its
-  // PostgreSQL FK row exists before serving requests. Full tenant isolation is a separate migration.
   await ensureCurrentBackendIdentity();
 
   const aiStatus = getAIConfigurationStatus();
