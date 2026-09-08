@@ -257,6 +257,22 @@ test('foreground Smart Grab uses an Activity-attached Meta WebView while backgro
   assert.match(worker, /AuthenticatedWebCollector\.collect\(getApplicationContext\(\)/);
 });
 
+test('Facebook photo Smart Grab opens detail from its source and supports listitem comments', () => {
+  const connector = read('src/connectors/deviceSessionConnector.ts');
+  const plugin = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSocialSessionPlugin.java');
+  const collector = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedPostDetailCollector.java');
+  const extractor = read('android/app/src/main/res/raw/mrscrap_post_detail_extractor.js');
+  assert.match(connector, /sourceUrl: source\.url/);
+  assert.match(plugin, /String sourceUrl = call\.getString\("sourceUrl"/);
+  assert.match(collector, /isFacebookPhotoUrl/);
+  assert.match(collector, /photoClickScript/);
+  assert.match(collector, /PHOTO_POST_NOT_FOUND_ON_SOURCE/);
+  assert.match(extractor, /facebookPhotoListComments/);
+  assert.match(extractor, /role="listitem"/);
+  assert.match(extractor, /facebookListItemAuthor/);
+  assert.doesNotMatch(collector, /getCookie\(|document\.cookie|CookieManager.*getCookie/);
+});
+
 test('Smart Grab surfaces sanitized native collection diagnostics instead of discarding them', () => {
   const panel = read('src/components/SmartGrabPanel.tsx');
   assert.match(panel, /function describeCollectionFailure/);
