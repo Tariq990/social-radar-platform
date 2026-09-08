@@ -16,6 +16,7 @@ import { PaywallModal } from './components/PaywallModal';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ForceUpdateGate } from './components/ForceUpdateGate';
 import { apiGetAuthSession } from './services/api';
+import { extractSupportedSocialUrl } from './lib/socialUrl';
 
 const RadarAppContent: React.FC = () => {
   const {
@@ -49,12 +50,10 @@ const RadarAppContent: React.FC = () => {
   useEffect(() => {
     try {
       const params = new URLSearchParams(window.location.search);
-      const sharedUrl = params.get('url') || params.get('text');
-      if (sharedUrl && (sharedUrl.includes('facebook.com') || sharedUrl.includes('instagram.com') || sharedUrl.startsWith('http'))) {
-        openAddSource(sharedUrl);
-      }
+      const sharedUrl = extractSupportedSocialUrl(params.get('url') || params.get('text') || params.get('share_url') || '');
+      if (sharedUrl) openAddSource(sharedUrl);
     } catch {
-      // Ignore malformed share parameters.
+      // Ignore malformed share parameters. Unsupported URLs never open the source flow.
     }
   }, []);
 
