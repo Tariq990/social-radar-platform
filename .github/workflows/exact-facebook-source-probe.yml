@@ -1,0 +1,41 @@
+name: Exact Facebook Source Smart Grab Probe
+
+on:
+  push:
+    branches:
+      - test/android-webview-parity-20260909
+    paths:
+      - .github/workflows/exact-facebook-source-probe.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: exact-facebook-source-smart-grab-probe
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: self-hosted
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use persistent Node 22 toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          NODE_BIN="$HOME/actions-runnerr/_work/_tool/node/22.23.2/x64/bin"
+          test -x "$NODE_BIN/node"
+          echo "$NODE_BIN" >> "$GITHUB_PATH"
+          "$NODE_BIN/node" --version
+
+      - name: Verify Chrome CDP session
+        shell: bash
+        run: curl -fsS --connect-timeout 3 http://127.0.0.1:9222/json/version >/dev/null
+
+      - name: Probe exact Facebook source with production collectors
+        shell: bash
+        env:
+          META_TARGET_URL: https://www.facebook.com/tarik.ziad.3914
+        run: node scripts/exact-facebook-source-probe.mjs
