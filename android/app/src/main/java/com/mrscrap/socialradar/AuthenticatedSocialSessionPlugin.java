@@ -60,6 +60,48 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void saveBackendAuth(PluginCall call) {
+        String userId = call.getString("userId", "");
+        String deviceId = call.getString("deviceId", "");
+        String token = call.getString("token");
+        String platform = call.getString("platform", "android");
+        try {
+            DeviceCredentialStore.save(getContext(), userId, deviceId, token, platform);
+            JSObject result = new JSObject();
+            result.put("saved", true);
+            call.resolve(result);
+        } catch (Exception error) {
+            call.reject("Could not securely store backend device authorization");
+        }
+    }
+
+    @PluginMethod
+    public void getBackendAuth(PluginCall call) {
+        JSONObject auth = DeviceCredentialStore.read(getContext());
+        if (auth == null) {
+            JSObject empty = new JSObject();
+            empty.put("configured", false);
+            call.resolve(empty);
+            return;
+        }
+        try {
+            JSObject result = JSObject.fromJSONObject(auth);
+            result.put("configured", true);
+            call.resolve(result);
+        } catch (Exception error) {
+            call.reject("Could not read backend device authorization");
+        }
+    }
+
+    @PluginMethod
+    public void clearBackendAuth(PluginCall call) {
+        DeviceCredentialStore.clear(getContext());
+        JSObject result = new JSObject();
+        result.put("cleared", true);
+        call.resolve(result);
+    }
+
+    @PluginMethod
     public void resolveSource(PluginCall call) {
         String url = call.getString("url");
         if (url == null || !AuthenticatedWebCollector.isAllowedSocialUrl(url)) {
@@ -133,14 +175,13 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
         String url = call.getString("url");
         String platform = call.getString("platform", "facebook");
         String backendBaseUrl = call.getString("backendBaseUrl");
-        String authToken = call.getString("authToken");
 
         if (sourceId == null || sourceId.isBlank() || url == null || backendBaseUrl == null || backendBaseUrl.isBlank()) {
             call.reject("sourceId, url and backendBaseUrl are required");
             return;
         }
-        if (authToken == null || authToken.length() < 24 || authToken.length() > 512) {
-            call.reject("Valid backend device authorization is required");
+        if (DeviceCredentialStore.token(getContext()) == null) {
+            call.reject("Backend device authorization is not stored on this Android device");
             return;
         }
         if (!AuthenticatedWebCollector.isAllowedSocialUrl(url)) {
@@ -153,7 +194,6 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
             .putString(AuthenticatedSourceWorker.KEY_SOURCE_URL, url)
             .putString(AuthenticatedSourceWorker.KEY_PLATFORM, platform)
             .putString(AuthenticatedSourceWorker.KEY_BACKEND_BASE_URL, backendBaseUrl)
-            .putString(AuthenticatedSourceWorker.KEY_AUTH_TOKEN, authToken)
             .build();
 
         Constraints constraints = new Constraints.Builder()
