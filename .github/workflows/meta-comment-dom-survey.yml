@@ -1,0 +1,54 @@
+name: Meta Comment DOM Survey
+
+on:
+  push:
+    branches:
+      - test/meta-comment-dom-20260909
+
+permissions:
+  contents: read
+
+concurrency:
+  group: meta-comment-dom-survey
+  cancel-in-progress: true
+
+jobs:
+  survey:
+    runs-on: self-hosted
+    timeout-minutes: 5
+    steps:
+      - name: Survey first real Facebook post comments safely
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsS http://127.0.0.1:9222/json/version >/dev/null
+          node <<'NODE'
+          const BASE='http://127.0.0.1:9222';
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          const targets=await (await fetch(`${BASE}/json/list`)).json();
+          const target=targets.find(t=>t.type==='page'&&(()=>{try{const h=new URL(t.url).hostname.toLowerCase();return h==='facebook.com'||h.endsWith('.facebook.com')}catch{return false}})());
+          if(!target?.webSocketDebuggerUrl) throw new Error('NO_FACEBOOK_TAB');
+          const ws=new WebSocket(target.webSocketDebuggerUrl);
+          await new Promise((res,rej)=>{const t=setTimeout(()=>rej(new Error('ws timeout')),5000);ws.addEventListener('open',()=>{clearTimeout(t);res()},{once:true});ws.addEventListener('error',()=>rej(new Error('ws error')),{once:true})});
+          let id=1; const pending=new Map();
+          ws.addEventListener('message',e=>{let m;try{m=JSON.parse(e.data)}catch{return}if(!m.id||!pending.has(m.id))return;const p=pending.get(m.id);pending.delete(m.id);m.error?p.reject(new Error(m.error.message)):p.resolve(m.result)});
+          const cdp=(method,params={})=>new Promise((resolve,reject)=>{const n=id++;const t=setTimeout(()=>{pending.delete(n);reject(new Error('CDP timeout '+method))},10000);pending.set(n,{resolve:v=>{clearTimeout(t);resolve(v)},reject:e=>{clearTimeout(t);reject(e)}});ws.send(JSON.stringify({id:n,method,params}))});
+          const evalv=async expression=>{const r=await cdp('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(r.exceptionDetails)throw new Error('eval exception');return r.result?.value};
+          await cdp('Runtime.enable');
+          await cdp('Page.enable');
+          const firstPost=await evalv(`(()=>{const abs=u=>{try{return new URL(u,location.href).href}catch{return''}};const raw=a=>a?.getAttribute?.('href')||a?.getAttribute?.('data-href')||a?.getAttribute?.('data-url')||a?.getAttribute?.('ajaxify')||'';const ok=u=>{try{const x=new URL(u);const h=x.hostname.toLowerCase();if(!(h==='facebook.com'||h.endsWith('.facebook.com')))return false;const p=x.pathname.toLowerCase(),ps=p.split('/').filter(Boolean),m=['posts','permalink','reel','reels','p','tv','videos'];return ps.some((q,i)=>m.includes(q)&&i<ps.length-1)||p.endsWith('/story.php')||p.endsWith('/permalink.php')||p.endsWith('/photo.php')||x.searchParams.has('story_fbid')||x.searchParams.has('fbid')}catch{return false}};for(const a of document.querySelectorAll('a[href],a[data-href],a[data-url],a[ajaxify]')){const u=abs(raw(a));if(ok(u))return u}return''})()`);
+          if(!firstPost) throw new Error('NO_POST_LINK');
+          const safe=new URL(firstPost); console.log('POST_HOST='+safe.hostname); console.log('POST_KIND='+safe.pathname.split('/').filter(Boolean).slice(0,3).join('/'));
+          await cdp('Page.navigate',{url:firstPost});
+          await sleep(3500);
+          for(let i=0;i<4;i++){
+            const clicked=await evalv(`(()=>{const pats=[/view more comments/i,/view previous comments/i,/see more comments/i,/عرض المزيد من التعليقات/i,/عرض التعليقات السابقة/i,/view more replies/i,/see more replies/i,/عرض المزيد من الردود/i];let n=0;for(const el of document.querySelectorAll('[role="button"],button,a')){const t=(el.innerText||el.getAttribute('aria-label')||'').trim();if(pats.some(r=>r.test(t))){try{el.click();n++}catch{}}}window.scrollBy(0,Math.max(innerHeight,800));return n})()`);
+            console.log('EXPAND_CLICKED='+clicked);
+            await sleep(1200);
+          }
+          const d=await evalv(`(()=>{const text=e=>(e?.innerText||e?.getAttribute?.('aria-label')||'').trim();const articles=[...document.querySelectorAll('[role="article"]')];const comments=articles.filter(a=>{const aria=(a.getAttribute('aria-label')||'').toLowerCase();const t=text(a);return aria.includes('comment')||aria.includes('تعليق')||/reply|رد/.test(t)||Boolean(a.querySelector('a[role="link"]'))});const articleStats=articles.slice(0,30).map(a=>({len:text(a).length,aria:(a.getAttribute('aria-label')||'').slice(0,80),links:a.querySelectorAll('a').length,imgs:a.querySelectorAll('img').length,times:a.querySelectorAll('time,abbr[data-utime],[data-utime],abbr').length}));return{host:location.hostname,path:location.pathname,login:Boolean(document.querySelector('input[name="pass"],form[action*="login"]')),checkpoint:location.pathname.includes('/checkpoint'),roleArticles:articles.length,commentLikeArticles:comments.length,images:document.querySelectorAll('img[src],img[srcset]').length,videos:document.querySelectorAll('video,video source').length,times:document.querySelectorAll('time,abbr[data-utime],[data-utime],abbr').length,articleStats,bodyLength:(document.body?.innerText||'').length}})()`);
+          console.log('COMMENT_DOM_SURVEY'); console.log(JSON.stringify(d,null,2));
+          ws.close();
+          if(d.login||d.checkpoint) process.exit(3);
+          if(d.roleArticles<2) process.exit(4);
+          NODE
