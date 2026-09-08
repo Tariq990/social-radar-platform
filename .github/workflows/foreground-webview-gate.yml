@@ -1,0 +1,117 @@
+name: Foreground Android WebView Gate
+
+on:
+  push:
+    branches:
+      - test/android-webview-parity-20260909
+    paths:
+      - .github/workflows/foreground-webview-gate.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: foreground-android-webview-gate
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: self-hosted
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Use persistent Node 22 toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          NODE_BIN="$HOME/actions-runnerr/_work/_tool/node/22.23.2/x64/bin"
+          test -x "$NODE_BIN/node"
+          test -x "$NODE_BIN/npm"
+          echo "$NODE_BIN" >> "$GITHUB_PATH"
+          "$NODE_BIN/node" --version
+
+      - name: Apply foreground WebView fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/apply-foreground-webview-fix.py
+          git diff --check
+
+      - name: Verify exact collector against live Facebook under Android WebView parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsS --connect-timeout 3 http://127.0.0.1:9222/json/version >/dev/null
+          node scripts/android-webview-parity.mjs
+
+      - name: Install dependencies
+        shell: bash
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck
+        shell: bash
+        run: npm run lint
+
+      - name: Unit and architecture tests
+        shell: bash
+        run: npm test
+
+      - name: Build production web bundle
+        shell: bash
+        env:
+          VITE_API_BASE_URL: https://mr-scrap-api-live.onrender.com
+          APP_MODE: production
+        run: npm run build
+
+      - name: Sync Capacitor Android
+        shell: bash
+        run: npx cap sync android
+
+      - name: Put Java 21 on runner PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          JAVA_HOME_CANDIDATE="$HOME/actions-runnerr/_work/_tool/Java_Temurin-Hotspot_jdk/21.0.12-101.0.LTS/x64"
+          test -x "$JAVA_HOME_CANDIDATE/bin/java"
+          echo "JAVA_HOME=$JAVA_HOME_CANDIDATE" >> "$GITHUB_ENV"
+          echo "$JAVA_HOME_CANDIDATE/bin" >> "$GITHUB_PATH"
+          "$JAVA_HOME_CANDIDATE/bin/java" -version
+
+      - name: Setup Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+          cache-read-only: true
+
+      - name: Compile Android debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="$HOME/.android/sdk"
+          test -d "$SDK/platforms/android-36"
+          test -d "$SDK/build-tools/36.0.0"
+          printf 'sdk.dir=%s\n' "$SDK" > android/local.properties
+          export ANDROID_HOME="$SDK"
+          export ANDROID_SDK_ROOT="$SDK"
+          gradle -p android :app:assembleDebug --stacktrace
+
+      - name: Commit validated implementation to temp branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            android/app/src/main/java/com/mrscrap/socialradar/ForegroundWebViewHost.java \
+            android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedWebCollector.java \
+            android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedPostDetailCollector.java \
+            android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSocialSessionPlugin.java \
+            src/components/SmartGrabPanel.tsx \
+            server/tests/architectureRegression.test.ts
+          git diff --cached --check
+          test -n "$(git diff --cached --name-only)"
+          git commit -m 'fix: attach foreground Meta collectors to Activity window'
+          git push origin HEAD:test/android-webview-parity-20260909
