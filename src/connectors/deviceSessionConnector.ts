@@ -60,7 +60,7 @@ function toNormalizedPost(source: { id: string; platform: SourcePlatform; url: s
     authorAvatar: post.authorAvatar,
     text: post.text || '',
     media: Array.isArray(post.media) ? post.media : [],
-    publishedAt: post.publishedAt,
+    publishedAt: post.publishedAt || '',
     detectedAt,
     fingerprint: post.externalPostId || post.originalUrl,
     metadata: {
@@ -70,10 +70,6 @@ function toNormalizedPost(source: { id: string; platform: SourcePlatform; url: s
   };
 }
 
-/**
- * Browser-safe wrapper around the real Android native session plugin.
- * No cookie, password, or raw session value is exposed to JavaScript.
- */
 export class DeviceSessionConnector implements SourceConnector {
   static isNativeAvailable(): boolean {
     return isAndroidNative();
@@ -121,7 +117,7 @@ export class DeviceSessionConnector implements SourceConnector {
       const parsed = new URL(raw);
       const host = parsed.hostname.toLowerCase();
       const isFacebook = host === 'facebook.com' || host.endsWith('.facebook.com') || host === 'fb.com' || host.endsWith('.fb.com') || host === 'fb.watch';
-      const isInstagram = host === 'instagram.com' || host.endsWith('.instagram.com') || host === 'instagr.am';
+      const isInstagram = host === 'instagram.com' || host.endsWith('.instagram.com') || host === 'instagr.am' || host.endsWith('.instagr.am');
       if (!isFacebook && !isInstagram) {
         return { valid: false, platform: 'other', cleanedUrl: raw, handleOrId: '', isPostUrl: false, error: 'Only Facebook and Instagram URLs are supported.' };
       }
