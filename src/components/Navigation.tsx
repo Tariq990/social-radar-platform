@@ -10,7 +10,7 @@ export const Navigation: React.FC<NavigationProps> = ({ collapsed, onToggleColla
   const { currentScreen, setCurrentScreen, locale, matches, sources, rules, backendStatus } = useRadar();
   const t = translations[locale];
   const unreadAlerts = matches.filter(match => !match.isRead).length;
-  const activeSources = sources.filter(source => !source.isPaused).length;
+  const activeSources = sources.filter(source => !source.isPaused && !['needs_relogin', 'temporarily_unavailable', 'unsupported'].includes(source.connectorStatus)).length;
   const items = [
     { id: 'radar' as const, label: t.navRadar, icon: Radar, badge: unreadAlerts },
     { id: 'watchlist' as const, label: t.navWatchlist, icon: Eye, badge: activeSources },
