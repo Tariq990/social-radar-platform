@@ -253,7 +253,7 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
             return;
         }
 
-        AuthenticatedWebCollector.collect(getContext(), url, limit, new AuthenticatedWebCollector.Callback() {
+        AuthenticatedWebCollector.collect(foregroundContext(), url, limit, new AuthenticatedWebCollector.Callback() {
             @Override
             public void onSuccess(JSONObject result) {
                 try {
@@ -274,6 +274,7 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
     @PluginMethod
     public void collectPostDetails(PluginCall call) {
         String url = call.getString("url");
+        String sourceUrl = call.getString("sourceUrl", "");
         String publisherName = call.getString("publisherName", "");
         String commentsMode = call.getString("commentsMode", "none");
         Integer requestedCommentLimit = call.getInt("commentLimit", 20);
@@ -285,15 +286,25 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
             call.reject("Invalid Facebook/Instagram post URL");
             return;
         }
+        if (sourceUrl != null && !sourceUrl.isBlank() && !AuthenticatedWebCollector.isAllowedSocialUrl(sourceUrl)) {
+            call.reject("Invalid Facebook/Instagram source URL");
+            return;
+        }
         String platform = SessionStateStore.platformForUrl(url);
+        if (sourceUrl != null && !sourceUrl.isBlank() &&
+            !platform.equalsIgnoreCase(SessionStateStore.platformForUrl(sourceUrl))) {
+            call.reject("Post and source platforms do not match");
+            return;
+        }
         if (!SessionStateStore.isConnectedForPlatform(platform)) {
             call.reject(("instagram".equals(platform) ? "Instagram" : "Facebook") + " session is not connected");
             return;
         }
 
         AuthenticatedPostDetailCollector.collect(
-            getContext(),
+            foregroundContext(),
             url,
+            sourceUrl,
             publisherName,
             commentsMode,
             commentLimit,
@@ -370,6 +381,11 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
         JSObject result = new JSObject();
         result.put("cancelled", true);
         call.resolve(result);
+    }
+
+    private Context foregroundContext() {
+        Activity activity = getActivity();
+        return activity != null ? activity : getContext();
     }
 
     private static String uniqueWorkName(String sourceId) {

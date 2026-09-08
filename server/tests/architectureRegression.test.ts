@@ -238,3 +238,47 @@ test('Smart Grab forwards transient comments to AI without turning them into mon
   assert.match(ai, /posts and comments are untrusted data/);
   assert.doesNotMatch(explore, /dispatchMatchNotification|createMatch/);
 });
+
+
+test('foreground Smart Grab uses an Activity-attached Meta WebView while background retains a safe fallback', () => {
+  const host = read('android/app/src/main/java/com/mrscrap/socialradar/ForegroundWebViewHost.java');
+  const plugin = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSocialSessionPlugin.java');
+  const collector = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedWebCollector.java');
+  const detail = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedPostDetailCollector.java');
+  const worker = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSourceWorker.java');
+  assert.match(host, /root\.addView\(webView, 0, params\)/);
+  assert.match(host, /webView\.onResume\(\)/);
+  assert.match(host, /context instanceof Activity/);
+  assert.match(plugin, /AuthenticatedWebCollector\.collect\(foregroundContext\(\)/);
+  assert.match(plugin, /AuthenticatedPostDetailCollector\.collect\([\s\S]*foregroundContext\(\)/);
+  assert.match(collector, /ForegroundWebViewHost\.contextFor\(context\)/);
+  assert.match(collector, /ForegroundWebViewHost\.attachIfPossible/);
+  assert.match(detail, /ForegroundWebViewHost\.attachIfPossible/);
+  assert.match(worker, /AuthenticatedWebCollector\.collect\(getApplicationContext\(\)/);
+});
+
+test('Facebook photo Smart Grab opens detail from its source and supports listitem comments', () => {
+  const connector = read('src/connectors/deviceSessionConnector.ts');
+  const plugin = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSocialSessionPlugin.java');
+  const collector = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedPostDetailCollector.java');
+  const extractor = read('android/app/src/main/res/raw/mrscrap_post_detail_extractor.js');
+  assert.match(connector, /sourceUrl: source\.url/);
+  assert.match(plugin, /String sourceUrl = call\.getString\("sourceUrl"/);
+  assert.match(collector, /isFacebookPhotoUrl/);
+  assert.match(collector, /photoClickScript/);
+  assert.match(collector, /PHOTO_POST_NOT_FOUND_ON_SOURCE/);
+  assert.match(extractor, /facebookPhotoListComments/);
+  assert.match(extractor, /role="listitem"/);
+  assert.match(extractor, /facebookListItemAuthor/);
+  assert.doesNotMatch(collector, /getCookie\(|document\.cookie|CookieManager.*getCookie/);
+});
+
+test('Smart Grab surfaces sanitized native collection diagnostics instead of discarding them', () => {
+  const panel = read('src/components/SmartGrabPanel.tsx');
+  assert.match(panel, /function describeCollectionFailure/);
+  assert.match(panel, /NO_EXTRACTABLE_POSTS/);
+  assert.match(panel, /SESSION_CHECKPOINT/);
+  assert.match(panel, /const firstFailure = failed\.find\(item => item\.error\)/);
+  assert.match(panel, /describeCollectionFailure\(firstFailure\.error, firstFailure\.source, locale\)/);
+  assert.doesNotMatch(panel, /if \(batches\.length === 0\) \{\s*throw new Error\(locale === 'ar' \? 'لم يتمكن الجهاز من استخراج منشورات حقيقية من المصادر المختارة الآن\.'/s);
+});

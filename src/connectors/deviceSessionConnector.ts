@@ -73,6 +73,7 @@ interface AuthenticatedSocialSessionPlugin {
   collectSource(options: { sourceId: string; url: string; platform: string; limit?: number }): Promise<{ posts: NativeCollectedPost[]; checkedAt: string; requestedLimit?: number }>;
   collectPostDetails(options: {
     url: string;
+    sourceUrl: string;
     platform: string;
     publisherName?: string;
     commentsMode: CommentGrabMode;
@@ -322,6 +323,7 @@ export class DeviceSessionConnector implements SourceConnector {
       try {
         const detail = await NativeSession.collectPostDetails({
           url: post.originalUrl,
+          sourceUrl: source.url,
           platform: source.platform,
           publisherName: post.authorName || source.displayName || source.externalId,
           commentsMode,

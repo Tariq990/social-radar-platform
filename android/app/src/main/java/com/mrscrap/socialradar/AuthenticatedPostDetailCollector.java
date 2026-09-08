@@ -37,6 +37,7 @@ final class AuthenticatedPostDetailCollector {
     static void collect(
         Context context,
         String url,
+        String sourceUrl,
         String publisherName,
         String commentsMode,
         int requestedCommentLimit,
@@ -53,7 +54,9 @@ final class AuthenticatedPostDetailCollector {
             ? 0
             : Math.max(1, Math.min(200, requestedCommentLimit));
         final int maxAttempts = "all".equals(mode) ? MAX_ALL_ATTEMPTS : MAX_STANDARD_ATTEMPTS;
-        final String targetUrl = preferDesktopFacebookUrl(url);
+        final boolean photoDetailMode = isFacebookPhotoUrl(url) && sourceUrl != null &&
+            !sourceUrl.isBlank() && AuthenticatedWebCollector.isAllowedSocialUrl(sourceUrl);
+        final String targetUrl = preferDesktopFacebookUrl(photoDetailMode ? sourceUrl : url);
         final String extractorScript;
         try {
             extractorScript = readExtractorScript(context);
@@ -66,10 +69,11 @@ final class AuthenticatedPostDetailCollector {
         main.post(() -> {
             AtomicBoolean finished = new AtomicBoolean(false);
             int[] attempts = new int[] { 0 };
+            boolean[] photoOpened = new boolean[] { !photoDetailMode };
             int[] lastCommentCount = new int[] { -1 };
             int[] stablePasses = new int[] { 0 };
 
-            WebView webView = new WebView(context.getApplicationContext());
+            WebView webView = new WebView(ForegroundWebViewHost.contextFor(context));
             WebSettings settings = webView.getSettings();
             settings.setJavaScriptEnabled(true);
             settings.setDomStorageEnabled(true);
@@ -87,6 +91,7 @@ final class AuthenticatedPostDetailCollector {
                 View.MeasureSpec.makeMeasureSpec(viewportHeight, View.MeasureSpec.EXACTLY)
             );
             webView.layout(0, 0, viewportWidth, viewportHeight);
+            ForegroundWebViewHost.attachIfPossible(context, webView, viewportWidth, viewportHeight);
 
             CookieManager cookies = CookieManager.getInstance();
             cookies.setAcceptCookie(true);
@@ -108,6 +113,28 @@ final class AuthenticatedPostDetailCollector {
             runner[0] = () -> {
                 if (finished.get()) return;
                 attempts[0]++;
+
+                if (photoDetailMode && !photoOpened[0]) {
+                    webView.evaluateJavascript(photoClickScript(url), clickedValue -> {
+                        if (finished.get()) return;
+                        boolean clicked = "true".equalsIgnoreCase(String.valueOf(clickedValue));
+                        if (clicked) {
+                            photoOpened[0] = true;
+                            attempts[0] = 0;
+                            main.postDelayed(runner[0], 850);
+                            return;
+                        }
+                        if (attempts[0] < maxAttempts) {
+                            webView.evaluateJavascript(
+                                "(() => { const h=Math.max(window.innerHeight||700,700); window.scrollBy(0,Math.round(h*1.7)); return window.scrollY; })()",
+                                ignored -> main.postDelayed(runner[0], RETRY_DELAY_MS)
+                            );
+                            return;
+                        }
+                        finishError(main, timeout, webView, finished, callback, "PHOTO_POST_NOT_FOUND_ON_SOURCE");
+                    });
+                    return;
+                }
 
                 webView.evaluateJavascript(extractorScript, loaded -> {
                     if (finished.get()) return;
@@ -194,6 +221,35 @@ final class AuthenticatedPostDetailCollector {
         });
     }
 
+    private static boolean isFacebookPhotoUrl(String rawUrl) {
+        try {
+            Uri uri = Uri.parse(rawUrl);
+            String host = uri.getHost();
+            String path = uri.getPath();
+            if (host == null || path == null) return false;
+            String normalized = host.toLowerCase();
+            boolean facebook = normalized.equals("facebook.com") || normalized.endsWith(".facebook.com") ||
+                normalized.equals("fb.com") || normalized.endsWith(".fb.com");
+            if (!facebook) return false;
+            String p = path.toLowerCase();
+            return p.equals("/photo") || p.equals("/photo/") || p.equals("/photo.php") || p.startsWith("/photo/");
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private static String photoClickScript(String rawUrl) {
+        String target = JSONObject.quote(rawUrl);
+        return "(() => {" +
+            "const target=" + target + ";" +
+            "let wanted;try{wanted=new URL(target,location.href);}catch(e){return false;}" +
+            "const fbid=wanted.searchParams.get('fbid')||'';" +
+            "const anchors=[...document.querySelectorAll('a[href],a[data-href],a[data-url],a[ajaxify]')];" +
+            "const match=anchors.find(a=>{const raw=a.getAttribute('href')||a.getAttribute('data-href')||a.getAttribute('data-url')||a.getAttribute('ajaxify')||'';let u;try{u=new URL(raw,location.href);}catch(e){return false;}if(fbid&&u.searchParams.get('fbid')===fbid)return true;return u.href===wanted.href;});" +
+            "if(!match)return false;match.click();return true;" +
+            "})()";
+    }
+
     private static String normalizeMode(String value) {
         if ("publisher".equals(value) || "top".equals(value) || "all".equals(value)) return value;
         return "none";
@@ -264,15 +320,6 @@ final class AuthenticatedPostDetailCollector {
     }
 
     private static void destroy(WebView webView) {
-        new Handler(Looper.getMainLooper()).post(() -> {
-            try {
-                webView.stopLoading();
-                webView.clearHistory();
-                android.view.ViewParent parent = webView.getParent();
-                if (parent instanceof android.view.ViewGroup) ((android.view.ViewGroup) parent).removeView(webView);
-                webView.removeAllViews();
-                webView.destroy();
-            } catch (Exception ignored) {}
-        });
+        new Handler(Looper.getMainLooper()).post(() -> ForegroundWebViewHost.destroy(webView));
     }
 }

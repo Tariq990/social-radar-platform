@@ -62,9 +62,25 @@
     });
   };
 
+  const facebookPhotoListComments = () => [...document.querySelectorAll('[role="dialog"] [role="listitem"]')].filter(node => {
+    const text = (node.innerText || '').trim();
+    if (text.length < 3 || text.length > 12000) return false;
+    const profileLink = [...node.querySelectorAll('a[href]')].some(anchor => {
+      try {
+        const u = new URL(anchor.href, location.href);
+        const h = u.hostname.toLowerCase();
+        const parts = u.pathname.split('/').filter(Boolean);
+        return (h === 'facebook.com' || h.endsWith('.facebook.com')) &&
+          (parts.length === 1 || u.pathname.toLowerCase() === '/profile.php');
+      } catch { return false; }
+    });
+    return profileLink;
+  });
+
   const commentNodes = () => {
     const facebook = [...document.querySelectorAll('[role="article"][aria-label]')].filter(isFacebookCommentArticle);
-    if (facebook.length || platform() === 'facebook') return facebook;
+    if (facebook.length) return facebook;
+    if (platform() === 'facebook') return facebookPhotoListComments();
     return instagramCommentCandidates();
   };
 
@@ -123,11 +139,23 @@
   const commentDepth = node => {
     let depth = 0;
     let parent = node?.parentElement || null;
+    const listItemMode = Boolean(node?.matches?.('[role="listitem"]'));
     while (parent && depth < 4) {
-      if (isFacebookCommentArticle(parent)) depth++;
+      if (isFacebookCommentArticle(parent) || (listItemMode && parent.matches?.('[role="listitem"]'))) depth++;
       parent = parent.parentElement;
     }
     return depth;
+  };
+
+  const facebookListItemAuthor = (node, anchor) => {
+    if (!node?.matches?.('[role="listitem"]')) return '';
+    const root = anchor || node;
+    const leaves = [...root.querySelectorAll('div,span')].filter(item => {
+      const value = (item.innerText || '').replace(/\s+/g, ' ').trim();
+      return value && value.length <= 255 && !item.querySelector('*') && !actionLine(value);
+    });
+    const preferred = leaves.find(item => item.tagName === 'DIV') || leaves[0];
+    return (preferred?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 255);
   };
 
   const textWithoutNestedComments = (node, authorName) => {
@@ -135,6 +163,9 @@
     const clone = node.cloneNode(true);
     for (const nested of [...clone.querySelectorAll('[role="article"][aria-label]')]) {
       if (isFacebookCommentArticle(nested)) nested.remove();
+    }
+    if (node.matches?.('[role="listitem"]')) {
+      for (const nested of [...clone.querySelectorAll('[role="listitem"]')]) nested.remove();
     }
     const lines = String(clone.innerText || '')
       .split(/\n+/)
@@ -266,7 +297,9 @@
         if (!includeReplies && depth > 0) continue;
         const authorAnchor = findAuthorAnchor(node);
         const label = commentLabel(node);
-        const authorName = ((authorAnchor?.innerText || authorAnchor?.getAttribute?.('aria-label') || '').trim() || parseAuthorFromLabel(label)).slice(0, 255);
+        const authorName = (facebookListItemAuthor(node, authorAnchor) ||
+          (authorAnchor?.innerText || authorAnchor?.getAttribute?.('aria-label') || '').trim() ||
+          parseAuthorFromLabel(label)).slice(0, 255);
         if (!authorName) continue;
         const isPublisher = Boolean(publisher) && normalizeName(authorName) === publisher;
         if (mode === 'publisher' && !isPublisher) continue;
