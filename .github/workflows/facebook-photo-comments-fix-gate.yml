@@ -1,0 +1,117 @@
+name: Facebook Photo Comments Fix Gate
+
+on:
+  push:
+    branches:
+      - test/facebook-photo-comments-fix-20260909
+    paths:
+      - .github/workflows/facebook-photo-comments-fix-gate.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: facebook-photo-comments-fix-gate
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: self-hosted
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Use persistent Node 22 toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          NODE_BIN="$HOME/actions-runnerr/_work/_tool/node/22.23.2/x64/bin"
+          test -x "$NODE_BIN/node"
+          test -x "$NODE_BIN/npm"
+          echo "$NODE_BIN" >> "$GITHUB_PATH"
+          "$NODE_BIN/node" --version
+
+      - name: Verify authenticated Chrome CDP session
+        shell: bash
+        run: curl -fsS --connect-timeout 3 http://127.0.0.1:9222/json/version >/dev/null
+
+      - name: Apply Facebook photo comment production fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/apply-facebook-photo-comment-fix.py
+          git diff --check
+
+      - name: Validate exact Facebook source posts and photo comments
+        shell: bash
+        run: node scripts/validate-facebook-photo-comment-fix.mjs
+
+      - name: Install dependencies
+        shell: bash
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck
+        shell: bash
+        run: npm run lint
+
+      - name: Unit and architecture tests
+        shell: bash
+        run: npm test
+
+      - name: Build production web bundle
+        shell: bash
+        env:
+          VITE_API_BASE_URL: https://mr-scrap-api-live.onrender.com
+          APP_MODE: production
+        run: npm run build
+
+      - name: Sync Capacitor Android
+        shell: bash
+        run: npx cap sync android
+
+      - name: Put Java 21 on runner PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          JAVA_HOME_CANDIDATE="$HOME/actions-runnerr/_work/_tool/Java_Temurin-Hotspot_jdk/21.0.12-101.0.LTS/x64"
+          test -x "$JAVA_HOME_CANDIDATE/bin/java"
+          echo "JAVA_HOME=$JAVA_HOME_CANDIDATE" >> "$GITHUB_ENV"
+          echo "$JAVA_HOME_CANDIDATE/bin" >> "$GITHUB_PATH"
+          "$JAVA_HOME_CANDIDATE/bin/java" -version
+
+      - name: Setup Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+          cache-read-only: true
+
+      - name: Compile Android debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="$HOME/.android/sdk"
+          test -d "$SDK/platforms/android-36"
+          test -d "$SDK/build-tools/36.0.0"
+          printf 'sdk.dir=%s\n' "$SDK" > android/local.properties
+          export ANDROID_HOME="$SDK"
+          export ANDROID_SDK_ROOT="$SDK"
+          gradle -p android :app:assembleDebug --stacktrace
+
+      - name: Commit validated production implementation to clean temp branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            src/connectors/deviceSessionConnector.ts \
+            android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSocialSessionPlugin.java \
+            android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedPostDetailCollector.java \
+            android/app/src/main/res/raw/mrscrap_post_detail_extractor.js \
+            server/tests/architectureRegression.test.ts
+          git diff --cached --check
+          test -n "$(git diff --cached --name-only)"
+          git commit -m 'fix: collect Facebook photo comments from source viewer'
+          git push origin HEAD:test/facebook-photo-comments-fix-20260909
