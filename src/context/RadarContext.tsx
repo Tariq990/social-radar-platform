@@ -1,17 +1,17 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { Source, WatchRule, AlertMatch, Collection, RadarDigest, UserProfile } from '../types';
-import { 
-  INITIAL_USER, 
-  INITIAL_SOURCES, 
-  INITIAL_RULES, 
-  INITIAL_MATCHES, 
-  INITIAL_COLLECTIONS, 
-  INITIAL_DIGEST 
+import {
+  INITIAL_USER,
+  INITIAL_SOURCES,
+  INITIAL_RULES,
+  INITIAL_MATCHES,
+  INITIAL_COLLECTIONS,
+  INITIAL_DIGEST
 } from '../data/seedData';
 import { DeviceSessionConnector } from '../connectors/deviceSessionConnector';
 import { Locale } from '../lib/i18n';
-import { 
-  apiCheckHealth, 
+import {
+  apiCheckHealth,
   apiGetConfig,
   apiFetchSources,
   apiCreateSource,
@@ -23,9 +23,9 @@ import {
   apiToggleRule,
   apiFetchAlerts,
   apiUpdateAlert,
-  apiScanSources, 
-  apiGenerateDigest, 
-  normalizeAlertMatch 
+  apiScanSources,
+  apiIngestDevicePosts,
+  getApiBaseUrl
 } from '../services/api';
 
 interface RadarContextType {
@@ -40,6 +40,10 @@ interface RadarContextType {
   isScanning: boolean;
   backendStatus: 'online' | 'offline' | 'checking';
   isPostgres: boolean;
+  aiConfigured: boolean;
+  monitoringMode: 'device_session' | 'optional_public_provider';
+  deviceSessionAvailable: boolean;
+  // Legacy aliases kept temporarily so existing UI components do not break.
   apifyConfigured: boolean;
   geminiConfigured: boolean;
   isDemoMode: boolean;
@@ -53,9 +57,8 @@ interface RadarContextType {
   currentScreen: 'radar' | 'watchlist' | 'alerts' | 'rules' | 'settings' | 'landing';
   sharedIncomingUrl: string | null;
   initialAddUrl: string | null;
-  // Actions
   setLocale: (loc: Locale) => void;
-  setTheme: (thm: 'dark' | 'light') => void;
+  setTheme: (theme: 'dark' | 'light') => void;
   setCurrentScreen: (screen: 'radar' | 'watchlist' | 'alerts' | 'rules' | 'settings' | 'landing') => void;
   openAddSource: (url?: string) => void;
   closeAddSource: () => void;
@@ -77,8 +80,9 @@ interface RadarContextType {
   markMatchRead: (matchId: string) => Promise<void>;
   scanAllSources: () => Promise<{ scanned: number; matched: number }>;
   resetToDemo: () => void;
-  connectFacebookSession: (accountName: string) => void;
-  disconnectFacebookSession: () => void;
+  refreshDeviceSession: () => Promise<boolean>;
+  connectFacebookSession: () => Promise<void>;
+  disconnectFacebookSession: () => Promise<void>;
 }
 
 const RadarContext = createContext<RadarContextType | undefined>(undefined);
@@ -89,18 +93,16 @@ const STORAGE_KEYS = {
   DEMO_MODE: 'mrscrap_demo_mode_v2'
 };
 
+function extractSharedUrl(value: string): string | null {
+  const match = value.match(/https?:\/\/[^\s]+/i);
+  if (!match) return null;
+  return match[0].replace(/[),.;]+$/, '');
+}
+
 export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [locale, setLocaleState] = useState<Locale>(() => {
-    return (localStorage.getItem(STORAGE_KEYS.LOCALE) as Locale) || 'en';
-  });
-
-  const [theme, setThemeState] = useState<'dark' | 'light'>(() => {
-    return (localStorage.getItem(STORAGE_KEYS.THEME) as 'dark' | 'light') || 'dark';
-  });
-
-  const [isDemoMode, setIsDemoMode] = useState<boolean>(() => {
-    return localStorage.getItem(STORAGE_KEYS.DEMO_MODE) === 'true';
-  });
+  const [locale, setLocaleState] = useState<Locale>(() => (localStorage.getItem(STORAGE_KEYS.LOCALE) as Locale) || 'en');
+  const [theme, setThemeState] = useState<'dark' | 'light'>(() => (localStorage.getItem(STORAGE_KEYS.THEME) as 'dark' | 'light') || 'dark');
+  const [isDemoMode, setIsDemoMode] = useState(() => localStorage.getItem(STORAGE_KEYS.DEMO_MODE) === 'true');
 
   const [user, setUser] = useState<UserProfile>(INITIAL_USER);
   const [sources, setSources] = useState<Source[]>([]);
@@ -112,8 +114,10 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [isScanning, setIsScanning] = useState(false);
   const [backendStatus, setBackendStatus] = useState<'online' | 'offline' | 'checking'>('checking');
   const [isPostgres, setIsPostgres] = useState(false);
-  const [apifyConfigured, setApifyConfigured] = useState(false);
-  const [geminiConfigured, setGeminiConfigured] = useState(false);
+  const [aiConfigured, setAiConfigured] = useState(false);
+  const [monitoringMode, setMonitoringMode] = useState<'device_session' | 'optional_public_provider'>('device_session');
+  const [optionalPublicProviderConfigured, setOptionalPublicProviderConfigured] = useState(false);
+  const [deviceSessionAvailable, setDeviceSessionAvailable] = useState(DeviceSessionConnector.isNativeAvailable());
 
   const [selectedAlert, setSelectedAlert] = useState<AlertMatch | null>(null);
   const [selectedSourceId] = useState<string | null>(null);
@@ -121,18 +125,28 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [isPaywallOpen, setIsPaywallOpen] = useState(false);
   const [isDigestOpen, setIsDigestOpen] = useState(false);
   const [currentScreen, setCurrentScreen] = useState<'radar' | 'watchlist' | 'alerts' | 'rules' | 'settings' | 'landing'>(() => {
-    if (typeof window !== 'undefined') {
-      const params = new URLSearchParams(window.location.search);
-      const scr = params.get('screen');
-      if (scr && ['radar', 'watchlist', 'alerts', 'rules', 'settings', 'landing'].includes(scr)) {
-        return scr as any;
-      }
-    }
-    return 'landing';
+    const params = new URLSearchParams(window.location.search);
+    const screen = params.get('screen');
+    return screen && ['radar', 'watchlist', 'alerts', 'rules', 'settings', 'landing'].includes(screen)
+      ? screen as any
+      : 'landing';
   });
   const [sharedIncomingUrl, setSharedIncomingUrl] = useState<string | null>(null);
 
-  // Sync data from the persistent backend database
+  const deviceConnector = useMemo(() => new DeviceSessionConnector(), []);
+
+  const refreshDeviceSession = async (): Promise<boolean> => {
+    const status = await DeviceSessionConnector.getLocalSession();
+    setDeviceSessionAvailable(status.available);
+    setUser(previous => ({
+      ...previous,
+      deviceSessionConnected: status.connected,
+      deviceSessionAccount: status.connected ? 'Facebook session on this device' : undefined,
+      deviceSessionLastChecked: status.lastCheckedAt || status.connectedAt || undefined
+    }));
+    return status.connected;
+  };
+
   const loadDatabaseState = async () => {
     try {
       const [health, config, dbSources, dbRules, dbAlerts] = await Promise.all([
@@ -145,28 +159,19 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       setBackendStatus(health.status === 'ok' ? 'online' : 'offline');
       setIsPostgres(Boolean(config.isPostgres));
-      setApifyConfigured(Boolean(config.apifyConfigured));
-      setGeminiConfigured(Boolean(config.geminiConfigured));
-
-      if (dbSources.length > 0 || dbRules.length > 0 || dbAlerts.length > 0) {
-        setSources(dbSources);
-        setRules(dbRules);
-        setMatches(dbAlerts);
-        setUser(prev => ({
-          ...prev,
-          watchedSourcesCount: dbSources.length,
-          activeRulesCount: dbRules.filter(r => r.enabled).length
-        }));
-      } else {
-        // If DB is freshly created and user wants demo mode, show initial demo setup
-        if (isDemoMode) {
-          setSources(INITIAL_SOURCES);
-          setRules(INITIAL_RULES);
-          setMatches(INITIAL_MATCHES);
-        }
-      }
-    } catch (err) {
-      console.warn('[RadarProvider] Could not load state from backend database, offline:', err);
+      setAiConfigured(Boolean(config.aiConfigured));
+      setMonitoringMode(config.monitoringMode || 'device_session');
+      setOptionalPublicProviderConfigured(Boolean(config.optionalPublicProviderConfigured));
+      setSources(dbSources);
+      setRules(dbRules);
+      setMatches(dbAlerts);
+      setUser(previous => ({
+        ...previous,
+        watchedSourcesCount: dbSources.length,
+        activeRulesCount: dbRules.filter(rule => rule.enabled).length
+      }));
+    } catch (error) {
+      console.warn('[RadarProvider] Backend state load failed', error);
       setBackendStatus('offline');
       if (isDemoMode) {
         setSources(INITIAL_SOURCES);
@@ -178,9 +183,9 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   useEffect(() => {
     loadDatabaseState();
+    refreshDeviceSession().catch(() => {});
   }, [isDemoMode]);
 
-  // Sync RTL and document attributes on locale/theme change
   useEffect(() => {
     document.documentElement.lang = locale;
     document.documentElement.dir = locale === 'ar' ? 'rtl' : 'ltr';
@@ -189,19 +194,34 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   useEffect(() => {
     const root = document.documentElement;
-    if (theme === 'dark') {
-      root.classList.add('dark');
-      root.classList.remove('light');
-      const meta = document.getElementById('theme-color-meta');
-      if (meta) meta.setAttribute('content', '#020617');
-    } else {
-      root.classList.remove('dark');
-      root.classList.add('light');
-      const meta = document.getElementById('theme-color-meta');
-      if (meta) meta.setAttribute('content', '#f8fafc');
-    }
+    root.classList.toggle('dark', theme === 'dark');
+    root.classList.toggle('light', theme === 'light');
+    const meta = document.getElementById('theme-color-meta');
+    if (meta) meta.setAttribute('content', theme === 'dark' ? '#020617' : '#f8fafc');
     localStorage.setItem(STORAGE_KEYS.THEME, theme);
   }, [theme]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const raw = params.get('url') || params.get('text') || params.get('share_url');
+    const sharedUrl = raw ? extractSharedUrl(raw) : null;
+    if (sharedUrl) {
+      setSharedIncomingUrl(sharedUrl);
+      setIsAddSourceOpen(true);
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+
+    const nativeShareHandler = (event: Event) => {
+      const detail = (event as CustomEvent<{ text?: string }>).detail;
+      const url = detail?.text ? extractSharedUrl(detail.text) : null;
+      if (!url) return;
+      setSharedIncomingUrl(url);
+      setCurrentScreen('radar');
+      setIsAddSourceOpen(true);
+    };
+    window.addEventListener('mrscrap:share', nativeShareHandler as EventListener);
+    return () => window.removeEventListener('mrscrap:share', nativeShareHandler as EventListener);
+  }, []);
 
   const toggleDemoMode = () => {
     const next = !isDemoMode;
@@ -209,68 +229,33 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     localStorage.setItem(STORAGE_KEYS.DEMO_MODE, String(next));
   };
 
-  // Android Share Target / URL parameters detection
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const sharedUrl = params.get('url') || params.get('text') || params.get('share_url');
-    if (sharedUrl && (sharedUrl.includes('http') || sharedUrl.includes('facebook') || sharedUrl.includes('instagram'))) {
-      setSharedIncomingUrl(sharedUrl);
-      setIsAddSourceOpen(true);
-      window.history.replaceState({}, document.title, window.location.pathname);
-    }
-  }, []);
-
-  const setLocale = (newLocale: Locale) => {
-    setLocaleState(newLocale);
-  };
-
-  const setTheme = (newTheme: 'dark' | 'light') => {
-    setThemeState(newTheme);
-  };
-
   const openAddSource = (url?: string) => {
     if (url) setSharedIncomingUrl(url);
     setIsAddSourceOpen(true);
   };
-
   const closeAddSource = () => {
     setIsAddSourceOpen(false);
     setSharedIncomingUrl(null);
   };
-
-  const openAlertDetail = (alert: AlertMatch) => {
-    setSelectedAlert(alert);
-  };
-
-  const closeAlertDetail = () => {
-    setSelectedAlert(null);
-  };
-
-  const openPaywall = () => setIsPaywallOpen(true);
-  const closePaywall = () => setIsPaywallOpen(false);
-  const openDigest = () => setIsDigestOpen(true);
-  const closeDigest = () => setIsDigestOpen(false);
 
   const addSourceWithRule = async (
     sourceData: Omit<Source, 'id' | 'userId' | 'activeRulesCount' | 'lastCheckedAt' | 'isPaused'>,
     ruleNL: string,
     ruleName?: string
   ) => {
-    try {
-      // Persist source to backend database
-      const persistedSource = await apiCreateSource({
-        platform: sourceData.platform,
-        externalId: sourceData.externalId,
-        url: sourceData.url,
-        name: sourceData.displayName,
-        handle: sourceData.handle,
-        avatarUrl: sourceData.avatarUrl,
-        bio: sourceData.bio,
-        visibilityType: sourceData.visibilityType,
-        connectorType: sourceData.connectorType
-      });
+    const persistedSource = await apiCreateSource({
+      platform: sourceData.platform,
+      externalId: sourceData.externalId,
+      url: sourceData.url,
+      name: sourceData.displayName,
+      handle: sourceData.handle,
+      avatarUrl: sourceData.avatarUrl,
+      bio: sourceData.bio,
+      visibilityType: sourceData.visibilityType,
+      connectorType: sourceData.connectorType
+    });
 
-      // Persist rule to backend database
+    try {
       const persistedRule = await apiCreateRule({
         name: ruleName || `${persistedSource.displayName} Watch`,
         naturalLanguage: ruleNL,
@@ -279,156 +264,168 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         collectionId: sourceData.collectionId
       }, [persistedSource.id]);
 
-      setSources(prev => [persistedSource, ...prev.filter(s => s.id !== persistedSource.id)]);
-      setRules(prev => [persistedRule, ...prev.filter(r => r.id !== persistedRule.id)]);
-      setUser(prev => ({
-        ...prev,
-        watchedSourcesCount: prev.watchedSourcesCount + 1,
-        activeRulesCount: prev.activeRulesCount + 1
+      setSources(previous => [persistedSource, ...previous.filter(source => source.id !== persistedSource.id)]);
+      setRules(previous => [persistedRule, ...previous.filter(rule => rule.id !== persistedRule.id)]);
+      setUser(previous => ({
+        ...previous,
+        watchedSourcesCount: previous.watchedSourcesCount + 1,
+        activeRulesCount: previous.activeRulesCount + 1
       }));
 
-      // Trigger instant scan in the background to fetch first batch of posts
-      apiScanSources(isDemoMode).then(scanRes => {
-        if (scanRes.matches && scanRes.matches.length > 0) {
-          setMatches(prev => [...scanRes.matches, ...prev]);
+      if (persistedSource.connectorType === 'device_session' && DeviceSessionConnector.isNativeAvailable()) {
+        const backendBaseUrl = getApiBaseUrl();
+        if (backendBaseUrl) {
+          await DeviceSessionConnector.scheduleBackgroundSource(persistedSource, backendBaseUrl);
         }
-      }).catch(() => {});
-    } catch (err: any) {
-      console.error('[addSourceWithRule] Error saving to database:', err);
-      throw err;
+
+        const connected = await refreshDeviceSession();
+        if (connected) {
+          try {
+            const posts = await deviceConnector.fetchLatest(persistedSource);
+            if (posts.length > 0) {
+              const ingest = await apiIngestDevicePosts(persistedSource.id, posts, locale);
+              if (ingest.matchesCreated.length > 0) {
+                setMatches(previous => [...ingest.matchesCreated, ...previous]);
+              }
+            }
+          } catch (error) {
+            console.warn('[addSourceWithRule] Initial authenticated device collection did not complete', error);
+          }
+        }
+      } else {
+        apiScanSources(isDemoMode).then(scan => {
+          if (scan.matches.length > 0) setMatches(previous => [...scan.matches, ...previous]);
+        }).catch(() => {});
+      }
+    } catch (error) {
+      // Avoid orphaned sources if rule creation fails.
+      await apiDeleteSource(persistedSource.id).catch(() => {});
+      throw error;
     }
   };
 
   const toggleSourcePause = async (sourceId: string) => {
-    setSources(prev => prev.map(s => s.id === sourceId ? { ...s, isPaused: !s.isPaused } : s));
+    const source = sources.find(item => item.id === sourceId);
+    const nextPaused = !source?.isPaused;
+    setSources(previous => previous.map(item => item.id === sourceId ? { ...item, isPaused: nextPaused } : item));
     try {
       await apiToggleSourcePause(sourceId);
-    } catch (err) {
-      console.warn('Failed to toggle source pause on server', err);
+      if (source?.connectorType === 'device_session' && DeviceSessionConnector.isNativeAvailable()) {
+        if (nextPaused) await DeviceSessionConnector.cancelBackgroundSource(sourceId);
+        else {
+          const backendBaseUrl = getApiBaseUrl();
+          if (backendBaseUrl) await DeviceSessionConnector.scheduleBackgroundSource(source, backendBaseUrl);
+        }
+      }
+    } catch (error) {
+      setSources(previous => previous.map(item => item.id === sourceId ? { ...item, isPaused: !nextPaused } : item));
+      console.warn('Failed to toggle source pause', error);
     }
   };
 
   const deleteSource = async (sourceId: string) => {
-    setSources(prev => prev.filter(s => s.id !== sourceId));
-    setRules(prev => prev.filter(r => !r.sourceIds.includes(sourceId)));
-    setMatches(prev => prev.filter(m => m.sourceId !== sourceId));
-    setUser(prev => ({
-      ...prev,
-      watchedSourcesCount: Math.max(0, prev.watchedSourcesCount - 1)
-    }));
+    const snapshot = sources;
+    setSources(previous => previous.filter(source => source.id !== sourceId));
     try {
+      if (DeviceSessionConnector.isNativeAvailable()) await DeviceSessionConnector.cancelBackgroundSource(sourceId);
       await apiDeleteSource(sourceId);
-    } catch (err) {
-      console.warn('Failed to delete source on server', err);
+      setRules(previous => previous.filter(rule => !rule.sourceIds.includes(sourceId)));
+      setMatches(previous => previous.filter(match => match.sourceId !== sourceId));
+      setUser(previous => ({ ...previous, watchedSourcesCount: Math.max(0, previous.watchedSourcesCount - 1) }));
+    } catch (error) {
+      setSources(snapshot);
+      console.warn('Failed to delete source', error);
     }
   };
 
   const addRule = async (ruleData: Omit<WatchRule, 'id' | 'userId' | 'createdAt'>) => {
-    try {
-      const persisted = await apiCreateRule(ruleData, ruleData.sourceIds || []);
-      setRules(prev => [persisted, ...prev]);
-      setUser(prev => ({ ...prev, activeRulesCount: prev.activeRulesCount + 1 }));
-    } catch (err) {
-      console.error('Failed to create rule on server', err);
-    }
+    const persisted = await apiCreateRule(ruleData, ruleData.sourceIds || []);
+    setRules(previous => [persisted, ...previous]);
+    setUser(previous => ({ ...previous, activeRulesCount: previous.activeRulesCount + 1 }));
   };
 
   const toggleRule = async (ruleId: string) => {
-    setRules(prev => prev.map(r => r.id === ruleId ? { ...r, enabled: !r.enabled } : r));
+    const previous = rules.find(rule => rule.id === ruleId)?.enabled;
+    setRules(current => current.map(rule => rule.id === ruleId ? { ...rule, enabled: !rule.enabled } : rule));
     try {
       await apiToggleRule(ruleId);
-    } catch (err) {
-      console.warn('Failed to toggle rule on server', err);
+    } catch (error) {
+      setRules(current => current.map(rule => rule.id === ruleId ? { ...rule, enabled: Boolean(previous) } : rule));
+      throw error;
     }
   };
 
   const deleteRule = async (ruleId: string) => {
-    setRules(prev => prev.filter(r => r.id !== ruleId));
-    setUser(prev => ({ ...prev, activeRulesCount: Math.max(0, prev.activeRulesCount - 1) }));
-    try {
-      await apiDeleteRule(ruleId);
-    } catch (err) {
-      console.warn('Failed to delete rule on server', err);
-    }
+    await apiDeleteRule(ruleId);
+    setRules(previous => previous.filter(rule => rule.id !== ruleId));
+    setUser(previous => ({ ...previous, activeRulesCount: Math.max(0, previous.activeRulesCount - 1) }));
   };
 
-  const updateRule = (updated: WatchRule) => {
-    setRules(prev => prev.map(r => r.id === updated.id ? updated : r));
-  };
+  const updateRule = (updated: WatchRule) => setRules(previous => previous.map(rule => rule.id === updated.id ? updated : rule));
 
   const rateMatchFeedback = async (matchId: string, feedback: 'relevant' | 'not_relevant') => {
-    setMatches(prev => prev.map(m => m.id === matchId ? { ...m, feedback } : m));
-    if (selectedAlert && selectedAlert.id === matchId) {
-      setSelectedAlert(prev => prev ? { ...prev, feedback } : null);
-    }
-    try {
-      await apiUpdateAlert(matchId, { feedback });
-    } catch (err) {
-      console.warn('Failed to update alert feedback on server', err);
-    }
+    await apiUpdateAlert(matchId, { feedback });
+    setMatches(previous => previous.map(match => match.id === matchId ? { ...match, feedback } : match));
+    setSelectedAlert(previous => previous?.id === matchId ? { ...previous, feedback } : previous);
   };
 
   const toggleSaveMatch = async (matchId: string) => {
-    let nextSaved = false;
-    setMatches(prev => prev.map(m => {
-      if (m.id === matchId) {
-        nextSaved = !m.isSaved;
-        return { ...m, isSaved: nextSaved };
-      }
-      return m;
-    }));
-    if (selectedAlert && selectedAlert.id === matchId) {
-      setSelectedAlert(prev => prev ? { ...prev, isSaved: !prev.isSaved } : null);
-    }
-    try {
-      await apiUpdateAlert(matchId, { isSaved: nextSaved });
-    } catch (err) {
-      console.warn('Failed to update save status on server', err);
-    }
+    const current = matches.find(match => match.id === matchId);
+    if (!current) return;
+    const next = !current.isSaved;
+    await apiUpdateAlert(matchId, { isSaved: next });
+    setMatches(previous => previous.map(match => match.id === matchId ? { ...match, isSaved: next } : match));
+    setSelectedAlert(previous => previous?.id === matchId ? { ...previous, isSaved: next } : previous);
   };
 
   const markMatchRead = async (matchId: string) => {
-    setMatches(prev => prev.map(m => m.id === matchId ? { ...m, isRead: true } : m));
-    try {
-      await apiUpdateAlert(matchId, { isRead: true });
-    } catch (err) {
-      console.warn('Failed to mark alert as read on server', err);
-    }
+    await apiUpdateAlert(matchId, { isRead: true });
+    setMatches(previous => previous.map(match => match.id === matchId ? { ...match, isRead: true } : match));
   };
 
   const scanAllSources = async (): Promise<{ scanned: number; matched: number }> => {
     setIsScanning(true);
-    let totalScanned = 0;
-    let newMatchesCount = 0;
-
+    let matched = 0;
+    let scanned = 0;
     try {
-      const scanRes = await apiScanSources(isDemoMode);
-      totalScanned = scanRes.scanned;
-
-      if (scanRes.matches && scanRes.matches.length > 0) {
-        newMatchesCount = scanRes.matches.length;
-        setMatches(prev => [...scanRes.matches, ...prev]);
+      if (DeviceSessionConnector.isNativeAvailable()) {
+        const connected = await refreshDeviceSession();
+        if (connected) {
+          for (const source of sources.filter(item => item.connectorType === 'device_session' && !item.isPaused)) {
+            scanned++;
+            try {
+              const posts = await deviceConnector.fetchLatest(source);
+              const ingest = await apiIngestDevicePosts(source.id, posts, locale);
+              matched += ingest.matchesCreated.length;
+              if (ingest.matchesCreated.length > 0) {
+                setMatches(previous => [...ingest.matchesCreated, ...previous]);
+              }
+            } catch (error) {
+              console.warn(`[Radar] Authenticated scan failed for ${source.id}`, error);
+            }
+          }
+        }
       }
 
+      const serverScan = await apiScanSources(isDemoMode);
+      scanned = Math.max(scanned, serverScan.scanned);
+      matched += serverScan.matches.length;
+      if (serverScan.matches.length > 0) setMatches(previous => [...serverScan.matches, ...previous]);
       setBackendStatus('online');
-
-      // Update digest count
-      setDigest(prev => ({
-        ...prev,
-        scannedCount: prev.scannedCount + totalScanned,
+      setDigest(previous => ({
+        ...previous,
+        scannedCount: previous.scannedCount + scanned,
+        matchedCount: previous.matchedCount + matched,
         generatedAt: locale === 'ar' ? 'الآن' : 'Just now'
       }));
-
-      // Update source lastCheckedAt
-      setSources(prev => prev.map(s => ({ ...s, lastCheckedAt: locale === 'ar' ? 'الآن' : 'Just now' })));
-    } catch (backendErr) {
-      console.warn('Backend scan failed:', backendErr);
+      setSources(previous => previous.map(source => ({ ...source, lastCheckedAt: locale === 'ar' ? 'الآن' : 'Just now' })));
+    } catch (error) {
       setBackendStatus('offline');
+      console.warn('[Radar] Scan failed', error);
     } finally {
       setIsScanning(false);
     }
-
-    return { scanned: totalScanned, matched: newMatchesCount };
+    return { scanned, matched };
   };
 
   const resetToDemo = () => {
@@ -441,80 +438,85 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setDigest(INITIAL_DIGEST);
   };
 
-  const connectFacebookSession = (accountName: string) => {
-    DeviceSessionConnector.saveLocalSession(accountName);
-    setUser(prev => ({
-      ...prev,
-      deviceSessionConnected: true,
-      deviceSessionAccount: accountName,
-      deviceSessionLastChecked: 'Just now'
-    }));
+  const connectFacebookSession = async () => {
+    if (!DeviceSessionConnector.isNativeAvailable()) {
+      throw new Error('Authenticated Facebook monitoring requires the Android app.');
+    }
+    await DeviceSessionConnector.connectFacebook();
+
+    // The dedicated login activity temporarily covers this activity. Poll after it closes;
+    // timers resume and the local CookieManager session can then be confirmed without cookies
+    // ever crossing the native bridge.
+    for (let attempt = 0; attempt < 30; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      if (await refreshDeviceSession()) return;
+    }
   };
 
-  const disconnectFacebookSession = () => {
-    DeviceSessionConnector.wipeLocalSession();
-    setUser(prev => ({
-      ...prev,
-      deviceSessionConnected: false,
-      deviceSessionAccount: undefined
-    }));
-    setSources(prev => prev.map(s => s.connectorType === 'device_session' ? { ...s, connectorStatus: 'needs_relogin' } : s));
+  const disconnectFacebookSession = async () => {
+    await DeviceSessionConnector.wipeLocalSession();
+    await refreshDeviceSession();
+    setSources(previous => previous.map(source => source.connectorType === 'device_session'
+      ? { ...source, connectorStatus: 'needs_relogin' }
+      : source));
   };
 
   return (
-    <RadarContext.Provider
-      value={{
-        user,
-        sources,
-        rules,
-        matches,
-        collections,
-        digest,
-        locale,
-        theme,
-        isScanning,
-        backendStatus,
-        isPostgres,
-        apifyConfigured,
-        geminiConfigured,
-        isDemoMode,
-        toggleDemoMode,
-        selectedAlert,
-        selectedAlertDetail: selectedAlert,
-        selectedSourceId,
-        isAddSourceOpen,
-        isPaywallOpen,
-        isDigestOpen,
-        currentScreen,
-        sharedIncomingUrl,
-        initialAddUrl: sharedIncomingUrl,
-        setLocale,
-        setTheme,
-        setCurrentScreen,
-        openAddSource,
-        closeAddSource,
-        openAlertDetail,
-        closeAlertDetail,
-        openPaywall,
-        closePaywall,
-        openDigest,
-        closeDigest,
-        addSourceWithRule,
-        toggleSourcePause,
-        deleteSource,
-        addRule,
-        toggleRule,
-        deleteRule,
-        updateRule,
-        rateMatchFeedback,
-        toggleSaveMatch,
-        markMatchRead,
-        scanAllSources,
-        resetToDemo,
-        connectFacebookSession,
-        disconnectFacebookSession
-      }}
-    >
+    <RadarContext.Provider value={{
+      user,
+      sources,
+      rules,
+      matches,
+      collections,
+      digest,
+      locale,
+      theme,
+      isScanning,
+      backendStatus,
+      isPostgres,
+      aiConfigured,
+      monitoringMode,
+      deviceSessionAvailable,
+      apifyConfigured: optionalPublicProviderConfigured,
+      geminiConfigured: aiConfigured,
+      isDemoMode,
+      toggleDemoMode,
+      selectedAlert,
+      selectedAlertDetail: selectedAlert,
+      selectedSourceId,
+      isAddSourceOpen,
+      isPaywallOpen,
+      isDigestOpen,
+      currentScreen,
+      sharedIncomingUrl,
+      initialAddUrl: sharedIncomingUrl,
+      setLocale: setLocaleState,
+      setTheme: setThemeState,
+      setCurrentScreen,
+      openAddSource,
+      closeAddSource,
+      openAlertDetail: setSelectedAlert,
+      closeAlertDetail: () => setSelectedAlert(null),
+      openPaywall: () => setIsPaywallOpen(true),
+      closePaywall: () => setIsPaywallOpen(false),
+      openDigest: () => setIsDigestOpen(true),
+      closeDigest: () => setIsDigestOpen(false),
+      addSourceWithRule,
+      toggleSourcePause,
+      deleteSource,
+      addRule,
+      toggleRule,
+      deleteRule,
+      updateRule,
+      rateMatchFeedback,
+      toggleSaveMatch,
+      markMatchRead,
+      scanAllSources,
+      resetToDemo,
+      refreshDeviceSession,
+      connectFacebookSession,
+      disconnectFacebookSession
+    }}>
       {children}
     </RadarContext.Provider>
   );
@@ -522,8 +524,6 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
 export const useRadar = () => {
   const context = useContext(RadarContext);
-  if (!context) {
-    throw new Error('useRadar must be used within a RadarProvider');
-  }
+  if (!context) throw new Error('useRadar must be used within a RadarProvider');
   return context;
 };
