@@ -1,6 +1,16 @@
 import { Source, WatchRule, AlertMatch, NormalizedPost, ConnectorStatus, ConnectorType, SourcePlatform } from '../types';
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
+const DEVICE_AUTH_STORAGE_KEY = 'mrscrap_backend_device_auth_v1';
+
+export interface ApiDeviceAuthSession {
+  userId: string;
+  deviceId: string;
+  token: string;
+  platform: 'web' | 'android' | 'ios';
+}
+
+let registrationPromise: Promise<ApiDeviceAuthSession> | null = null;
 
 export function getApiBaseUrl(): string {
   return API_BASE_URL;
@@ -25,6 +35,63 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(body?.error || body?.message || `Request failed with HTTP ${response.status}`);
   }
   return body as T;
+}
+
+function detectClientPlatform(): 'web' | 'android' | 'ios' {
+  if (typeof navigator === 'undefined') return 'web';
+  const ua = navigator.userAgent || '';
+  if (/Android/i.test(ua)) return 'android';
+  if (/iPhone|iPad|iPod/i.test(ua)) return 'ios';
+  return 'web';
+}
+
+function readStoredDeviceAuth(): ApiDeviceAuthSession | null {
+  try {
+    const raw = localStorage.getItem(DEVICE_AUTH_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (
+      parsed &&
+      typeof parsed.userId === 'string' &&
+      typeof parsed.deviceId === 'string' &&
+      typeof parsed.token === 'string' &&
+      parsed.token.length >= 24
+    ) {
+      return {
+        userId: parsed.userId,
+        deviceId: parsed.deviceId,
+        token: parsed.token,
+        platform: parsed.platform === 'android' || parsed.platform === 'ios' ? parsed.platform : 'web'
+      };
+    }
+  } catch {
+    // Invalid/corrupted local installation auth is replaced below.
+  }
+  return null;
+}
+
+/**
+ * Backend application-device authorization. This token is unrelated to Facebook login and
+ * never contains Facebook cookies/session material. Registration is intentionally frictionless.
+ */
+export async function ensureApiDeviceAuth(): Promise<ApiDeviceAuthSession> {
+  const stored = readStoredDeviceAuth();
+  if (stored) return stored;
+  if (registrationPromise) return registrationPromise;
+
+  registrationPromise = requestJson<ApiDeviceAuthSession>('/api/auth/device/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ platform: detectClientPlatform() })
+  }).then(session => {
+    if (!session?.token || !session?.deviceId) throw new Error('Backend returned invalid device authorization');
+    localStorage.setItem(DEVICE_AUTH_STORAGE_KEY, JSON.stringify(session));
+    return session;
+  }).finally(() => {
+    registrationPromise = null;
+  });
+
+  return registrationPromise;
 }
 
 export interface HealthResponse {
@@ -331,6 +398,7 @@ export async function apiScanSources(demo: boolean = false): Promise<ScanRespons
 }
 
 export async function apiIngestDevicePosts(sourceId: string, posts: NormalizedPost[], locale: 'en' | 'ar'): Promise<DeviceIngestResponse> {
+  const auth = await ensureApiDeviceAuth();
   const payloadPosts = posts.map(post => ({
     externalPostId: post.externalPostId,
     originalUrl: post.originalUrl,
@@ -343,7 +411,11 @@ export async function apiIngestDevicePosts(sourceId: string, posts: NormalizedPo
   }));
   const data = await requestJson<any>('/api/device/ingest', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-MR-SCRAP-CLIENT': 'android-device-session' },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-MR-SCRAP-CLIENT': 'android-device-session',
+      'Authorization': `Bearer ${auth.token}`
+    },
     body: JSON.stringify({ sourceId, posts: payloadPosts, locale })
   });
   const matches: AlertMatch[] = [];
