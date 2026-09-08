@@ -12,9 +12,7 @@ function normalizeOrigin(value: string): string | null {
 function configuredOrigins(): Set<string> {
   const origins = new Set<string>();
 
-  // Capacitor Android bundled web origin.
   origins.add('https://localhost');
-  // Keep iOS-compatible origin ready without widening browser access.
   origins.add('capacitor://localhost');
 
   const appUrl = process.env.APP_URL?.trim();
@@ -43,9 +41,9 @@ const ALLOWED_METHODS = 'GET,POST,PATCH,DELETE,OPTIONS';
 const ALLOWED_HEADERS = 'Content-Type,Authorization,X-MR-SCRAP-CLIENT,X-MR-SCRAP-ADMIN-TOKEN';
 
 /**
- * Strict CORS for the separate hosted API used by the bundled Capacitor app.
- * Requests without Origin (for example Android WorkManager HttpURLConnection) are not
- * browser CORS requests and pass through normally. Production never uses wildcard origin.
+ * Strict credentialed CORS for the hosted API used by the web/Capacitor clients.
+ * Requests without Origin (for example Android WorkManager HttpURLConnection) are not browser
+ * CORS requests and pass through normally. Production never uses wildcard origin.
  */
 export function strictCors(req: Request, res: Response, next: NextFunction) {
   const origin = req.headers.origin;
@@ -64,6 +62,7 @@ export function strictCors(req: Request, res: Response, next: NextFunction) {
   }
 
   res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', ALLOWED_METHODS);
   res.setHeader('Access-Control-Allow-Headers', ALLOWED_HEADERS);
