@@ -1,18 +1,16 @@
 name: Verify Real Session Architecture
 
 on:
-  push:
-    branches:
-      - work/real-session-ai-provider
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: verify-real-session-${{ github.head_ref || github.ref_name }}
+  group: verify-real-session-${{ github.event.pull_request.number || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -37,6 +35,9 @@ jobs:
       - name: Typecheck
         run: npm run lint
 
+      - name: Unit tests
+        run: npm test
+
       - name: Build web and server bundle
         run: npm run build
         env:
@@ -60,7 +61,7 @@ jobs:
       - name: Compile Android debug APK
         run: gradle -p android :app:assembleDebug --stacktrace
 
-      - name: Publish Android debug APK
+      - name: Publish Android debug APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: mr-scrap-android-debug-${{ github.sha }}
