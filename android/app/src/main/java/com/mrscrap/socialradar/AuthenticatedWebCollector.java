@@ -28,7 +28,8 @@ final class AuthenticatedWebCollector {
         void onError(String message);
     }
 
-    private static final long TIMEOUT_MS = 30_000;
+    private static final long TIMEOUT_MS = 45_000;
+    private static final long PAGE_STARTED_EXTRACTION_DELAY_MS = 900;
     private static final long FIRST_EXTRACTION_DELAY_MS = 450;
     private static final long RETRY_DELAY_MS = 750;
     private static final int SURFACE_FALLBACK_ATTEMPT = 4;
@@ -204,6 +205,15 @@ final class AuthenticatedWebCollector {
                 @Override
                 public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                     return !isAllowedSocialUrl(request.getUrl().toString());
+                }
+
+                @Override
+                public void onPageStarted(WebView view, String loadedUrl, android.graphics.Bitmap favicon) {
+                    super.onPageStarted(view, loadedUrl, favicon);
+                    if (!isAllowedSocialUrl(loadedUrl) || finished.get()) return;
+                    // Facebook can keep network activity alive for a long time. Start DOM polling as
+                    // soon as navigation begins instead of waiting only for commit/finished callbacks.
+                    scheduleExtraction(PAGE_STARTED_EXTRACTION_DELAY_MS);
                 }
 
                 @Override

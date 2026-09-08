@@ -143,18 +143,31 @@ export const ForceUpdateGate: React.FC<Props> = ({ children }) => {
 
   if (!isNativeAndroid()) return <>{children}</>;
 
-  if (checking && !requiredUpdate) {
+  if (!requiredUpdate) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-950 text-slate-300">
-        <div className="flex items-center gap-3 text-sm font-semibold">
-          <span className="w-5 h-5 rounded-full border-2 border-cyan-500 border-r-transparent animate-spin" />
-          {isArabic ? 'جاري فحص تحديثات التطبيق...' : 'Checking for app updates...'}
-        </div>
-      </div>
+      <>
+        {/* Keep children mounted while the update check runs so auth/session bootstrap happens in parallel instead of serially. */}
+        {children}
+        {checking ? (
+          <div
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950 text-slate-100 px-6"
+            dir={isArabic ? 'rtl' : 'ltr'}
+          >
+            <div className="flex max-w-sm flex-col items-center text-center">
+              <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-cyan-400/30 bg-cyan-400/10 text-lg font-black tracking-tight text-cyan-300 shadow-2xl">
+                MR
+              </div>
+              <div className="mt-4 text-xl font-black tracking-tight">MR SCRAP</div>
+              <div className="mt-5 flex items-center gap-3 text-sm font-semibold text-slate-300">
+                <span className="h-5 w-5 animate-spin rounded-full border-2 border-cyan-500 border-r-transparent" />
+                {isArabic ? 'جاري تجهيز التطبيق والتحقق من التحديث...' : 'Preparing the app and checking for updates...'}
+              </div>
+            </div>
+          </div>
+        ) : null}
+      </>
     );
   }
-
-  if (!requiredUpdate) return <>{children}</>;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center px-5" dir={isArabic ? 'rtl' : 'ltr'}>

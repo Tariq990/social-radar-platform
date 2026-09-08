@@ -31,7 +31,10 @@ final class ForegroundWebViewHost {
 
         ViewGroup root = (ViewGroup) content;
         webView.setVisibility(View.VISIBLE);
-        webView.setAlpha(0.01f);
+        // Keep the collector fully renderable. It is inserted behind the Capacitor WebView, so
+        // lowering alpha is unnecessary and can suppress Chromium's first visible paint callback.
+        webView.setAlpha(1f);
+        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
         webView.setClickable(false);
         webView.setFocusable(false);
         webView.setFocusableInTouchMode(false);
@@ -44,6 +47,9 @@ final class ForegroundWebViewHost {
         // Android's window lifecycle, which is required by modern lazy-rendered Meta feeds.
         root.addView(webView, 0, params);
         webView.onResume();
+        webView.resumeTimers();
+        webView.requestLayout();
+        webView.invalidate();
         return true;
     }
 
