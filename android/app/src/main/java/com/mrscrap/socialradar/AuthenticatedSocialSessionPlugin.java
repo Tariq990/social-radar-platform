@@ -5,6 +5,8 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.os.Handler;
+import android.os.Looper;
 import android.webkit.CookieManager;
 
 import androidx.activity.result.ActivityResult;
@@ -32,19 +34,23 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
 
     @PluginMethod
     public void status(PluginCall call) {
+        boolean facebook = SessionStateStore.isFacebookConnected();
+        boolean instagram = SessionStateStore.isInstagramConnected();
         JSObject result = new JSObject();
         result.put("available", true);
-        result.put("connected", SessionStateStore.isFacebookConnected());
+        result.put("connected", facebook || instagram);
+        result.put("facebookConnected", facebook);
+        result.put("instagramConnected", instagram);
+        result.put("facebookConnectedAt", SessionStateStore.facebookConnectedAt(getContext()));
+        result.put("instagramConnectedAt", SessionStateStore.instagramConnectedAt(getContext()));
         result.put("connectedAt", SessionStateStore.connectedAt(getContext()));
         result.put("lastCheckedAt", SessionStateStore.lastCheckedAt(getContext()));
-        result.put("message", SessionStateStore.isFacebookConnected()
-            ? "Authenticated Facebook WebView session is available on this Android device."
-            : "Facebook login is required on this Android device.");
+        result.put("message", facebook || instagram
+            ? "Authenticated Meta session is available on this Android device."
+            : "Connect Facebook or Instagram on this Android device.");
         call.resolve(result);
     }
 
-    /** Android clipboard access does not require storage permissions. It must only be invoked
-     * while the app is foregrounded, directly from the user's Paste button gesture. */
     @PluginMethod
     public void readClipboard(PluginCall call) {
         try {
@@ -55,14 +61,12 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
                 call.resolve(result);
                 return;
             }
-
             ClipData clip = clipboard.getPrimaryClip();
             if (clip == null || clip.getItemCount() == 0) {
                 result.put("text", "");
                 call.resolve(result);
                 return;
             }
-
             CharSequence value = clip.getItemAt(0).coerceToText(getContext());
             result.put("text", value == null ? "" : value.toString());
             call.resolve(result);
@@ -73,45 +77,102 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
 
     @PluginMethod
     public void connectFacebook(PluginCall call) {
-        Intent intent = new Intent(getContext(), FacebookSessionActivity.class);
-        startActivityForResult(call, intent, "facebookSessionResult");
+        startActivityForResult(call, new Intent(getContext(), FacebookSessionActivity.class), "facebookSessionResult");
+    }
+
+    @PluginMethod
+    public void connectInstagram(PluginCall call) {
+        startActivityForResult(call, new Intent(getContext(), InstagramSessionActivity.class), "instagramSessionResult");
     }
 
     @ActivityCallback
     private void facebookSessionResult(PluginCall call, ActivityResult activityResult) {
-        if (call == null) return;
-        boolean connected = activityResult != null &&
-            activityResult.getResultCode() == Activity.RESULT_OK &&
-            SessionStateStore.isFacebookConnected();
+        resolveSessionResult(call, activityResult, "facebook");
+    }
 
+    @ActivityCallback
+    private void instagramSessionResult(PluginCall call, ActivityResult activityResult) {
+        resolveSessionResult(call, activityResult, "instagram");
+    }
+
+    private void resolveSessionResult(PluginCall call, ActivityResult activityResult, String platform) {
+        if (call == null) return;
+        boolean connected = activityResult != null && activityResult.getResultCode() == Activity.RESULT_OK &&
+            SessionStateStore.isConnectedForPlatform(platform);
         JSObject result = new JSObject();
         result.put("opened", true);
+        result.put("platform", platform);
         result.put("connected", connected);
         result.put("cancelled", !connected);
         call.resolve(result);
     }
 
     @PluginMethod
+    public void disconnectFacebook(PluginCall call) {
+        expirePlatformCookies("facebook");
+        SessionStateStore.clearFacebook(getContext());
+        resolveDisconnect(call, "facebook");
+    }
+
+    @PluginMethod
+    public void disconnectInstagram(PluginCall call) {
+        expirePlatformCookies("instagram");
+        SessionStateStore.clearInstagram(getContext());
+        resolveDisconnect(call, "instagram");
+    }
+
+    /** Backward-compatible disconnect: clears only Meta sessions, never the MR SCRAP auth cookie. */
+    @PluginMethod
     public void disconnect(PluginCall call) {
-        CookieManager cookieManager = CookieManager.getInstance();
-        cookieManager.removeAllCookies(success -> {
-            cookieManager.flush();
-            SessionStateStore.clear(getContext());
-            WorkManager.getInstance(getContext()).cancelAllWorkByTag("mrscrap-authenticated-source");
+        expirePlatformCookies("facebook");
+        expirePlatformCookies("instagram");
+        SessionStateStore.clear(getContext());
+        WorkManager.getInstance(getContext()).cancelAllWorkByTag("mrscrap-authenticated-source");
+        resolveDisconnect(call, "all");
+    }
+
+    private void resolveDisconnect(PluginCall call, String platform) {
+        CookieManager.getInstance().flush();
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
             JSObject result = new JSObject();
             result.put("disconnected", true);
+            result.put("platform", platform);
+            result.put("facebookConnected", SessionStateStore.isFacebookConnected());
+            result.put("instagramConnected", SessionStateStore.isInstagramConnected());
             call.resolve(result);
-        });
+        }, 120);
+    }
+
+    private void expirePlatformCookies(String platform) {
+        CookieManager manager = CookieManager.getInstance();
+        String[] names;
+        String base;
+        String domain;
+        if ("instagram".equals(platform)) {
+            names = new String[] { "sessionid", "ds_user_id", "csrftoken", "rur", "mid", "ig_did" };
+            base = "https://www.instagram.com/";
+            domain = ".instagram.com";
+        } else {
+            names = new String[] { "c_user", "xs", "fr", "datr", "sb" };
+            base = "https://www.facebook.com/";
+            domain = ".facebook.com";
+        }
+        for (String name : names) {
+            manager.setCookie(base, name + "=; Max-Age=0; Path=/; Domain=" + domain + "; Secure; SameSite=None");
+            manager.setCookie(base, name + "=; Max-Age=0; Path=/; Secure; SameSite=None");
+        }
     }
 
     @PluginMethod
     public void saveBackendAuth(PluginCall call) {
-        String userId = call.getString("userId", "");
-        String deviceId = call.getString("deviceId", "");
-        String token = call.getString("token");
-        String platform = call.getString("platform", "android");
         try {
-            DeviceCredentialStore.save(getContext(), userId, deviceId, token, platform);
+            DeviceCredentialStore.save(
+                getContext(),
+                call.getString("userId", ""),
+                call.getString("deviceId", ""),
+                call.getString("token"),
+                call.getString("platform", "android")
+            );
             JSObject result = new JSObject();
             result.put("saved", true);
             call.resolve(result);
@@ -153,8 +214,9 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
             call.reject("Invalid Facebook/Instagram URL");
             return;
         }
-        if (!SessionStateStore.isFacebookConnected()) {
-            call.reject("Facebook session is not connected");
+        String platform = SessionStateStore.platformForUrl(url);
+        if (!SessionStateStore.isConnectedForPlatform(platform)) {
+            call.reject(("instagram".equals(platform) ? "Instagram" : "Facebook") + " session is not connected");
             return;
         }
 
@@ -162,17 +224,12 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
             @Override
             public void onSuccess(JSONObject result) {
                 try {
-                    JSONObject source = result.getJSONObject("source");
-                    call.resolve(JSObject.fromJSONObject(source));
+                    call.resolve(JSObject.fromJSONObject(result.getJSONObject("source")));
                 } catch (Exception error) {
                     call.reject("Could not resolve authenticated source metadata");
                 }
             }
-
-            @Override
-            public void onError(String message) {
-                call.reject(message);
-            }
+            @Override public void onError(String message) { call.reject(message); }
         });
     }
 
@@ -188,8 +245,9 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
             call.reject("Invalid source URL");
             return;
         }
-        if (!SessionStateStore.isFacebookConnected()) {
-            call.reject("Facebook session is not connected");
+        String platform = SessionStateStore.platformForUrl(url);
+        if (!SessionStateStore.isConnectedForPlatform(platform)) {
+            call.reject(("instagram".equals(platform) ? "Instagram" : "Facebook") + " session is not connected");
             return;
         }
 
@@ -206,11 +264,7 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
                     call.reject("Could not normalize collected posts");
                 }
             }
-
-            @Override
-            public void onError(String message) {
-                call.reject(message);
-            }
+            @Override public void onError(String message) { call.reject(message); }
         });
     }
 
@@ -218,9 +272,8 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
     public void scheduleSource(PluginCall call) {
         String sourceId = call.getString("sourceId");
         String url = call.getString("url");
-        String platform = call.getString("platform", "facebook");
+        String platform = call.getString("platform", SessionStateStore.platformForUrl(url));
         String backendBaseUrl = call.getString("backendBaseUrl");
-
         if (sourceId == null || sourceId.isBlank() || url == null || backendBaseUrl == null || backendBaseUrl.isBlank()) {
             call.reject("sourceId, url and backendBaseUrl are required");
             return;
@@ -240,27 +293,16 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
             .putString(AuthenticatedSourceWorker.KEY_PLATFORM, platform)
             .putString(AuthenticatedSourceWorker.KEY_BACKEND_BASE_URL, backendBaseUrl)
             .build();
-
-        Constraints constraints = new Constraints.Builder()
-            .setRequiredNetworkType(NetworkType.CONNECTED)
-            .build();
-
+        Constraints constraints = new Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build();
         PeriodicWorkRequest request = new PeriodicWorkRequest.Builder(
-            AuthenticatedSourceWorker.class,
-            MINIMUM_INTERVAL_MINUTES,
-            TimeUnit.MINUTES
-        )
+            AuthenticatedSourceWorker.class, MINIMUM_INTERVAL_MINUTES, TimeUnit.MINUTES)
             .setInputData(input)
             .setConstraints(constraints)
             .addTag("mrscrap-authenticated-source")
             .addTag("mrscrap-source-" + sourceId)
             .build();
-
         WorkManager.getInstance(getContext()).enqueueUniquePeriodicWork(
-            uniqueWorkName(sourceId),
-            ExistingPeriodicWorkPolicy.UPDATE,
-            request
-        );
+            uniqueWorkName(sourceId), ExistingPeriodicWorkPolicy.UPDATE, request);
 
         JSObject result = new JSObject();
         result.put("scheduled", true);

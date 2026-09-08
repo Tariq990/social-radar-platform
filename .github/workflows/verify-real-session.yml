@@ -15,6 +15,9 @@ concurrency:
 
 jobs:
   web-and-android:
+    # The active Android alpha branch already runs the same checks plus packaging/publishing in
+    # android-alpha-release.yml. Skip this duplicate PR runner so one push consumes one runner.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.head.ref != 'work/real-session-ai-provider' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
