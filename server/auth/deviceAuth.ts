@@ -50,6 +50,17 @@ function getPool(): pg.Pool {
   return authPool;
 }
 
+export async function ensureCurrentBackendIdentity(): Promise<void> {
+  if (appMode() !== 'production' && !process.env.DATABASE_URL?.trim()) return;
+  const pool = getPool();
+  await pool.query(
+    `INSERT INTO users (id, email, name, tier, created_at, updated_at)
+     VALUES ($1, NULL, 'Radar Operator', 'pro', NOW(), NOW())
+     ON CONFLICT (id) DO NOTHING`,
+    [CURRENT_SINGLE_USER_ID]
+  );
+}
+
 /**
  * Creates an installation bearer token for backend ingestion.
  *
@@ -75,31 +86,14 @@ export async function registerDevice(rawPlatform: unknown): Promise<DeviceRegist
     return { ...identity, token };
   }
 
+  await ensureCurrentBackendIdentity();
   const pool = getPool();
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    // The existing backend still stores all app-owned data under user_default. Ensure the
-    // FK target exists in PostgreSQL before creating device credentials.
-    await client.query(
-      `INSERT INTO users (id, email, name, tier, created_at, updated_at)
-       VALUES ($1, NULL, 'Radar Operator', 'pro', NOW(), NOW())
-       ON CONFLICT (id) DO NOTHING`,
-      [CURRENT_SINGLE_USER_ID]
-    );
-    await client.query(
-      `INSERT INTO devices (id, user_id, device_token, platform, last_active, created_at)
-       VALUES ($1, $2, $3, $4, NOW(), NOW())`,
-      [deviceId, CURRENT_SINGLE_USER_ID, hash, platform]
-    );
-    await client.query('COMMIT');
-    return { userId: CURRENT_SINGLE_USER_ID, deviceId, token, platform };
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
+  await pool.query(
+    `INSERT INTO devices (id, user_id, device_token, platform, last_active, created_at)
+     VALUES ($1, $2, $3, $4, NOW(), NOW())`,
+    [deviceId, CURRENT_SINGLE_USER_ID, hash, platform]
+  );
+  return { userId: CURRENT_SINGLE_USER_ID, deviceId, token, platform };
 }
 
 export async function authenticateDeviceToken(rawToken: unknown): Promise<DeviceIdentity | null> {
