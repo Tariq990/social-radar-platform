@@ -1,0 +1,31 @@
+name: Facebook Photo Comment Shape V2
+
+on:
+  push:
+    branches:
+      - test/android-webview-parity-20260909
+    paths:
+      - .github/workflows/facebook-photo-comment-shape-v2.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: self-hosted
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node 22
+        shell: bash
+        run: |
+          set -euo pipefail
+          NODE_BIN="$HOME/actions-runnerr/_work/_tool/node/22.23.2/x64/bin"
+          test -x "$NODE_BIN/node"
+          echo "$NODE_BIN" >> "$GITHUB_PATH"
+      - name: Verify Chrome CDP
+        shell: bash
+        run: curl -fsS --connect-timeout 3 http://127.0.0.1:9222/json/version >/dev/null
+      - name: Inspect all dialog profile-anchor shapes
+        shell: bash
+        run: node scripts/facebook-photo-comment-shape-v2.mjs
