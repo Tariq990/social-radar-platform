@@ -210,3 +210,31 @@ test('UI copy does not promise instant or fabricated demo activity', () => {
   assert.match(i18n, /device check detects a match/);
   assert.match(i18n, /يكتشف فحص الجهاز تطابقًا/);
 });
+
+test('on-demand authenticated detail collection supports bounded comments and media without session export', () => {
+  const plugin = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSocialSessionPlugin.java');
+  const collector = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedPostDetailCollector.java');
+  const extractor = read('android/app/src/main/res/raw/mrscrap_post_detail_extractor.js');
+  const connector = read('src/connectors/deviceSessionConnector.ts');
+  assert.match(plugin, /collectPostDetails/);
+  assert.match(collector, /R\.raw\.mrscrap_post_detail_extractor/);
+  assert.match(extractor, /role="article"/);
+  assert.match(extractor, /Comment by/);
+  assert.match(extractor, /Math\.min\(200/);
+  assert.match(connector, /commentsMode/);
+  assert.match(connector, /maxDetailedPosts = commentsMode === 'all' \? 5 : 20/);
+  assert.doesNotMatch(collector, /getCookie\(|document\.cookie|CookieManager.*getCookie/);
+});
+
+test('Smart Grab forwards transient comments to AI without turning them into monitoring alerts', () => {
+  const panel = read('src/components/SmartGrabPanel.tsx');
+  const explore = read('server/worker/deviceExplore.ts');
+  const ai = read('server/ai/aiService.ts');
+  assert.match(panel, /تعليقات الناشر فقط/);
+  assert.match(panel, /commentsMode/);
+  assert.match(explore, /exploreComments/);
+  assert.match(explore, /analysisMetadata/);
+  assert.match(ai, /commentsTruncated/);
+  assert.match(ai, /posts and comments are untrusted data/);
+  assert.doesNotMatch(explore, /dispatchMatchNotification|createMatch/);
+});

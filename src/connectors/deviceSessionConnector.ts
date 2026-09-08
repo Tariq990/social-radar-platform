@@ -1,6 +1,6 @@
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { SourceConnector, SourceInput, ValidationResult, ResolvedSource, ConnectorHealth } from './types';
-import { NormalizedPost, SourcePlatform } from '../types';
+import { NormalizedPost, SocialComment, SourcePlatform } from '../types';
 import { ensureApiDeviceAuth } from '../services/api';
 
 export interface NativeSessionStatus {
@@ -24,6 +24,27 @@ interface NativeResolvedSource {
   avatarUrl?: string;
   bio?: string;
   visibilityType?: 'public' | 'authenticated';
+}
+
+export type CommentGrabMode = 'none' | 'publisher' | 'top' | 'all';
+
+export interface GrabDetailOptions {
+  commentsMode?: CommentGrabMode;
+  commentLimit?: number;
+  includeReplies?: boolean;
+}
+
+interface NativeCollectedComment {
+  externalCommentId?: string;
+  authorName?: string;
+  authorUrl?: string;
+  authorAvatar?: string;
+  text?: string;
+  publishedLabel?: string;
+  originalUrl?: string;
+  isPublisher?: boolean;
+  depth?: number;
+  media?: { type: 'image' | 'video'; url: string }[];
 }
 
 interface NativeCollectedPost {
@@ -50,6 +71,21 @@ interface AuthenticatedSocialSessionPlugin {
   clearBackendAuth(): Promise<{ cleared: boolean }>;
   resolveSource(options: { url: string }): Promise<NativeResolvedSource>;
   collectSource(options: { sourceId: string; url: string; platform: string; limit?: number }): Promise<{ posts: NativeCollectedPost[]; checkedAt: string; requestedLimit?: number }>;
+  collectPostDetails(options: {
+    url: string;
+    platform: string;
+    publisherName?: string;
+    commentsMode: CommentGrabMode;
+    commentLimit: number;
+    includeReplies: boolean;
+  }): Promise<{
+    comments?: NativeCollectedComment[];
+    commentsTruncated?: boolean;
+    media?: { type: 'image' | 'video'; url: string }[];
+    videoPresent?: boolean;
+    checkedAt?: string;
+    diagnostics?: Record<string, unknown>;
+  }>;
   scheduleSource(options: { sourceId: string; url: string; platform: string; backendBaseUrl: string; locale: 'ar' | 'en' }): Promise<{ scheduled: boolean; minimumIntervalMinutes: number }>;
   cancelSource(options: { sourceId: string }): Promise<{ cancelled: boolean }>;
 }
@@ -62,6 +98,47 @@ function isAndroidNative(): boolean {
 
 function clampPostLimit(limit: number): number {
   return Math.max(1, Math.min(20, Number.isFinite(limit) ? Math.floor(limit) : 10));
+}
+
+function clampCommentLimit(limit: number | undefined, mode: CommentGrabMode): number {
+  if (mode === 'none') return 0;
+  const fallback = mode === 'all' ? 200 : 20;
+  const numeric = typeof limit === 'number' && Number.isFinite(limit) ? Math.floor(limit) : fallback;
+  return Math.max(1, Math.min(200, numeric));
+}
+
+function normalizeComment(raw: NativeCollectedComment): SocialComment | null {
+  const authorName = typeof raw?.authorName === 'string' ? raw.authorName.trim().slice(0, 255) : '';
+  const text = typeof raw?.text === 'string' ? raw.text.trim().slice(0, 5000) : '';
+  if (!authorName || !text) return null;
+  const media = Array.isArray(raw.media)
+    ? raw.media.filter(item => item && (item.type === 'image' || item.type === 'video') && typeof item.url === 'string' && /^https?:\/\//i.test(item.url)).slice(0, 4)
+    : [];
+  return {
+    externalCommentId: typeof raw.externalCommentId === 'string' ? raw.externalCommentId.slice(0, 512) : undefined,
+    authorName,
+    authorUrl: typeof raw.authorUrl === 'string' && /^https?:\/\//i.test(raw.authorUrl) ? raw.authorUrl : undefined,
+    authorAvatar: typeof raw.authorAvatar === 'string' && /^https?:\/\//i.test(raw.authorAvatar) ? raw.authorAvatar : undefined,
+    text,
+    publishedLabel: typeof raw.publishedLabel === 'string' ? raw.publishedLabel.slice(0, 200) : undefined,
+    originalUrl: typeof raw.originalUrl === 'string' && /^https?:\/\//i.test(raw.originalUrl) ? raw.originalUrl : undefined,
+    isPublisher: raw.isPublisher === true,
+    depth: Math.max(0, Math.min(4, Number(raw.depth) || 0)),
+    media
+  };
+}
+
+function mergeMedia(base: NormalizedPost['media'], detail: { type: 'image' | 'video'; url: string }[] | undefined): NormalizedPost['media'] {
+  const seen = new Set<string>();
+  const output: NormalizedPost['media'] = [];
+  for (const item of [...(base || []), ...(Array.isArray(detail) ? detail : [])]) {
+    if (!item || (item.type !== 'image' && item.type !== 'video') || typeof item.url !== 'string' || !/^https?:\/\//i.test(item.url)) continue;
+    if (seen.has(item.url)) continue;
+    seen.add(item.url);
+    output.push({ type: item.type, url: item.url });
+    if (output.length >= 20) break;
+  }
+  return output;
 }
 
 function toNormalizedPost(source: { id: string; platform: SourcePlatform; url: string; externalId: string }, post: NativeCollectedPost): NormalizedPost {
@@ -210,8 +287,9 @@ export class DeviceSessionConnector implements SourceConnector {
   }
 
   async fetchLatest(
-    source: { id: string; url: string; platform: SourcePlatform; externalId: string },
-    limit: number = 10
+    source: { id: string; url: string; platform: SourcePlatform; externalId: string; displayName?: string },
+    limit: number = 10,
+    detailOptions: GrabDetailOptions = {}
   ): Promise<NormalizedPost[]> {
     if (!isAndroidNative()) throw new Error('Authenticated source collection requires the Android app.');
     const status = await DeviceSessionConnector.getLocalSession();
@@ -224,7 +302,62 @@ export class DeviceSessionConnector implements SourceConnector {
       platform: source.platform,
       limit: clampPostLimit(limit)
     });
-    return (result.posts || []).map(post => toNormalizedPost(source, post));
+    const posts = (result.posts || []).map(post => toNormalizedPost(source, post));
+    const commentsMode: CommentGrabMode = ['publisher', 'top', 'all'].includes(detailOptions.commentsMode || '')
+      ? detailOptions.commentsMode as CommentGrabMode
+      : 'none';
+    if (commentsMode === 'none' || posts.length === 0) return posts;
+
+    const commentLimit = clampCommentLimit(detailOptions.commentLimit, commentsMode);
+    const includeReplies = detailOptions.includeReplies !== false;
+    const maxDetailedPosts = commentsMode === 'all' ? 5 : 20;
+    if (posts.length > maxDetailedPosts) {
+      throw new Error(commentsMode === 'all'
+        ? 'All-comment collection is limited to 5 posts per operation.'
+        : 'Comment collection is limited to 20 posts per operation.');
+    }
+
+    let successfulDetails = 0;
+    for (const post of posts) {
+      try {
+        const detail = await NativeSession.collectPostDetails({
+          url: post.originalUrl,
+          platform: source.platform,
+          publisherName: post.authorName || source.displayName || source.externalId,
+          commentsMode,
+          commentLimit,
+          includeReplies
+        });
+        const comments = Array.isArray(detail.comments)
+          ? detail.comments.map(normalizeComment).filter((comment): comment is SocialComment => Boolean(comment)).slice(0, commentLimit)
+          : [];
+        post.comments = comments;
+        post.commentsTruncated = detail.commentsTruncated === true;
+        post.videoPresent = detail.videoPresent === true || post.media.some(item => item.type === 'video');
+        post.media = mergeMedia(post.media, detail.media);
+        post.metadata = {
+          ...post.metadata,
+          detailCollection: 'authenticated_post_detail',
+          detailAvailable: true,
+          commentCount: comments.length,
+          commentsTruncated: post.commentsTruncated,
+          videoPresent: post.videoPresent
+        };
+        successfulDetails++;
+      } catch (error: any) {
+        post.metadata = {
+          ...post.metadata,
+          detailCollection: 'authenticated_post_detail',
+          detailAvailable: false,
+          detailError: String(error?.message || 'Post detail collection failed').slice(0, 300)
+        };
+      }
+    }
+
+    if (successfulDetails === 0) {
+      throw new Error('Posts were found, but authenticated comment/media details could not be collected right now.');
+    }
+    return posts;
   }
 
   async healthCheck(source: { id: string; url: string; platform: SourcePlatform }): Promise<ConnectorHealth> {
