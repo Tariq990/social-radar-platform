@@ -6,17 +6,29 @@ const TRACKING_PARAMS = new Set([
   '__cft__', '__tn__', 'mibextid'
 ]);
 
+function normalizeSocialHostname(hostname: string): string {
+  const host = hostname.toLowerCase();
+
+  if (
+    host === 'facebook.com' ||
+    host === 'm.facebook.com' ||
+    host === 'mobile.facebook.com' ||
+    host === 'web.facebook.com'
+  ) {
+    return 'www.facebook.com';
+  }
+
+  if (host === 'instagram.com') {
+    return 'www.instagram.com';
+  }
+
+  return host;
+}
+
 function normalizeUrlForIdentity(rawUrl: string): string {
   const parsed = new URL(rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`);
 
-  if (
-    parsed.hostname === 'm.facebook.com' ||
-    parsed.hostname === 'mobile.facebook.com' ||
-    parsed.hostname === 'web.facebook.com'
-  ) {
-    parsed.hostname = 'www.facebook.com';
-  }
-
+  parsed.hostname = normalizeSocialHostname(parsed.hostname);
   parsed.hash = '';
   for (const key of [...parsed.searchParams.keys()]) {
     if (TRACKING_PARAMS.has(key.toLowerCase())) parsed.searchParams.delete(key);
@@ -84,14 +96,7 @@ export function canonicalizeSocialUrl(rawUrl: string): string {
   try {
     const parsed = new URL(rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`);
 
-    if (
-      parsed.hostname === 'm.facebook.com' ||
-      parsed.hostname === 'mobile.facebook.com' ||
-      parsed.hostname === 'web.facebook.com'
-    ) {
-      parsed.hostname = 'www.facebook.com';
-    }
-
+    parsed.hostname = normalizeSocialHostname(parsed.hostname);
     parsed.hash = '';
     for (const key of [...parsed.searchParams.keys()]) {
       if (TRACKING_PARAMS.has(key.toLowerCase())) parsed.searchParams.delete(key);
