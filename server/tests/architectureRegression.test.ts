@@ -38,7 +38,10 @@ test('native collector supports bounded multi-post collection', () => {
   const collector = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedWebCollector.java');
   assert.match(collector, /MAX_LIMIT\s*=\s*20/);
   assert.match(collector, /window\.scrollBy/);
-  assert.match(collector, /posts\.slice\(0,LIMIT\)/);
+  assert.match(collector, /posts\.slice\(0, LIMIT\)/);
+  assert.match(collector, /setOffscreenPreRaster\(true\)/);
+  assert.match(collector, /mbasic\.facebook\.com/);
+  assert.match(collector, /NO_EXTRACTABLE_POSTS/);
 });
 
 test('rate limiting trusts one production proxy hop and isolates route buckets', () => {
