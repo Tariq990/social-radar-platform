@@ -1,6 +1,7 @@
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { SourceConnector, SourceInput, ValidationResult, ResolvedSource, ConnectorHealth } from './types';
 import { NormalizedPost, SourcePlatform } from '../types';
+import { ensureApiDeviceAuth } from '../services/api';
 
 interface NativeSessionStatus {
   available: boolean;
@@ -98,17 +99,16 @@ export class DeviceSessionConnector implements SourceConnector {
 
   static async scheduleBackgroundSource(
     source: { id: string; url: string; platform: SourcePlatform },
-    backendBaseUrl: string,
-    authToken: string
+    backendBaseUrl: string
   ): Promise<void> {
     if (!isAndroidNative()) throw new Error('Background authenticated monitoring requires the Android app.');
-    if (!authToken || authToken.length < 24) throw new Error('Backend device authorization is missing.');
+    const auth = await ensureApiDeviceAuth();
     await NativeSession.scheduleSource({
       sourceId: source.id,
       url: source.url,
       platform: source.platform,
       backendBaseUrl,
-      authToken
+      authToken: auth.token
     });
   }
 
