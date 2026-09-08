@@ -15,7 +15,7 @@ function normalizeIntent(value: string): string {
     .trim();
 }
 
-function isLatestPostIntent(value: string): boolean {
+export function isLatestPostIntent(value: string): boolean {
   const text = normalizeIntent(value || '');
   if (!text) return false;
 
