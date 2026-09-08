@@ -10,6 +10,7 @@ import { ingestDevicePosts } from './server/worker/deviceIngestion';
 import { evaluatePostAgainstRule } from './server/ai/ruleEvaluator';
 import { aiService } from './server/ai/aiService';
 import { getAIConfigurationStatus, testConfiguredAIProvider } from './server/ai/providerFactory';
+import { strictCors } from './server/http/cors';
 
 dotenv.config();
 
@@ -19,6 +20,7 @@ const APP_MODE = (process.env.APP_MODE || 'production').trim().toLowerCase();
 const isDemoMode = () => APP_MODE === 'demo';
 
 app.disable('x-powered-by');
+app.use(strictCors);
 app.use(express.json({ limit: '1mb' }));
 
 const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
