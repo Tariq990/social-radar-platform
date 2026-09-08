@@ -16,7 +16,7 @@ import { useRadar } from '../context/RadarContext';
 import { DeviceSessionConnector } from '../connectors/deviceSessionConnector';
 import { ResolvedSource } from '../connectors/types';
 import { Locale, translations } from '../lib/i18n';
-import { apiGetRuleSuggestions, apiResolveSource } from '../services/api';
+import { apiResolveSource } from '../services/api';
 
 interface AddSourceModalProps {
   initialUrl?: string | null;
@@ -111,17 +111,17 @@ function normalizeResolvedSource(resolved: ResolvedSource, requestedUrl: string)
 function localizedSuggestions(locale: Locale): string[] {
   if (locale === 'ar') {
     return [
+      'نبهني عند نزول آخر بوست جديد',
       'نبهني عند الإعلان عن خصم أو عرض محدود',
       'نبهني عند إطلاق منتج أو خدمة جديدة',
-      'نبهني عند تغيير الأسعار أو الباقات',
-      'نبهني عند الإعلان عن وظائف أو فرص جديدة'
+      'نبهني عند تغيير الأسعار أو الباقات'
     ];
   }
   return [
+    'Notify me about the latest new post',
     'Notify me when they announce a discount or limited offer',
     'Alert me when a major new product or service launches',
-    'Tell me when they publish an important price change',
-    'Notify me about job vacancies or hiring announcements'
+    'Tell me when they publish an important price change'
   ];
 }
 
@@ -160,7 +160,6 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onCl
     addSourceWithRule,
     locale,
     isDemoMode,
-    deviceSessionAvailable,
     refreshDeviceSession,
     connectFacebookSession
   } = useRadar();
@@ -190,21 +189,15 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onCl
 
   const prepareResolvedSource = async (candidate: ResolvedSource, requestedUrl: string) => {
     const resolved = normalizeResolvedSource(candidate, requestedUrl);
+    const nextSuggestions = localizedSuggestions(locale);
     setResolvedSource(resolved);
     setRuleName(locale === 'ar' ? `${resolved.displayName} — مراقبة` : `${resolved.displayName} Watch`);
     setRequiresDeviceLogin(resolved.connectorType === 'device_session' && resolved.connectorStatus !== 'authenticated_monitoring');
-
-    let nextSuggestions = localizedSuggestions(locale);
-    if (locale === 'en') {
-      try {
-        const generated = await apiGetRuleSuggestions(resolved.displayName, resolved.platform, resolved.bio);
-        if (generated.length > 0) nextSuggestions = generated.slice(0, 4);
-      } catch {
-        // A suggestion failure must never block source setup.
-      }
-    }
     setSuggestions(nextSuggestions);
-    if (nextSuggestions[0]) setRuleText(nextSuggestions[0]);
+    setRuleText(nextSuggestions[0] || '');
+
+    // Do not block source onboarding on a second AI request. As soon as reliable source metadata
+    // exists, move straight to the rule composer.
     setStep(3);
   };
 
@@ -324,24 +317,34 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onCl
     setResolveError(null);
     setPasteHint(null);
     try {
-      if (!navigator.clipboard?.readText) throw new Error('clipboard-unavailable');
-      const clip = await navigator.clipboard.readText();
+      let clip = '';
+
+      // Android WebView clipboard APIs are inconsistent across OS/WebView versions. Use the
+      // foreground native ClipboardManager bridge first; it needs no storage permission.
+      if (DeviceSessionConnector.isNativeAvailable()) {
+        clip = await DeviceSessionConnector.readClipboardText();
+      }
+      if (!clip && navigator.clipboard?.readText) {
+        clip = await navigator.clipboard.readText();
+      }
+
       const clean = normalizeSocialInput(clip);
       if (!clean) {
         setPasteHint(locale === 'ar' ? 'الحافظة لا تحتوي على رابط.' : 'The clipboard does not contain a link.');
         return;
       }
+
       setUrl(clean);
       if (isSupportedSocialUrl(clean)) {
         await handleResolve(clean);
       } else {
-        setPasteHint(locale === 'ar' ? 'الصق رابط Facebook أو Instagram صالحًا.' : 'Paste a valid Facebook or Instagram URL.');
+        setPasteHint(locale === 'ar' ? 'الحافظة لا تحتوي على رابط Facebook أو Instagram صالح.' : 'The clipboard does not contain a valid Facebook or Instagram URL.');
       }
     } catch {
       inputRef.current?.focus();
       setPasteHint(locale === 'ar'
-        ? 'لا يسمح هذا الجهاز بقراءة الحافظة تلقائيًا. اضغط مطولًا داخل الحقل واختر «لصق».'
-        : 'Automatic clipboard access is unavailable. Long-press the field and choose Paste.');
+        ? 'تعذر قراءة الحافظة. اضغط مطولًا داخل الحقل واختر «لصق».'
+        : 'Could not read the clipboard. Long-press the field and choose Paste.');
     }
   };
 
@@ -435,7 +438,7 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onCl
               <div className="space-y-1.5">
                 <p className="text-sm font-semibold text-slate-200">{locale === 'ar' ? 'نتحقق من الرابط وبيانات المصدر' : 'Checking the source and link'}</p>
                 <p className="text-xs leading-5 text-slate-500">{DeviceSessionConnector.isNativeAvailable()
-                  ? (locale === 'ar' ? 'سنستخدم جلسة الجهاز المحلية فقط إذا احتاج المصدر تسجيل دخول.' : 'The local device session is used only when the source requires authentication.')
+                  ? (locale === 'ar' ? 'نستخدم جلسة الجهاز المحلية عند الحاجة فقط.' : 'The local device session is used only when needed.')
                   : (locale === 'ar' ? 'نجلب بيانات المصدر المتاحة بدون إنشاء بيانات وهمية.' : 'Reading available source metadata without fabricating missing data.')}</p>
               </div>
             </div>
