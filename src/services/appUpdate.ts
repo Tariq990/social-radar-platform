@@ -82,9 +82,18 @@ export async function installAndroidUpdate(decision: AndroidUpdateDecision): Pro
   }
 
   const baseUrl = getApiBaseUrl().replace(/\/+$/, '');
-  const url = new URL(decision.downloadPath, `${baseUrl}/`).toString();
+  if (!baseUrl) throw new Error('Android update install is missing the backend base URL');
+  const backendOrigin = new URL(`${baseUrl}/`);
+  const url = new URL(decision.downloadPath, backendOrigin);
+  // Release metadata is controlled by the backend, but keep the native installer pinned to that
+  // same backend origin. An accidental or compromised absolute URL must not turn the updater into
+  // a general-purpose APK downloader.
+  if (url.origin !== backendOrigin.origin) {
+    throw new Error('Update download must use the MR SCRAP backend origin');
+  }
+
   return await NativeAppUpdate.installUpdate({
-    url,
+    url: url.toString(),
     sha256: decision.sha256,
     versionCode: decision.versionCode
   });
