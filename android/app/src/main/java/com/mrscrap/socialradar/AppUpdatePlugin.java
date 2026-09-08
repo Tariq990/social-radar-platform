@@ -1,6 +1,7 @@
 package com.mrscrap.socialradar;
 
 import android.content.Intent;
+import android.content.pm.PackageInfo;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.Settings;
@@ -31,11 +32,20 @@ public class AppUpdatePlugin extends Plugin {
 
     @PluginMethod
     public void getInstalledVersion(PluginCall call) {
-        JSObject result = new JSObject();
-        result.put("versionCode", BuildConfig.VERSION_CODE);
-        result.put("versionName", BuildConfig.VERSION_NAME);
-        result.put("canInstallPackages", canInstallPackages());
-        call.resolve(result);
+        try {
+            PackageInfo info = getContext().getPackageManager().getPackageInfo(getContext().getPackageName(), 0);
+            long versionCode = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                ? info.getLongVersionCode()
+                : info.versionCode;
+
+            JSObject result = new JSObject();
+            result.put("versionCode", versionCode);
+            result.put("versionName", info.versionName == null ? "" : info.versionName);
+            result.put("canInstallPackages", canInstallPackages());
+            call.resolve(result);
+        } catch (Exception error) {
+            call.reject("Could not read the installed MR SCRAP version");
+        }
     }
 
     @PluginMethod
@@ -194,7 +204,7 @@ public class AppUpdatePlugin extends Plugin {
 
     private static String toHex(byte[] bytes) {
         StringBuilder builder = new StringBuilder(bytes.length * 2);
-        for (byte value : bytes) builder.append(String.format(Locale.US, "%02x", value));
+        for (byte value : bytes) builder.append(String.format(Locale.US, "%02x", value & 0xff));
         return builder.toString();
     }
 }
