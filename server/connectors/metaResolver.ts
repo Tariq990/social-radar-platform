@@ -3,6 +3,7 @@ import { canonicalizeSocialUrl } from '../worker/deduplication';
 
 const MAX_HTML_BYTES = 1_500_000;
 const MAX_REDIRECTS = 3;
+const RESOLVE_TIMEOUT_MS = 3500;
 
 function platformForUrl(raw: string): SourcePlatform | 'other' {
   try {
@@ -18,6 +19,70 @@ function platformForUrl(raw: string): SourcePlatform | 'other' {
     return 'other';
   } catch {
     return 'other';
+  }
+}
+
+function decodeHtml(value: string): string {
+  return value
+    .replace(/&amp;/gi, '&')
+    .replace(/&#0*39;|&apos;/gi, "'")
+    .replace(/&quot;/gi, '"')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&#(\d+);/g, (_match, code) => {
+      const value = Number(code);
+      return Number.isFinite(value) ? String.fromCodePoint(value) : '';
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_match, code) => {
+      const value = Number.parseInt(code, 16);
+      return Number.isFinite(value) ? String.fromCodePoint(value) : '';
+    })
+    .trim();
+}
+
+function parseMetaTagAttributes(tag: string): Record<string, string> {
+  const attrs: Record<string, string> = {};
+  const pattern = /([:\w-]+)\s*=\s*(["'])(.*?)\2/gs;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(tag)) !== null) {
+    attrs[match[1].toLowerCase()] = decodeHtml(match[3]);
+  }
+  return attrs;
+}
+
+function metaContent(html: string, keys: string[]): string {
+  const wanted = new Set(keys.map(key => key.toLowerCase()));
+  const tags = html.match(/<meta\b[^>]*>/gi) || [];
+  for (const tag of tags) {
+    const attrs = parseMetaTagAttributes(tag);
+    const identity = (attrs.property || attrs.name || attrs.itemprop || '').toLowerCase();
+    if (wanted.has(identity) && attrs.content) return attrs.content.trim();
+  }
+  return '';
+}
+
+function titleContent(html: string): string {
+  const title = html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '';
+  return decodeHtml(title.replace(/<[^>]+>/g, ' '));
+}
+
+function deriveHandleOrId(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl);
+    const parts = parsed.pathname.split('/').filter(Boolean).map(part => {
+      try { return decodeURIComponent(part); } catch { return part; }
+    });
+    const first = (parts[0] || '').trim();
+    const lower = first.toLowerCase();
+
+    if (lower === 'profile.php') return (parsed.searchParams.get('id') || '').trim();
+    if (lower === 'groups' && parts[1]) return parts[1].replace(/^@/, '').trim();
+    if (first && !['p', 'reel', 'reels', 'posts', 'permalink', 'permalink.php', 'story.php', 'photo', 'photo.php', 'watch', 'share', 'videos'].includes(lower)) {
+      return first.replace(/^@/, '').trim();
+    }
+    return (parsed.searchParams.get('id') || parsed.searchParams.get('user') || '').trim();
+  } catch {
+    return '';
   }
 }
 
@@ -87,10 +152,9 @@ async function fetchMetaHtml(initialUrl: string, signal: AbortSignal): Promise<{
 }
 
 /**
- * Best-effort direct OpenGraph/meta-tag resolver for public Facebook/Instagram URLs.
- * A successful metadata read does not imply that the server can continuously monitor the
- * source; authenticated monitoring remains device-owned unless an optional public provider
- * is explicitly enabled.
+ * Best-effort direct metadata resolver for public Facebook/Instagram URLs. Meta frequently
+ * changes attribute order in <meta> tags, so extraction parses attributes instead of assuming
+ * property="..." appears before content="...".
  */
 export class PublicMetaResolver {
   async resolve(input: SourceInput): Promise<ResolvedSourceResult | null> {
@@ -101,21 +165,10 @@ export class PublicMetaResolver {
     if (platform === 'other') return null;
 
     const canonicalUrl = canonicalizeSocialUrl(raw);
-
-    let handle = 'page';
-    try {
-      const parsed = new URL(canonicalUrl);
-      const segments = parsed.pathname.split('/').filter(Boolean);
-      handle = segments[0] || 'page';
-      if (['p', 'reel', 'stories', 'posts', 'groups'].includes(handle) && segments[1]) {
-        handle = segments[1];
-      }
-    } catch {
-      handle = raw.split('/').filter(Boolean).pop() || 'page';
-    }
+    const handle = deriveHandleOrId(canonicalUrl) || deriveHandleOrId(raw) || 'page';
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 6000);
+    const timeoutId = setTimeout(() => controller.abort(), RESOLVE_TIMEOUT_MS);
 
     try {
       const { response, finalUrl, html } = await fetchMetaHtml(canonicalUrl, controller.signal);
@@ -136,29 +189,19 @@ export class PublicMetaResolver {
         };
       }
 
-      const ogTitleMatch = html.match(/<meta\s+property=["']og:title["']\s+content=["'](.*?)["']/i) ||
-                           html.match(/<meta\s+name=["']title["']\s+content=["'](.*?)["']/i) ||
-                           html.match(/<title>(.*?)<\/title>/i);
+      let extractedTitle = metaContent(html, ['og:title', 'twitter:title', 'title']) || titleContent(html);
+      extractedTitle = decodeHtml(extractedTitle)
+        .replace(/\s*[|·-]\s*Facebook\s*$/i, '')
+        .replace(/\s*[|·-]\s*Instagram\s*$/i, '')
+        .replace(/\s*•\s*Instagram photos and videos\s*$/i, '')
+        .trim();
 
-      const ogImageMatch = html.match(/<meta\s+property=["']og:image["']\s+content=["'](.*?)["']/i) ||
-                           html.match(/<meta\s+name=["']twitter:image["']\s+content=["'](.*?)["']/i);
+      const extractedImage = metaContent(html, ['og:image', 'og:image:secure_url', 'twitter:image', 'twitter:image:src']);
+      const extractedDesc = metaContent(html, ['og:description', 'twitter:description', 'description']);
+      const badTitle = /^(facebook|instagram|log in|log into facebook|welcome to facebook)$/i.test(extractedTitle) ||
+        /log in to facebook/i.test(extractedTitle);
 
-      const ogDescMatch = html.match(/<meta\s+property=["']og:description["']\s+content=["'](.*?)["']/i) ||
-                          html.match(/<meta\s+name=["']description["']\s+content=["'](.*?)["']/i);
-
-      let extractedTitle = ogTitleMatch ? ogTitleMatch[1].trim() : '';
-      extractedTitle = extractedTitle.replace(/\s*\|\s*Facebook$/i, '').replace(/\s*•\s*Instagram photos and videos$/i, '');
-      extractedTitle = extractedTitle
-        .replace(/&amp;/g, '&')
-        .replace(/&#039;/g, "'")
-        .replace(/&quot;/g, '"')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>');
-
-      const extractedImage = ogImageMatch ? ogImageMatch[1].trim().replace(/&amp;/g, '&') : '';
-      const extractedDesc = ogDescMatch ? ogDescMatch[1].trim().replace(/&amp;/g, '&') : '';
-
-      if (extractedTitle && extractedTitle.length > 1 && !extractedTitle.toLowerCase().includes('log in') && !extractedTitle.toLowerCase().includes('welcome to facebook')) {
+      if (extractedTitle && extractedTitle.length > 1 && !badTitle) {
         return {
           valid: true,
           platform,
@@ -167,7 +210,7 @@ export class PublicMetaResolver {
           handle: `@${handle}`,
           avatarUrl: extractedImage || undefined,
           url: finalUrl,
-          bio: extractedDesc ? extractedDesc.slice(0, 5000) : undefined,
+          bio: extractedDesc ? decodeHtml(extractedDesc).slice(0, 5000) : undefined,
           visibilityType: 'public',
           connectorType: 'public_cloud',
           connectorStatus: 'connected',
