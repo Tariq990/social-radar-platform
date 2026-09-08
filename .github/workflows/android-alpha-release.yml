@@ -13,6 +13,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 concurrency:
   group: publish-android-alpha
@@ -26,6 +27,8 @@ jobs:
     env:
       # Alpha acceptance fallback. A workflow input or repository variable still overrides it.
       VITE_API_BASE_URL: ${{ inputs.backend_base_url || vars.ALPHA_API_BASE_URL || 'https://mr-scrap-api-live.onrender.com' }}
+      ANDROID_VERSION_CODE: ${{ github.run_number }}
+      ANDROID_VERSION_NAME: 0.1.${{ github.run_number }}
 
     steps:
       - name: Checkout
@@ -43,6 +46,10 @@ jobs:
           fi
           if [[ ! "$VITE_API_BASE_URL" =~ ^https://[^/]+ ]]; then
             echo "Alpha backend must be an absolute HTTPS origin: $VITE_API_BASE_URL"
+            exit 1
+          fi
+          if [[ ! "$ANDROID_VERSION_CODE" =~ ^[1-9][0-9]*$ ]]; then
+            echo "ANDROID_VERSION_CODE must be a positive integer."
             exit 1
           fi
 
@@ -92,6 +99,8 @@ jobs:
           cp android/app/build/outputs/apk/debug/app-debug.apk release/MR-SCRAP-android-alpha.apk
           sha256sum release/MR-SCRAP-android-alpha.apk > release/MR-SCRAP-android-alpha.apk.sha256
           printf '%s\n' "$GITHUB_SHA" > release/COMMIT_SHA.txt
+          printf '%s\n' "$ANDROID_VERSION_CODE" > release/VERSION_CODE.txt
+          printf '%s\n' "$ANDROID_VERSION_NAME" > release/VERSION_NAME.txt
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
@@ -100,6 +109,35 @@ jobs:
           path: release/
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish mandatory in-app update to backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=release/MR-SCRAP-android-alpha.apk
+          APK_SHA="$(sha256sum "$APK" | awk '{print $1}')"
+
+          OIDC_TOKEN="$(
+            curl -fsSL \
+              -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=mrscrap-render-release" \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])'
+          )"
+
+          # The Render deploy for this commit normally finishes well before Gradle. Retries also
+          # cover a brief 404/503 window if the new updater endpoint is still rolling out.
+          curl --fail-with-body --retry 18 --retry-delay 10 --retry-all-errors \
+            --connect-timeout 10 --max-time 120 \
+            -X PUT \
+            -H "Authorization: Bearer ${OIDC_TOKEN}" \
+            -H "Content-Type: application/vnd.android.package-archive" \
+            -H "X-MR-SCRAP-Version-Code: ${ANDROID_VERSION_CODE}" \
+            -H "X-MR-SCRAP-Version-Name: ${ANDROID_VERSION_NAME}" \
+            -H "X-MR-SCRAP-Min-Supported-Version-Code: ${ANDROID_VERSION_CODE}" \
+            -H "X-MR-SCRAP-SHA256: ${APK_SHA}" \
+            -H "X-MR-SCRAP-Release-Notes: ${GITHUB_SHA}" \
+            --data-binary "@$APK" \
+            "${VITE_API_BASE_URL}/api/internal/releases/android-alpha"
 
       - name: Update mutable android-alpha tag
         shell: bash
@@ -122,8 +160,11 @@ jobs:
           This is the latest **debug/alpha** build from \`work/real-session-ai-provider\`.
 
           - Commit: \`$GITHUB_SHA\`
+          - Android version: \`$ANDROID_VERSION_NAME\` (code \`$ANDROID_VERSION_CODE\`)
           - Backend compiled into APK: \`$VITE_API_BASE_URL\`
-          - Build type: debug (not Play Store production-signed)
+          - Future alpha builds are mandatory in-app updates for older alpha installations.
+          - APK downloads are served by the MR SCRAP backend and SHA-256 verified on-device before Android opens the installer.
+          - Build type: debug/alpha with a stable alpha-only signing key (not the future Play Store production key).
           - Facebook authenticated monitoring remains subject to physical-device acceptance testing and Meta DOM/login behavior.
           - Do not treat this prerelease as production-ready.
 
@@ -141,4 +182,6 @@ jobs:
             release/MR-SCRAP-android-alpha.apk \
             release/MR-SCRAP-android-alpha.apk.sha256 \
             release/COMMIT_SHA.txt \
+            release/VERSION_CODE.txt \
+            release/VERSION_NAME.txt \
             --clobber
