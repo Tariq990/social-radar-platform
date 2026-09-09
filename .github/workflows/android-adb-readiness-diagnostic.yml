@@ -1,0 +1,58 @@
+name: Android ADB Readiness Diagnostic
+
+on:
+  push:
+    branches: [test/android-physical-fix-20260909]
+    paths: [.github/workflows/android-adb-readiness-diagnostic.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  adb-readiness:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 3
+    steps:
+      - name: Recover and classify physical ADB visibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-platform-tools/platform-tools/adb.exe"
+          test -x "$adb"
+          echo ADB_BINARY_READY
+
+          "$adb" kill-server >/dev/null 2>&1 || true
+          sleep 1
+          "$adb" start-server >/dev/null 2>&1 || true
+          echo ADB_SERVER_RESTARTED
+
+          authorized=0
+          unauthorized=0
+          offline=0
+          other=0
+          serial=""
+          for i in $(seq 1 60); do
+            raw="$($adb devices 2>/dev/null | tr -d '\r' || true)"
+            authorized="$(printf '%s\n' "$raw" | awk 'NR>1 && $2=="device" {c++} END {print c+0}')"
+            unauthorized="$(printf '%s\n' "$raw" | awk 'NR>1 && $2=="unauthorized" {c++} END {print c+0}')"
+            offline="$(printf '%s\n' "$raw" | awk 'NR>1 && $2=="offline" {c++} END {print c+0}')"
+            other="$(printf '%s\n' "$raw" | awk 'NR>1 && NF>=2 && $2!="device" && $2!="unauthorized" && $2!="offline" {c++} END {print c+0}')"
+            serial="$(printf '%s\n' "$raw" | awk 'NR>1 && $2=="device" {print $1; exit}')"
+            if [ -n "$serial" ]; then
+              echo "::add-mask::$serial"
+              echo "ADB_COUNTS authorized=${authorized} unauthorized=${unauthorized} offline=${offline} other=${other}"
+              echo ADB_PHYSICAL_READY
+              "$adb" -s "$serial" shell getprop ro.build.version.release 2>/dev/null | tr -d '\r' | awk 'NF {print "ANDROID_OS_PRESENT=1"; exit}' || true
+              "$adb" -s "$serial" shell dumpsys package com.mrscrap.socialradar 2>/dev/null | tr -d '\r' | awk '/versionCode=|versionName=/ {print; n++; if(n>=2) exit}' || true
+              exit 0
+            fi
+            if [ $((i % 10)) -eq 0 ]; then
+              echo "ADB_WAIT_${i} authorized=${authorized} unauthorized=${unauthorized} offline=${offline} other=${other}"
+            fi
+            sleep 1
+          done
+
+          echo "ADB_FINAL authorized=${authorized} unauthorized=${unauthorized} offline=${offline} other=${other}"
+          echo ADB_PHYSICAL_NOT_READY
+          exit 1
