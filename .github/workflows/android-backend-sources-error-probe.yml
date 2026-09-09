@@ -1,0 +1,103 @@
+name: Android Backend Sources Error Probe
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-backend-sources-error-probe.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 6
+    env:
+      PKG: com.mrscrap.socialradar
+    steps:
+      - name: Resolve v144 app WebView without altering sessions
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1;exit}')"
+          test -s "$adb"; test -n "$serial"
+          version="$($adb -s "$serial" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"
+          echo "INSTALLED_VERSION_CODE=$version"; test "$version" = 144
+          marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          printf '%s' "$marker" | grep -q facebook_connected_at; echo FACEBOOK_SESSION_METADATA=1
+          pid="$($adb -s "$serial" shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"; test -n "$pid"
+          socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | grep -E "${pid}$|_${pid}($|_)" | head -n1 || true)"
+          [ -n "$socket" ] || socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | head -n1 || true)"
+          test -n "$socket"
+          $adb -s "$serial" forward --remove tcp:9223 >/dev/null 2>&1 || true
+          $adb -s "$serial" forward tcp:9223 "localabstract:$socket" >/dev/null
+          echo "ADB=$adb" >> "$GITHUB_ENV"; echo "SERIAL=$serial" >> "$GITHUB_ENV"; echo "WIN_USER=$win_user" >> "$GITHUB_ENV"
+          echo BACKEND_PROBE_PREREQS=PASS
+
+      - name: Probe authenticated API statuses and sanitized sources error
+        shell: bash
+        run: |
+          set -euo pipefail
+          ps1="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-backend-sources-probe.ps1"
+          cat > "$ps1" <<'PS'
+          $ErrorActionPreference='Stop'
+          $targets=@(Invoke-RestMethod -Uri 'http://127.0.0.1:9223/json/list' -TimeoutSec 4)
+          $app=@($targets|Where-Object{$_.type -eq 'page' -and [string]$_.url -like 'https://localhost*'}|Select-Object -First 1)
+          if($app.Count -eq 0){throw 'app target missing'}
+          $u=[Uri][string]$app[0].webSocketDebuggerUrl; $wsUrl='ws://127.0.0.1:9223'+$u.PathAndQuery
+          $ws=[System.Net.WebSockets.ClientWebSocket]::new(); $cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds(35)); $ws.ConnectAsync([Uri]$wsUrl,$cts.Token).GetAwaiter().GetResult()|Out-Null
+          $expr=@'
+          (async()=>{
+            const entries=performance.getEntriesByType('resource');
+            const apiEntry=[...entries].reverse().find(e=>{try{return new URL(e.name).pathname==='/api/sources'}catch(_){return false}}) || [...entries].reverse().find(e=>{try{return new URL(e.name).pathname==='/api/config'}catch(_){return false}});
+            if(!apiEntry)return{error:'API_ORIGIN_UNAVAILABLE'};
+            const origin=new URL(apiEntry.name).origin;
+            const safeText=s=>String(s||'').replace(/[^A-Za-z0-9 _.:()\[\],\-]/g,'_').slice(0,240);
+            const call=async(path,ms=15000)=>{
+              const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),ms); const started=performance.now();
+              try{
+                const r=await fetch(origin+path,{credentials:'include',signal:controller.signal});
+                const text=await r.text(); clearTimeout(timer);
+                let parsed=null; try{parsed=text?JSON.parse(text):null}catch(_){}
+                return {status:r.status,ms:Math.round(performance.now()-started),isArray:Array.isArray(parsed),count:Array.isArray(parsed)?parsed.length:null,authenticated:parsed&&typeof parsed.authenticated==='boolean'?parsed.authenticated:null,error:safeText(parsed?.error||parsed?.message||(!r.ok?text:''))};
+              }catch(e){clearTimeout(timer);return{status:0,ms:Math.round(performance.now()-started),error:safeText(e?.name||'FETCH_ERROR')}}
+            };
+            const auth=await call('/api/auth/me');
+            const sources=await call('/api/sources');
+            const rules=await call('/api/rules');
+            const alerts=await call('/api/alerts');
+            return {auth,sources,rules,alerts};
+          })()
+          '@
+          $payload=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 10
+          $bytes=[Text.Encoding]::UTF8.GetBytes($payload); $ws.SendAsync([ArraySegment[byte]]::new($bytes),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null
+          $buf=New-Object byte[] 131072; $sb=[Text.StringBuilder]::new()
+          while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id -ne 1){continue};if($m.result.exceptionDetails){throw 'runtime eval exception'};$v=$m.result.result.value;break}
+          if($v.error){Write-Output ('PROBE_ERROR='+[string]$v.error);exit 81}
+          Write-Output ('AUTH_ME_STATUS='+[string]$v.auth.status)
+          Write-Output ('AUTH_ME_MS='+[string]$v.auth.ms)
+          Write-Output ('AUTH_ME_AUTHENTICATED='+$(if($v.auth.authenticated -eq $true){'1'}elseif($v.auth.authenticated -eq $false){'0'}else{'unknown'}))
+          Write-Output ('AUTH_ME_ERROR='+[string]$v.auth.error)
+          foreach($name in @('sources','rules','alerts')){$x=$v.$name;Write-Output (($name.ToUpper())+'_STATUS='+[string]$x.status);Write-Output (($name.ToUpper())+'_MS='+[string]$x.ms);Write-Output (($name.ToUpper())+'_COUNT='+$(if($null -ne $x.count){[string]$x.count}else{'unknown'}));Write-Output (($name.ToUpper())+'_ERROR='+[string]$x.error)}
+          try{$ws.Abort()}catch{}
+          PS
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
+          echo AUTHENTICATED_API_PROBE=PASS
+
+      - name: Preserve Facebook session and cleanup
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          marker="$($ADB -s "$SERIAL" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          if printf '%s' "$marker" | grep -q facebook_connected_at; then echo FACEBOOK_SESSION_METADATA_FINAL=1; else echo FACEBOOK_SESSION_METADATA_FINAL=0; fi
+          $ADB -s "$SERIAL" forward --remove tcp:9223 >/dev/null 2>&1 || true
+          rm -f "/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-backend-sources-probe.ps1" 2>/dev/null || true
+          echo BACKEND_SOURCES_ERROR_PROBE_COMPLETE=1
