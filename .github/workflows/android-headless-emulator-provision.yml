@@ -55,7 +55,7 @@ jobs:
 
           echo CORE_PACKAGES_READY=1
 
-      - name: Install Android system image if missing
+      - name: Repair or install Android system image
         timeout-minutes: 55
         shell: bash
         run: |
@@ -70,10 +70,36 @@ jobs:
           image_dir="${sdk_wsl}/system-images/android-36/google_apis/x86_64"
           test -s "$android"
 
+          required=(kernel-ranchu ramdisk.img system.img vendor.img userdata.img package.xml)
+          image_complete() {
+            local f
+            for f in "${required[@]}"; do
+              test -s "${image_dir}/${f}" || return 1
+            done
+          }
+
           install_rc=0
-          if test -s "${image_dir}/system.img" && test -s "${image_dir}/package.xml"; then
+          if image_complete; then
             echo SYSTEM_IMAGE_REUSED=1
           else
+            echo SYSTEM_IMAGE_INCOMPLETE=1
+            for f in "${required[@]}"; do
+              if test -s "${image_dir}/${f}"; then
+                echo "SYSTEM_IMAGE_FILE_${f//[^A-Za-z0-9]/_}=1"
+              else
+                echo "SYSTEM_IMAGE_FILE_${f//[^A-Za-z0-9]/_}=0"
+              fi
+            done
+
+            /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe \
+              -NoLogo -NoProfile -NonInteractive -Command \
+              "\$sdk='${sdk_win}'; \$killed=0; Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { ([string]\$_.ExecutablePath) -like (\$sdk + '\\emulator\\*') -and ((\$_.Name -eq 'emulator.exe') -or (\$_.Name -like 'qemu-system-x86_64*')) } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue; \$killed++ }; Write-Output ('SYSTEM_IMAGE_REPAIR_PROCESSES_STOPPED=' + \$killed)" | tr -d '\r'
+            sleep 2
+
+            rm -rf "$image_dir"
+            test ! -e "$image_dir"
+            echo SYSTEM_IMAGE_PARTIAL_REMOVED=1
+
             before_kb="$(du -sk "$sdk_wsl" 2>/dev/null | awk '{print $1}')"
             before_kb="${before_kb:-0}"
             echo "SDK_BEFORE_MB=$((before_kb / 1024))"
@@ -94,12 +120,20 @@ jobs:
             echo "SDK_DELTA_MB=$(((after_kb - before_kb) / 1024))"
           fi
 
-          if ! test -s "${image_dir}/system.img" || ! test -s "${image_dir}/package.xml"; then
+          if ! image_complete; then
             echo SYSTEM_IMAGE_VERIFY=FAIL
+            for f in "${required[@]}"; do
+              if test -s "${image_dir}/${f}"; then
+                echo "VERIFY_${f//[^A-Za-z0-9]/_}=1"
+              else
+                echo "VERIFY_${f//[^A-Za-z0-9]/_}=0"
+              fi
+            done
             if ((install_rc != 0)); then exit "$install_rc"; fi
             exit 1
           fi
 
+          echo SYSTEM_IMAGE_COMPLETE=1
           echo SYSTEM_IMAGE_READY=1
 
       - name: Verify headless emulator SDK
@@ -118,12 +152,13 @@ jobs:
 
           test -s "$emulator"
           test -s "$adb"
-          test -s "${image_dir}/system.img"
-          test -s "${image_dir}/package.xml"
+          for f in kernel-ranchu ramdisk.img system.img vendor.img userdata.img package.xml; do
+            test -s "${image_dir}/${f}"
+          done
 
           echo EMULATOR_BINARY_PRESENT=1
           echo PLATFORM_TOOLS_PRESENT=1
-          echo SYSTEM_IMAGE_PRESENT=1
+          echo SYSTEM_IMAGE_COMPLETE=1
 
           "$emulator" -version 2>&1 | tr -d '\r' | head -n 4 | sed 's/^/EMULATOR_VERSION=/' || true
           "$adb" version 2>&1 | tr -d '\r' | head -n 3 | sed 's/^/ADB_VERSION=/' || true
