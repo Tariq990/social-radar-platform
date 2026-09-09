@@ -1,0 +1,65 @@
+name: Android Runtime Install Existing APK
+
+on:
+  workflow_run:
+    workflows: ["Android Persistent Emulator Runtime"]
+    types: [completed]
+    branches: [test/android-headless-emulator-20260909]
+
+permissions:
+  contents: read
+
+jobs:
+  install-existing-apk:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 7
+    steps:
+      - name: Resolve running emulator and existing APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          test -n "$win_user"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"
+          apk="$GITHUB_WORKSPACE/android/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$adb"
+          if [ ! -s "$apk" ]; then
+            echo APK_REUSE_AVAILABLE=0
+            exit 2
+          fi
+          echo APK_REUSE_AVAILABLE=1
+
+          "$adb" start-server >/dev/null 2>&1 || true
+          serial=''
+          for i in $(seq 1 12); do
+            serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
+            [ -n "$serial" ] && break
+            sleep 5
+          done
+          test -n "$serial"
+          echo "ADB=$adb" >> "$GITHUB_ENV"
+          echo "SERIAL=$serial" >> "$GITHUB_ENV"
+          echo "APK=$apk" >> "$GITHUB_ENV"
+          echo EMULATOR_DEVICE_FOUND=1
+
+      - name: Install APK without clearing app data
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          win_tmp="/mnt/c/Users/${win_user}/AppData/Local/Temp/MR-SCRAP-emulator-test.apk"
+          cp "$APK" "$win_tmp"
+          win_apk="$(wslpath -w "$win_tmp")"
+          "$ADB" -s "$SERIAL" install -r "$win_apk" | tr -d '\r'
+          "$ADB" -s "$SERIAL" shell dumpsys package com.mrscrap.socialradar 2>/dev/null | tr -d '\r' \
+            | grep -E 'versionCode=|versionName=' | head -n 4
+          echo EMULATOR_APK_INSTALLED=1
+
+      - name: Launch MR SCRAP
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$ADB" -s "$SERIAL" shell am force-stop com.mrscrap.socialradar >/dev/null 2>&1 || true
+          "$ADB" -s "$SERIAL" shell am start -W -n com.mrscrap.socialradar/.MainActivity 2>&1 | tr -d '\r'
+          echo EMULATOR_APP_LAUNCHED=1
