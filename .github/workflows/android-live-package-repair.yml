@@ -31,15 +31,34 @@ jobs:
           test -s "$data"
 
           echo "=== STOP OLD EMULATOR ==="
-          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -Command "Get-Process emulator,qemu-system-x86_64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue" >/dev/null 2>&1 || true
-          sleep 3
           "$adb" kill-server >/dev/null 2>&1 || true
-
-          echo "=== PRESERVE OLD USERDATA ==="
-          rm -f "$backup"
-          mv "$data" "$backup"
-          rm -f "${avd_dir}/userdata-qemu.img.qcow2" "${avd_dir}/cache.img" "${avd_dir}/cache.img.qcow2" || true
-          rm -rf "${avd_dir}/snapshots" "${avd_dir}"/*.lock "${avd_dir}/multiinstance.lock" 2>/dev/null || true
+          preserve_ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-preserve-userdata.ps1"
+          data_win="$(wslpath -w "$data")"
+          backup_win="$(wslpath -w "$backup")"
+          avd_win="$(wslpath -w "$avd_dir")"
+          cat > "$preserve_ps1" <<POWERSHELL
+          \$ErrorActionPreference = 'Stop'
+          Get-Process emulator,qemu-system-x86_64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          for (\$i = 0; \$i -lt 20; \$i++) {
+            \$left = @(Get-Process emulator,qemu-system-x86_64 -ErrorAction SilentlyContinue).Count
+            if (\$left -eq 0) { break }
+            Start-Sleep -Milliseconds 500
+          }
+          \$data = '${data_win}'
+          \$backup = '${backup_win}'
+          \$avd = '${avd_win}'
+          if (-not (Test-Path -LiteralPath \$data)) { throw 'USERDATA_MISSING' }
+          if (Test-Path -LiteralPath \$backup) { Remove-Item -LiteralPath \$backup -Force }
+          Move-Item -LiteralPath \$data -Destination \$backup -Force
+          foreach (\$name in @('userdata-qemu.img.qcow2','cache.img','cache.img.qcow2','multiinstance.lock')) {
+            Remove-Item -LiteralPath (Join-Path \$avd \$name) -Force -Recurse -ErrorAction SilentlyContinue
+          }
+          Remove-Item -LiteralPath (Join-Path \$avd 'snapshots') -Force -Recurse -ErrorAction SilentlyContinue
+          Get-ChildItem -LiteralPath \$avd -Filter '*.lock' -Force -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+          Write-Output 'WINDOWS_USERDATA_PRESERVED=1'
+          POWERSHELL
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(wslpath -w "$preserve_ps1")" | tr -d '\r'
+          test -s "$backup"
           ls -lh "$backup"
 
           echo "=== CREATE CLEAN 4GB EXT4 USERDATA ==="
