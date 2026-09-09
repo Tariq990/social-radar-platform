@@ -76,8 +76,9 @@ jobs:
           }
 
           function New-Cdp([string]$Url) {
+            $Url = $Url -replace '^ws://localhost:', 'ws://127.0.0.1:'
             $ws = [System.Net.WebSockets.ClientWebSocket]::new()
-            $ws.Options.SetRequestHeader('Origin','http://localhost')
+            $ws.Options.Proxy = $null
             $cts = [Threading.CancellationTokenSource]::new(5000)
             $ws.ConnectAsync([Uri]$Url,$cts.Token).GetAwaiter().GetResult()
             $ws
