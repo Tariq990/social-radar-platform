@@ -1,6 +1,11 @@
 name: Android Emulator App Install
 
 on:
+  push:
+    branches:
+      - test/android-headless-emulator-20260909
+    paths:
+      - .github/workflows/android-emulator-app-install.yml
   workflow_dispatch:
 
 permissions:
@@ -30,15 +35,17 @@ jobs:
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
-      - name: Typecheck and tests
-        run: |
-          npm run lint
-          npm test
+      - name: Typecheck
+        run: npm run lint
 
-      - name: Build web bundle and sync Android
-        run: |
-          npm run build
-          npx cap sync android
+      - name: Unit tests
+        run: npm test
+
+      - name: Production web bundle
+        run: npm run build
+
+      - name: Sync Capacitor Android
+        run: npx cap sync android
 
       - name: Setup Java 21
         uses: actions/setup-java@v4
@@ -46,7 +53,7 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Configure build SDK
+      - name: Configure Linux Android SDK
         shell: bash
         run: |
           set -euo pipefail
@@ -65,34 +72,46 @@ jobs:
           persistent_root="$HOME/.local/share/mrscrap-gradle"
           persistent_bin="$persistent_root/gradle-8.13/bin/gradle"
           action_bin="${RUNNER_TEMP:-/home/tarik/actions-runnerr/_work/_temp}/.gradle-actions/gradle-installations/installs/gradle-8.13/bin/gradle"
+          cache_dir="$HOME/.cache/mrscrap-gradle"
+          zip="$cache_dir/gradle-8.13-bin.zip"
+
           selected=""
           for candidate in "$persistent_bin" "$action_bin"; do
-            if [ -x "$candidate" ]; then selected="$candidate"; break; fi
+            if [ -x "$candidate" ]; then
+              selected="$candidate"
+              break
+            fi
           done
+
           if [ -z "$selected" ] && command -v gradle >/dev/null 2>&1; then
             candidate="$(command -v gradle)"
-            if "$candidate" --version 2>/dev/null | grep -q 'Gradle 8.13'; then selected="$candidate"; fi
+            if "$candidate" --version 2>/dev/null | grep -q 'Gradle 8.13'; then
+              selected="$candidate"
+            fi
           fi
+
           if [ -z "$selected" ]; then
-            cache_dir="$HOME/.cache/mrscrap-gradle"
-            zip="$cache_dir/gradle-8.13-bin.zip"
             mkdir -p "$cache_dir" "$persistent_root"
-            curl --fail --location --connect-timeout 20 --max-time 420 --retry 3 --retry-delay 2 --retry-all-errors \
-              -o "$zip.part" https://downloads.gradle.org/distributions/gradle-8.13-bin.zip
+            rm -f "$zip.part"
+            curl --fail --location \
+              --connect-timeout 20 --max-time 420 \
+              --retry 3 --retry-delay 2 --retry-all-errors \
+              -o "$zip.part" \
+              https://downloads.gradle.org/distributions/gradle-8.13-bin.zip
             mv "$zip.part" "$zip"
             rm -rf "$persistent_root/gradle-8.13"
             unzip -q -o "$zip" -d "$persistent_root"
             selected="$persistent_bin"
           fi
+
           test -x "$selected"
           echo "GRADLE_BIN=$selected" >> "$GITHUB_ENV"
 
       - name: Compile debug APK
         shell: bash
-        run: |
-          "$GRADLE_BIN" -p android :app:assembleDebug --stacktrace
+        run: "$GRADLE_BIN" -p android :app:assembleDebug --stacktrace
 
-      - name: Find running Android emulator
+      - name: Resolve running emulator
         shell: bash
         run: |
           set -euo pipefail
@@ -101,10 +120,11 @@ jobs:
           adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"
           test -s "$adb"
           "$adb" start-server >/dev/null 2>&1 || true
+
           serial=''
           for i in $(seq 1 24); do
             serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
-            if [ -n "$serial" ]; then break; fi
+            [ -n "$serial" ] && break
             sleep 5
           done
           test -n "$serial"
@@ -112,7 +132,7 @@ jobs:
           echo "SERIAL=$serial" >> "$GITHUB_ENV"
           echo EMULATOR_DEVICE_FOUND=1
 
-      - name: Install APK without clearing emulator app data
+      - name: Install APK without clearing app data
         shell: bash
         run: |
           set -euo pipefail
@@ -124,7 +144,7 @@ jobs:
           win_apk="$(wslpath -w "$win_tmp")"
           "$ADB" -s "$SERIAL" install -r "$win_apk" | tr -d '\r'
           "$ADB" -s "$SERIAL" shell dumpsys package com.mrscrap.socialradar 2>/dev/null | tr -d '\r' \
-            | grep -E 'versionCode=|versionName=' | head -n4
+            | grep -E 'versionCode=|versionName=' | head -n 4
           echo EMULATOR_APK_INSTALLED=1
 
       - name: Launch MR SCRAP
