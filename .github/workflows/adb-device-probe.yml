@@ -20,13 +20,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if grep -qi microsoft /proc/version 2>/dev/null || [ -n "${WSL_DISTRO_NAME:-}" ]; then
-            echo "RUNNER_ENV=WSL"
-            is_wsl=1
-          else
-            echo "RUNNER_ENV=LINUX"
-            is_wsl=0
-          fi
+          is_wsl=0
+          if grep -qi microsoft /proc/version 2>/dev/null || [ -n "${WSL_DISTRO_NAME:-}" ]; then is_wsl=1; fi
+          echo "RUNNER_ENV=$([ "$is_wsl" = 1 ] && echo WSL || echo LINUX)"
 
           linux_adb="$(command -v adb || true)"
           if [ -z "$linux_adb" ]; then
@@ -37,45 +33,43 @@ jobs:
 
           selected="$linux_adb"
           backend="linux"
-          if [ "$is_wsl" = 1 ] && command -v cmd.exe >/dev/null 2>&1; then
-            win_user="$(cmd.exe /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1 || true)"
-            win_adb="$(cmd.exe /c where adb 2>/dev/null | tr -d '\r' | head -n1 || true)"
-            if [ -n "$win_adb" ] && command -v wslpath >/dev/null 2>&1; then
-              win_adb="$(wslpath "$win_adb" 2>/dev/null || printf '%s' "$win_adb")"
-            fi
-
-            if [ -z "$win_adb" ] && [ -n "$win_user" ]; then
-              candidate="/mnt/c/Users/${win_user}/AppData/Local/Android/Sdk/platform-tools/adb.exe"
-              if [ -x "$candidate" ]; then win_adb="$candidate"; fi
-            fi
-
-            if [ -z "$win_adb" ] && [ -n "$win_user" ]; then
-              cache="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-platform-tools"
-              mkdir -p "$cache"
-              if [ ! -x "$cache/platform-tools/adb.exe" ]; then
-                echo "WINDOWS_ADB_BOOTSTRAP=download"
-                zip="$cache/platform-tools.zip"
-                curl -fsSL --retry 3 --retry-delay 2 https://dl.google.com/android/repository/platform-tools-latest-windows.zip -o "$zip"
-                python3 -c 'import sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); z.extractall(sys.argv[2]); z.close()' "$zip" "$cache"
-                rm -f "$zip"
+          if [ "$is_wsl" = 1 ]; then
+            cmd="$(command -v cmd.exe || true)"
+            if [ -z "$cmd" ] && [ -x /mnt/c/Windows/System32/cmd.exe ]; then cmd=/mnt/c/Windows/System32/cmd.exe; fi
+            if [ -n "$cmd" ]; then
+              echo "WINDOWS_INTEROP=available"
+              win_user="$($cmd /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+              win_adb="$($cmd /c where adb 2>/dev/null | tr -d '\r' | head -n1 || true)"
+              if [ -n "$win_adb" ] && command -v wslpath >/dev/null 2>&1; then
+                win_adb="$(wslpath "$win_adb" 2>/dev/null || printf '%s' "$win_adb")"
               fi
-              if [ -x "$cache/platform-tools/adb.exe" ]; then
-                win_adb="$cache/platform-tools/adb.exe"
-              fi
-            fi
 
-            if [ -n "$win_adb" ] && [ -x "$win_adb" ]; then
-              selected="$win_adb"
-              backend="windows"
+              if [ -z "$win_adb" ] && [ -n "$win_user" ]; then
+                candidate="/mnt/c/Users/${win_user}/AppData/Local/Android/Sdk/platform-tools/adb.exe"
+                if [ -x "$candidate" ]; then win_adb="$candidate"; fi
+              fi
+
+              if [ -z "$win_adb" ] && [ -n "$win_user" ]; then
+                cache="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-platform-tools"
+                mkdir -p "$cache"
+                if [ ! -x "$cache/platform-tools/adb.exe" ]; then
+                  echo "WINDOWS_ADB_BOOTSTRAP=download"
+                  zip="$cache/platform-tools.zip"
+                  curl -fsSL --retry 3 --retry-delay 2 https://dl.google.com/android/repository/platform-tools-latest-windows.zip -o "$zip"
+                  python3 -c 'import sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); z.extractall(sys.argv[2]); z.close()' "$zip" "$cache"
+                  rm -f "$zip"
+                fi
+                if [ -x "$cache/platform-tools/adb.exe" ]; then win_adb="$cache/platform-tools/adb.exe"; fi
+              fi
+
+              if [ -n "$win_adb" ] && [ -x "$win_adb" ]; then selected="$win_adb"; backend="windows"; fi
             else
-              echo "WINDOWS_ADB_NOT_AVAILABLE"
+              echo "WINDOWS_INTEROP=unavailable"
+              if [ -d /mnt/c ]; then echo "WINDOWS_MOUNT=available"; else echo "WINDOWS_MOUNT=unavailable"; fi
             fi
           fi
 
-          if [ -z "$selected" ] || [ ! -x "$selected" ]; then
-            echo "ADB_NOT_FOUND"
-            exit 2
-          fi
+          if [ -z "$selected" ] || [ ! -x "$selected" ]; then echo "ADB_NOT_FOUND"; exit 2; fi
           echo "ADB=$selected" >> "$GITHUB_ENV"
           echo "ADB_BACKEND=$backend" >> "$GITHUB_ENV"
           echo "ADB_BACKEND=$backend"
@@ -96,10 +90,7 @@ jobs:
             if [ -n "$SERIAL" ]; then break; fi
             sleep 3
           done
-          if [ -z "$SERIAL" ]; then
-            echo "NO_AUTHORIZED_ANDROID_DEVICE"
-            exit 3
-          fi
+          if [ -z "$SERIAL" ]; then echo "NO_AUTHORIZED_ANDROID_DEVICE"; exit 3; fi
           echo "SERIAL=$SERIAL" >> "$GITHUB_ENV"
           echo "AUTHORIZED_ANDROID_DEVICE_FOUND"
 
@@ -110,21 +101,14 @@ jobs:
           echo "APP_PACKAGE_INFO_BEGIN"
           "$ADB" -s "$SERIAL" shell dumpsys package com.mrscrap.socialradar 2>/dev/null | tr -d '\r' | grep -E 'versionName=|versionCode=|firstInstallTime=|lastUpdateTime=' | head -n 12 || true
           echo "APP_PACKAGE_INFO_END"
-
           echo "ANDROID_RUNTIME_BEGIN"
           android_release="$($ADB -s "$SERIAL" shell getprop ro.build.version.release 2>/dev/null | tr -d '\r' || true)"
           android_sdk="$($ADB -s "$SERIAL" shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' || true)"
           echo "ANDROID_RELEASE=${android_release:-unknown}"
           echo "ANDROID_SDK=${android_sdk:-unknown}"
           echo "ANDROID_RUNTIME_END"
-
           echo "WEBVIEW_PROVIDER_BEGIN"
           "$ADB" -s "$SERIAL" shell cmd webviewupdate getCurrentWebViewPackage 2>/dev/null | tr -d '\r' || true
           echo "WEBVIEW_PROVIDER_END"
-
-          if "$ADB" -s "$SERIAL" shell pidof com.mrscrap.socialradar >/dev/null 2>&1; then
-            echo "APP_PROCESS_RUNNING"
-          else
-            echo "APP_PROCESS_NOT_RUNNING"
-          fi
+          if "$ADB" -s "$SERIAL" shell pidof com.mrscrap.socialradar >/dev/null 2>&1; then echo "APP_PROCESS_RUNNING"; else echo "APP_PROCESS_NOT_RUNNING"; fi
           echo "No cookies, credentials, DOM text, page content, or device serials are printed by this probe."
