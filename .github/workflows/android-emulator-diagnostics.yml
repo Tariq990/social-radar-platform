@@ -24,6 +24,7 @@ jobs:
 
           sdk_wsl="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk"
           sdk_win="C:\\Users\\${win_user}\\AppData\\Local\\MRSCRAP\\AndroidSdk"
+          image_wsl="${sdk_wsl}/system-images/android-36/google_apis/x86_64"
           adb_wsl="${sdk_wsl}/platform-tools/adb.exe"
           emulator_wsl="${sdk_wsl}/emulator/emulator.exe"
 
@@ -33,11 +34,21 @@ jobs:
           echo DIAG_BEGIN=1
           "$adb_wsl" version 2>&1 | tr -d '\r' | sed -E 's/[0-9]{5,}/[number]/g' | sed 's/^/ADB_VERSION=/' || true
           "$adb_wsl" devices -l 2>&1 | tr -d '\r' | sed -E 's/[0-9]{5,}/[number]/g' | sed 's/^/ADB_DEVICE=/' || true
+          "$adb_wsl" connect 127.0.0.1:5555 2>&1 | tr -d '\r' | sed 's/^/ADB_CONNECT_5555=/' || true
           "$emulator_wsl" -accel-check 2>&1 | tr -d '\r' | sed 's/^/ACCEL_CHECK=/' || true
 
           /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe \
             -NoLogo -NoProfile -NonInteractive -Command \
-            "\$sdk='${sdk_win}'; \$user=[Environment]::GetFolderPath('UserProfile'); \$log=Join-Path \$env:TEMP 'mrscrap-emulator-startup.log'; \$procs=@(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { ([string]\$_.ExecutablePath) -like (\$sdk + '\\emulator\\*') -and ((\$_.Name -eq 'emulator.exe') -or (\$_.Name -like 'qemu-system-x86_64*')) }); Write-Output ('EMULATOR_PROCESS_COUNT=' + \$procs.Count); foreach (\$p in \$procs) { \$cmd=[string]\$p.CommandLine; \$cmd=\$cmd -replace [regex]::Escape(\$user),'[user]'; \$cmd=\$cmd -replace [regex]::Escape(\$sdk),'[sdk]'; \$cmd=\$cmd -replace '\\b[0-9]{5,}\\b','[number]'; Write-Output ('EMULATOR_PROCESS=' + \$p.Name + ' CMD=' + \$cmd) }; if (Test-Path \$log) { Write-Output 'STARTUP_LOG_PRESENT=1'; Get-Content \$log -Tail 80 -ErrorAction SilentlyContinue | ForEach-Object { \$s=[string]\$_; \$s=\$s -replace [regex]::Escape(\$user),'[user]'; \$s=\$s -replace [regex]::Escape(\$sdk),'[sdk]'; \$s=\$s -replace '\\b[0-9]{5,}\\b','[number]'; Write-Output ('EMULATOR_LOG=' + \$s) } } else { Write-Output 'STARTUP_LOG_PRESENT=0' }" | tr -d '\r'
+            "\$sdk='${sdk_win}'; \$user=[Environment]::GetFolderPath('UserProfile'); \$log=Join-Path \$env:TEMP 'mrscrap-emulator-startup.log'; \$procs=@(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { ([string]\$_.ExecutablePath) -like (\$sdk + '\\emulator\\*') -and ((\$_.Name -eq 'emulator.exe') -or (\$_.Name -like 'qemu-system-x86_64*')) }); Write-Output ('EMULATOR_PROCESS_COUNT=' + \$procs.Count); foreach (\$p in \$procs) { \$gp=Get-Process -Id \$p.ProcessId -ErrorAction SilentlyContinue; \$cpu=if (\$gp) {[math]::Round([double]\$gp.CPU,2)} else {-1}; \$ws=if (\$gp) {[math]::Round([double]\$gp.WorkingSet64/1MB,1)} else {-1}; Write-Output ('EMULATOR_PROCESS=' + \$p.Name + ' CPU_SECONDS=' + \$cpu + ' WORKING_SET_MB=' + \$ws); \$ports=@(Get-NetTCPConnection -OwningProcess \$p.ProcessId -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort -Unique | Sort-Object); if (\$ports.Count -gt 0) { Write-Output ('EMULATOR_LISTEN_PORTS=' + (\$ports -join ',')) } }; if (Test-Path \$log) { Write-Output 'STARTUP_LOG_PRESENT=1'; Get-Content \$log -ErrorAction SilentlyContinue | Where-Object { \$_ -match '(?i)fatal|error|warning|failed|panic|hang|kernel|WHPX|boot|adb' } | Select-Object -Last 120 | ForEach-Object { \$s=[string]\$_; \$s=\$s -replace [regex]::Escape(\$user),'[user]'; \$s=\$s -replace [regex]::Escape(\$sdk),'[sdk]'; \$s=\$s -replace '(?i)(Sending adb public key ).*','\$1[redacted]'; \$s=\$s -replace '(?i)(androidboot\.qemu\.adb\.pubkey=).*','\$1[redacted]'; \$s=\$s -replace '\\b[0-9]{5,}\\b','[number]'; Write-Output ('EMULATOR_LOG=' + \$s) } } else { Write-Output 'STARTUP_LOG_PRESENT=0' }" | tr -d '\r'
+
+          for f in kernel-ranchu ramdisk.img system.img vendor.img userdata.img encryptionkey.img source.properties package.xml; do
+            if [ -e "${image_wsl}/${f}" ]; then
+              size="$(stat -c %s "${image_wsl}/${f}" 2>/dev/null || echo 0)"
+              echo "IMAGE_FILE=${f} SIZE=${size}"
+            else
+              echo "IMAGE_FILE=${f} MISSING=1"
+            fi
+          done
 
           avd_name="$($emulator_wsl -list-avds 2>/dev/null | tr -d '\r' | sed '/^[[:space:]]*$/d' | head -n1 || true)"
           if [ -n "$avd_name" ]; then
