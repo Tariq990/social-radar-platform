@@ -37,28 +37,34 @@ jobs:
           from pathlib import Path
           p = Path('android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java')
           s = p.read_text()
-          old = '''                        if (result.optBoolean("pending", false)) {
-                            main.postDelayed(poll[0], POLL_MS);
-                            return;
-                        }'''
-          new = '''                        if (result.optBoolean("pending", false)) {
-                            JSONObject diagnostics = result.optJSONObject("diagnostics");
-                            String waitingFor = diagnostics == null ? "" : diagnostics.optString("waitingFor", "");
-                            String phase = "source_id".equals(waitingFor) ? "source_id" : "request";
-                            Log.i(TAG, "event=graphql_pending attempt=" + attempts[0] + " phase=" + phase);
-                            main.postDelayed(poll[0], POLL_MS);
-                            return;
-                        }'''
-          count = s.count(old)
-          print(f'PENDING_BLOCK_MATCH_COUNT={count}')
-          if count != 1:
-              raise SystemExit('expected exactly one pending block')
-          s = s.replace(old, new, 1)
+          needle = 'if (result.optBoolean("pending", false)) {'
+          if s.count(needle) != 1:
+              raise SystemExit(f'expected one pending block, got {s.count(needle)}')
+          idx = s.index(needle)
+          line_start = s.rfind('\n', 0, idx) + 1
+          indent = s[line_start:idx]
+          marker = 'JSONArray posts = result.optJSONArray("posts");'
+          marker_idx = s.index(marker, idx)
+          marker_line_start = s.rfind('\n', 0, marker_idx) + 1
+          old_block = s[line_start:marker_line_start]
+          if 'main.postDelayed(poll[0], POLL_MS);' not in old_block or 'return;' not in old_block:
+              raise SystemExit('unexpected pending block shape')
+          new_block = (
+              f'{indent}if (result.optBoolean("pending", false)) {{\n'
+              f'{indent}    JSONObject diagnostics = result.optJSONObject("diagnostics");\n'
+              f'{indent}    String waitingFor = diagnostics == null ? "" : diagnostics.optString("waitingFor", "");\n'
+              f'{indent}    String phase = "source_id".equals(waitingFor) ? "source_id" : "request";\n'
+              f'{indent}    Log.i(TAG, "event=graphql_pending attempt=" + attempts[0] + " phase=" + phase);\n'
+              f'{indent}    main.postDelayed(poll[0], POLL_MS);\n'
+              f'{indent}    return;\n'
+              f'{indent}}}\n'
+          )
+          s = s[:line_start] + new_block + s[marker_line_start:]
           p.write_text(s)
           print('SAFE_PENDING_PHASE_INSTRUMENTATION=PASS')
           PY
           git diff --check
-          git diff -- android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java
+          grep -n 'event=graphql_pending' android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java
 
       - name: Commit instrumentation source only
         shell: bash
@@ -71,31 +77,29 @@ jobs:
           git commit -m 'test: log safe Facebook GraphQL pending phase'
           git push origin HEAD:test/android-headless-emulator-20260909
 
-      - name: Resolve Android build prerequisites
+      - name: Build instrumented APK incrementally
         shell: bash
         run: |
           set -euo pipefail
-          test -x "$HOME/.local/share/mrscrap-gradle/gradle-8.13/bin/gradle"
+          if [ ! -f android/capacitor.settings.gradle ]; then
+            npm install --no-audit --no-fund
+            npm run build
+            npx cap sync android
+          fi
           if [ ! -f android/local.properties ]; then
             sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/.android/sdk}}"
             sdk="$(realpath "$sdk")"
-            test -d "$sdk/platforms/android-36"
             printf 'sdk.dir=%s\n' "$sdk" > android/local.properties
           fi
-          test -f android/capacitor.settings.gradle
-          echo BUILD_PREREQUISITES=PASS
-
-      - name: Build instrumented debug APK
-        shell: bash
-        run: |
-          set -euo pipefail
-          "$HOME/.local/share/mrscrap-gradle/gradle-8.13/bin/gradle" -p android :app:assembleDebug --stacktrace
+          gradle="$HOME/.local/share/mrscrap-gradle/gradle-8.13/bin/gradle"
+          test -x "$gradle"
+          "$gradle" -p android :app:assembleDebug --stacktrace
           apk="$GITHUB_WORKSPACE/android/app/build/outputs/apk/debug/app-debug.apk"
           test -s "$apk"
           echo "APK_SIZE=$(stat -c '%s' "$apk")"
           echo INSTRUMENTED_APK_BUILD=PASS
 
-      - name: Install with Facebook app data preserved
+      - name: Install version 144 with Facebook session preserved
         shell: bash
         run: |
           set -euo pipefail
@@ -110,8 +114,7 @@ jobs:
           win_apk="/mnt/c/Users/${win_user}/AppData/Local/Temp/MR-SCRAP-emulator-test-144.apk"
           cp "$apk" "$win_apk"
           out="$($adb -s "$serial" install -r "$(wslpath -w "$win_apk")" 2>&1 | tr -d '\r')"
-          printf '%s\n' "$out"
-          printf '%s' "$out" | grep -q Success
+          printf '%s\n' "$out"; printf '%s' "$out" | grep -q Success
           version="$($adb -s "$serial" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"
           echo "INSTALLED_VERSION_CODE=$version"; test "$version" = 144
           marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
@@ -124,7 +127,7 @@ jobs:
           echo "ADB=$adb" >> "$GITHUB_ENV"; echo "SERIAL=$serial" >> "$GITHUB_ENV"; echo "WIN_USER=$win_user" >> "$GITHUB_ENV"; echo "APP_PID=$pid" >> "$GITHUB_ENV"
           echo INSTALL_AND_SESSION_PRESERVATION=PASS
 
-      - name: Click real Grab 10 through live Capacitor WebView
+      - name: Click the real Grab latest 10 button
         shell: bash
         run: |
           set -euo pipefail
@@ -140,13 +143,12 @@ jobs:
           $targets=@(Invoke-RestMethod -Uri 'http://127.0.0.1:9223/json/list' -TimeoutSec 4)
           $app=@($targets|Where-Object{$_.type -eq 'page' -and [string]$_.url -like 'https://localhost*'}|Select-Object -First 1)
           if($app.Count -eq 0){throw 'app target missing'}
-          $uri=[Uri][string]$app[0].webSocketDebuggerUrl
-          $url='ws://127.0.0.1:9223'+$uri.PathAndQuery
-          $ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds(10));$ws.ConnectAsync([Uri]$url,$cts.Token).GetAwaiter().GetResult()|Out-Null
+          $uri=[Uri][string]$app[0].webSocketDebuggerUrl; $url='ws://127.0.0.1:9223'+$uri.PathAndQuery
+          $ws=[System.Net.WebSockets.ClientWebSocket]::new(); $cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds(10)); $ws.ConnectAsync([Uri]$url,$cts.Token).GetAwaiter().GetResult()|Out-Null
           $expr=@'
           (()=>{const ar='\u0627\u062c\u0644\u0628 \u0622\u062e\u0631 10 \u0648\u062d\u0644\u0644\u0647\u0627';const b=[...document.querySelectorAll('button')].find(x=>{const t=String(x.innerText||x.textContent||'').replace(/\s+/g,' ').trim();return t.includes(ar)||/Grab latest 10 and analyze/i.test(t)});if(!b)return{clicked:false};b.click();return{clicked:true}})()
           '@
-          $payload=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true}}|ConvertTo-Json -Compress -Depth 8;$bytes=[Text.Encoding]::UTF8.GetBytes($payload);$ws.SendAsync([ArraySegment[byte]]::new($bytes),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null
+          $payload=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true}}|ConvertTo-Json -Compress -Depth 8; $bytes=[Text.Encoding]::UTF8.GetBytes($payload); $ws.SendAsync([ArraySegment[byte]]::new($bytes),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null
           $buf=New-Object byte[] 65536
           while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();$m=([Text.Encoding]::UTF8.GetString($buf,0,$r.Count)|ConvertFrom-Json);if($m.id -eq 1){$clicked=[bool]$m.result.result.value.clicked;Write-Output ('REAL_GRAB_BUTTON_CLICKED='+$(if($clicked){'1'}else{'0'}));if(!$clicked){exit 70};break}}
           try{$ws.Abort()}catch{}
@@ -160,8 +162,7 @@ jobs:
           set -euo pipefail
           sleep 34
           echo '=== SAFE FACEBOOK COLLECTOR TRACE ==='
-          $ADB -s "$SERIAL" logcat -b all -d -v threadtime 2>/dev/null | tr -d '\r' \
-            | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' | tail -n 160 || true
+          $ADB -s "$SERIAL" logcat -b all -d -v threadtime 2>/dev/null | tr -d '\r' | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' | tail -n 180 || true
           syntax_count="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -c 'Uncaught SyntaxError: Invalid or unexpected token' || true)"
           source_pending="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -c 'event=graphql_pending.*phase=source_id' || true)"
           request_pending="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -c 'event=graphql_pending.*phase=request' || true)"
@@ -171,13 +172,9 @@ jobs:
           echo "SOURCE_ID_PENDING_COUNT=$source_pending"
           echo "REQUEST_PENDING_COUNT=$request_pending"
           if [ -n "$success" ]; then
-            posts="$(printf '%s' "$success" | sed -n 's/.*posts=\([0-9][0-9]*\).*/\1/p')"
-            echo "FACEBOOK_POSTS_COLLECTED=$posts"
-            echo FACEBOOK_COLLECTION_TERMINAL=success
+            posts="$(printf '%s' "$success" | sed -n 's/.*posts=\([0-9][0-9]*\).*/\1/p')"; echo "FACEBOOK_POSTS_COLLECTED=$posts"; echo FACEBOOK_COLLECTION_TERMINAL=success
           elif [ -n "$failure" ]; then
-            code="$(printf '%s' "$failure" | sed -n 's/.*code=\([^ ]*\).*/\1/p')"
-            echo "FACEBOOK_COLLECTION_FAILURE_CODE=${code:-unknown}"
-            echo FACEBOOK_COLLECTION_TERMINAL=failure
+            code="$(printf '%s' "$failure" | sed -n 's/.*code=\([^ ]*\).*/\1/p')"; echo "FACEBOOK_COLLECTION_FAILURE_CODE=${code:-unknown}"; echo FACEBOOK_COLLECTION_TERMINAL=failure
           else
             echo FACEBOOK_COLLECTION_TERMINAL=missing
           fi
