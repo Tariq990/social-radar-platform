@@ -91,12 +91,14 @@ jobs:
           \$config = Join-Path \$avdDir 'config.ini'
           \$startupLog = Join-Path \$env:TEMP 'mrscrap-emulator-startup.log'
           \$launcher = Join-Path \$env:TEMP 'mrscrap-emulator-launch.cmd'
+          \$cleanBootMarker = Join-Path \$avdDir '.mrscrap-clean-boot-ready'
           if (-not (Test-Path \$config)) { throw 'AVD_CONFIG_MISSING' }
 
           \$expectedImage = 'system-images\\android-36\\google_apis\\x86_64\\'
           \$lines = @(Get-Content \$config -ErrorAction Stop)
           \$oldImage = [string](\$lines | Where-Object { \$_ -like 'image.sysdir.1=*' } | Select-Object -First 1)
           \$needsRebase = -not (\$oldImage -eq ('image.sysdir.1=' + \$expectedImage))
+          \$needsCleanBoot = -not (Test-Path \$cleanBootMarker)
 
           function Set-AvdKey([string]\$key, [string]\$value) {
             \$script:lines = @(\$script:lines | Where-Object { \$_ -notmatch ('^' + [regex]::Escape(\$key) + '=') })
@@ -119,6 +121,7 @@ jobs:
               Remove-Item (Join-Path \$avdDir \$name) -Force -ErrorAction SilentlyContinue
             }
             Remove-Item (Join-Path \$avdDir 'snapshots') -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item \$cleanBootMarker -Force -ErrorAction SilentlyContinue
             Write-Output 'AVD_IMAGE_REBASED=1'
           } else {
             Write-Output 'AVD_IMAGE_REBASED=0'
@@ -155,7 +158,12 @@ jobs:
             '-gpu'
             'swiftshader_indirect'
           )
-          if (\$needsRebase) { \$emuArgs += '-wipe-data' }
+          if (\$needsRebase -or \$needsCleanBoot) {
+            \$emuArgs += '-wipe-data'
+            Write-Output 'CLEAN_BOOT_WIPE=1'
+          } else {
+            Write-Output 'CLEAN_BOOT_WIPE=0'
+          }
           if ('${launch_headless}' -eq 'true') { \$emuArgs += '-no-window' }
           \$quoted = @(\$emuArgs | ForEach-Object {
             \$value = [string]\$_
@@ -203,7 +211,7 @@ jobs:
               -File "$ps1_win" | tr -d '\r'
 
             serial=''
-            for i in $(seq 1 24); do
+            for i in $(seq 1 48); do
               serial="$($adb_wsl devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
               [ -n "$serial" ] && break
               if (( i % 6 == 0 )); then
@@ -244,5 +252,8 @@ jobs:
             exit 1
           fi
 
+          clean_marker="/mnt/c/Users/${win_user}/.android/avd/${avd_name}.avd/.mrscrap-clean-boot-ready"
+          touch "$clean_marker"
+          echo CLEAN_BOOT_MARKER_READY=1
           echo EMULATOR_BOOT_READY=1
           echo PERSISTENT_EMULATOR_RUNTIME=PASS
