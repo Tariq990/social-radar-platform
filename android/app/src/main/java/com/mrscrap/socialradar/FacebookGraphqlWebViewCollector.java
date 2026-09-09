@@ -117,6 +117,10 @@ final class FacebookGraphqlWebViewCollector {
                             return;
                         }
                         if (result.optBoolean("pending", false)) {
+                            JSONObject diagnostics = result.optJSONObject("diagnostics");
+                            String waitingFor = diagnostics == null ? "" : diagnostics.optString("waitingFor", "");
+                            String phase = "source_id".equals(waitingFor) ? "source_id" : "request";
+                            Log.i(TAG, "event=graphql_pending attempt=" + attempts[0] + " phase=" + phase);
                             main.postDelayed(poll[0], POLL_MS);
                             return;
                         }
