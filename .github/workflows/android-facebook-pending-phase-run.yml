@@ -34,7 +34,7 @@ jobs:
         run: |
           set -euo pipefail
           grep -q 'event=graphql_pending attempt=' android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java
-          grep -q 'phase=source_id' android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java
+          grep -q '"source_id".equals(waitingFor)' android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java
           echo PENDING_PHASE_SOURCE_GATE=PASS
 
       - name: Setup Java 21
