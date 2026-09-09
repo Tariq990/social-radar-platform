@@ -1,0 +1,70 @@
+name: Physical Android ADB Probe
+
+on:
+  push:
+    branches:
+      - test/android-timeout-startup-20260909
+    paths:
+      - .github/workflows/adb-device-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 5
+    steps:
+      - name: Locate adb
+        shell: bash
+        run: |
+          set -euo pipefail
+          ADB="$(command -v adb || true)"
+          if [ -z "$ADB" ]; then
+            for candidate in "$ANDROID_HOME/platform-tools/adb" "$ANDROID_SDK_ROOT/platform-tools/adb" "$HOME/Android/Sdk/platform-tools/adb"; do
+              if [ -n "${candidate:-}" ] && [ -x "$candidate" ]; then ADB="$candidate"; break; fi
+            done
+          fi
+          if [ -z "$ADB" ]; then
+            echo "ADB_NOT_FOUND"
+            exit 2
+          fi
+          echo "ADB=$ADB" >> "$GITHUB_ENV"
+          "$ADB" version | head -n 2
+
+      - name: Detect authorized physical device
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$ADB" start-server >/dev/null
+          echo "ADB_DEVICE_LIST_BEGIN"
+          "$ADB" devices -l
+          echo "ADB_DEVICE_LIST_END"
+          SERIAL="$($ADB devices | awk 'NR>1 && $2=="device" {print $1; exit}')"
+          if [ -z "$SERIAL" ]; then
+            echo "NO_AUTHORIZED_ANDROID_DEVICE"
+            exit 3
+          fi
+          echo "SERIAL=$SERIAL" >> "$GITHUB_ENV"
+          echo "AUTHORIZED_ANDROID_DEVICE_FOUND"
+
+      - name: Read safe MR SCRAP runtime facts
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "APP_PACKAGE_INFO_BEGIN"
+          "$ADB" -s "$SERIAL" shell dumpsys package com.mrscrap.socialradar 2>/dev/null \
+            | grep -E 'versionName=|versionCode=|firstInstallTime=|lastUpdateTime=' \
+            | head -n 12 || true
+          echo "APP_PACKAGE_INFO_END"
+
+          echo "WEBVIEW_PROVIDER_BEGIN"
+          "$ADB" -s "$SERIAL" shell cmd webviewupdate getCurrentWebViewPackage 2>/dev/null || true
+          echo "WEBVIEW_PROVIDER_END"
+
+          echo "APP_PROCESS_BEGIN"
+          "$ADB" -s "$SERIAL" shell pidof com.mrscrap.socialradar 2>/dev/null || true
+          echo "APP_PROCESS_END"
+
+          echo "No cookies, credentials, DOM text, or page content are collected by this probe."
