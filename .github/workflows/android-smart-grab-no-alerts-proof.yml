@@ -98,8 +98,9 @@ jobs:
             if(!source)return{stage:'source_missing',before:beforeIds.length};
             const cap=globalThis.Capacitor?.Plugins?.AuthenticatedSocialSession;
             if(!cap)return{stage:'plugin_missing',before:beforeIds.length};
-            const session=await cap.getLocalSession();
-            if(!session?.facebookConnected)return{stage:'facebook_session_missing',before:beforeIds.length};
+            const session=await cap.status();
+            const facebookConnected=session?.facebookConnected===true||(session?.facebookConnected==null&&session?.connected===true);
+            if(!facebookConnected)return{stage:'facebook_session_missing',before:beforeIds.length};
             let col;try{col=await cap.collectSource({sourceId:source.id,url:source.url,platform:'facebook',limit:5})}catch(e){return{stage:'collect',before:beforeIds.length,collect:false}};
             const posts=Array.isArray(col?.posts)?col.posts.slice(0,5):[];
             if(!posts.length)return{stage:'no_posts',before:beforeIds.length,collect:true,posts:0};
