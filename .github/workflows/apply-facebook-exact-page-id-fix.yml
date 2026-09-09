@@ -18,114 +18,39 @@ jobs:
           fetch-depth: 0
       - name: Port reference get_page_id semantics exactly
         shell: bash
+        env:
+          OLD_DESKTOP_B64: ICAgIHByaXZhdGUgc3RhdGljIFN0cmluZyBkZXNrdG9wVXJsKFN0cmluZyByYXdVcmwpIHsKICAgICAgICB0cnkgewogICAgICAgICAgICBVcmkgdXJpID0gVXJpLnBhcnNlKHJhd1VybCk7CiAgICAgICAgICAgIFN0cmluZyBob3N0ID0gdXJpLmdldEhvc3QoKTsKICAgICAgICAgICAgaWYgKGhvc3QgPT0gbnVsbCB8fCBob3N0LmVxdWFsc0lnbm9yZUNhc2UoImZiLndhdGNoIikpIHJldHVybiByYXdVcmw7CiAgICAgICAgICAgIHJldHVybiB1cmkuYnVpbGRVcG9uKCkuYXV0aG9yaXR5KCJ3d3cuZmFjZWJvb2suY29tIikuYnVpbGQoKS50b1N0cmluZygpOwogICAgICAgIH0gY2F0Y2ggKEV4Y2VwdGlvbiBpZ25vcmVkKSB7CiAgICAgICAgICAgIHJldHVybiByYXdVcmw7CiAgICAgICAgfQogICAgfQo=
+          NEW_DESKTOP_B64: ICAgIHByaXZhdGUgc3RhdGljIFN0cmluZyBkZXNrdG9wVXJsKFN0cmluZyByYXdVcmwpIHsKICAgICAgICB0cnkgewogICAgICAgICAgICBVcmkgdXJpID0gVXJpLnBhcnNlKHJhd1VybCk7CiAgICAgICAgICAgIFN0cmluZyBob3N0ID0gdXJpLmdldEhvc3QoKTsKICAgICAgICAgICAgaWYgKGhvc3QgPT0gbnVsbCB8fCBob3N0LmVxdWFsc0lnbm9yZUNhc2UoImZiLndhdGNoIikpIHJldHVybiByYXdVcmw7CiAgICAgICAgICAgIFVyaS5CdWlsZGVyIGJ1aWxkZXIgPSB1cmkuYnVpbGRVcG9uKCkuYXV0aG9yaXR5KCJ3d3cuZmFjZWJvb2suY29tIik7CiAgICAgICAgICAgIGlmICh1cmkuZ2V0UXVlcnlQYXJhbWV0ZXIoImxvY2FsZSIpID09IG51bGwpIHsKICAgICAgICAgICAgICAgIGJ1aWxkZXIuYXBwZW5kUXVlcnlQYXJhbWV0ZXIoImxvY2FsZSIsICJlbl9VUyIpOwogICAgICAgICAgICB9CiAgICAgICAgICAgIHJldHVybiBidWlsZGVyLmJ1aWxkKCkudG9TdHJpbmcoKTsKICAgICAgICB9IGNhdGNoIChFeGNlcHRpb24gaWdub3JlZCkgewogICAgICAgICAgICByZXR1cm4gcmF3VXJsOwogICAgICAgIH0KICAgIH0K
+          RESOLVER_B64: ICAgICAgICAgICAgICBsZXQgc291cmNlSWQgPSAnJzsKICAgICAgICAgICAgICBsZXQgcmVzb2x2ZXJQYXR0ZXJuID0gLTE7CiAgICAgICAgICAgICAgY29uc3QgbnVtZXJpY0lkID0gKHJhdykgPT4gewogICAgICAgICAgICAgICAgY29uc3QgdmFsdWUgPSBTdHJpbmcocmF3IHx8ICcnKS50cmltKCk7CiAgICAgICAgICAgICAgICBpZiAodmFsdWUubGVuZ3RoIDwgNSB8fCB2YWx1ZS5sZW5ndGggPiAzMikgcmV0dXJuICcnOwogICAgICAgICAgICAgICAgcmV0dXJuIFsuLi52YWx1ZV0uZXZlcnkoY2ggPT4gY2ggPj0gJzAnICYmIGNoIDw9ICc5JykgPyB2YWx1ZSA6ICcnOwogICAgICAgICAgICAgIH07CiAgICAgICAgICAgICAgdHJ5IHsKICAgICAgICAgICAgICAgIGNvbnN0IHUgPSBuZXcgVVJMKHNvdXJjZVVybCk7CiAgICAgICAgICAgICAgICBjb25zdCBkaXJlY3QgPSBudW1lcmljSWQodS5zZWFyY2hQYXJhbXMuZ2V0KCdpZCcpIHx8ICcnKTsKICAgICAgICAgICAgICAgIGlmIChkaXJlY3QpIHsgc291cmNlSWQgPSBkaXJlY3Q7IHJlc29sdmVyUGF0dGVybiA9IC0yOyB9CiAgICAgICAgICAgICAgfSBjYXRjaCAoXykge30KCiAgICAgICAgICAgICAgLy8gRXhhY3Qgc2VtYW50aWMgcG9ydCBvZiBmYWNlYm9vay1ncmFwaHFsLXNjcmFwZXIvY2xpZW50LnB5OjpnZXRfcGFnZV9pZDoKICAgICAgICAgICAgICAvLyBmaXJzdCBtYXRjaCB3aW5zIGluIHRoaXMgb3JkZXIgb24gdGhlIGxvY2FsZT1lbl9VUyBGYWNlYm9vayBkb2N1bWVudC4KICAgICAgICAgICAgICBjb25zdCBodG1sID0gZG9jdW1lbnQuZG9jdW1lbnRFbGVtZW50Py5pbm5lckhUTUwgfHwgJyc7CiAgICAgICAgICAgICAgY29uc3QgZmlyc3REaWdpdHNBZnRlciA9ICh0ZXh0LCBtYXJrZXIpID0+IHsKICAgICAgICAgICAgICAgIGNvbnN0IGF0ID0gU3RyaW5nKHRleHQgfHwgJycpLmluZGV4T2YobWFya2VyKTsKICAgICAgICAgICAgICAgIGlmIChhdCA8IDApIHJldHVybiAnJzsKICAgICAgICAgICAgICAgIGxldCBwb3MgPSBhdCArIG1hcmtlci5sZW5ndGg7CiAgICAgICAgICAgICAgICBsZXQgZGlnaXRzID0gJyc7CiAgICAgICAgICAgICAgICB3aGlsZSAocG9zIDwgdGV4dC5sZW5ndGggJiYgdGV4dFtwb3NdID49ICcwJyAmJiB0ZXh0W3Bvc10gPD0gJzknKSBkaWdpdHMgKz0gdGV4dFtwb3MrK107CiAgICAgICAgICAgICAgICByZXR1cm4gbnVtZXJpY0lkKGRpZ2l0cyk7CiAgICAgICAgICAgICAgfTsKICAgICAgICAgICAgICBpZiAoIXNvdXJjZUlkKSB7CiAgICAgICAgICAgICAgICBjb25zdCBtYXJrZXJzID0gWwogICAgICAgICAgICAgICAgICAnZmI6Ly9wcm9maWxlLycsCiAgICAgICAgICAgICAgICAgICdmYjovL3BhZ2UvJywKICAgICAgICAgICAgICAgICAgJyJwYWdlSUQiOiInLAogICAgICAgICAgICAgICAgICAnImlkIjoiJywKICAgICAgICAgICAgICAgICAgJ3Byb2ZpbGVfaWQ9JwogICAgICAgICAgICAgICAgXTsKICAgICAgICAgICAgICAgIGZvciAobGV0IGkgPSAwOyBpIDwgbWFya2Vycy5sZW5ndGg7IGkrKykgewogICAgICAgICAgICAgICAgICBjb25zdCBjYW5kaWRhdGUgPSBmaXJzdERpZ2l0c0FmdGVyKGh0bWwsIG1hcmtlcnNbaV0pOwogICAgICAgICAgICAgICAgICBpZiAoY2FuZGlkYXRlKSB7IHNvdXJjZUlkID0gY2FuZGlkYXRlOyByZXNvbHZlclBhdHRlcm4gPSBpOyBicmVhazsgfQogICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgIH0KICAgICAgICAgICAgICBpZiAoIXNvdXJjZUlkKSB7CiAgICAgICAgICAgICAgICByZXR1cm4gSlNPTi5zdHJpbmdpZnkoe3BlbmRpbmc6dHJ1ZSwgZGlhZ25vc3RpY3M6e2NvbGxlY3RvcjonZ3JhcGhxbCcsIHN1cmZhY2U6aG9zdCwgd2FpdGluZ0Zvcjonc291cmNlX2lkJ319KTsKICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgY29uc3Qgc291cmNlQ2FuZGlkYXRlcyA9IFtzb3VyY2VJZF07Cgo=
+          OLD_LOG_B64: ICAgICAgICAgICAgICAgICAgICAgICAgaW50IHdpbm5pbmdDYW5kaWRhdGUgPSBkaWFnbm9zdGljcyA9PSBudWxsID8gLTEgOiBkaWFnbm9zdGljcy5vcHRJbnQoIndpbm5pbmdDYW5kaWRhdGUiLCAtMSk7CiAgICAgICAgICAgICAgICAgICAgICAgIExvZy5pKFRBRywgImV2ZW50PWdyYXBocWxfcmVzdWx0IHBvc3RzPSIgKyBwb3N0Q291bnQgKwogICAgICAgICAgICAgICAgICAgICAgICAgICAgIiBwYWdlcz0iICsgcGFnZXMgKyAiIG5vZGVzPSIgKyBub2RlcyArCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAiIGNhbmRpZGF0ZXM9IiArIGNhbmRpZGF0ZXNUcmllZCArICIgd2lubmVyPSIgKyB3aW5uaW5nQ2FuZGlkYXRlKTsK
+          NEW_LOG_B64: ICAgICAgICAgICAgICAgICAgICAgICAgaW50IHdpbm5pbmdDYW5kaWRhdGUgPSBkaWFnbm9zdGljcyA9PSBudWxsID8gLTEgOiBkaWFnbm9zdGljcy5vcHRJbnQoIndpbm5pbmdDYW5kaWRhdGUiLCAtMSk7CiAgICAgICAgICAgICAgICAgICAgICAgIGludCByZXNvbHZlclBhdHRlcm4gPSBkaWFnbm9zdGljcyA9PSBudWxsID8gLTk5IDogZGlhZ25vc3RpY3Mub3B0SW50KCJyZXNvbHZlclBhdHRlcm4iLCAtOTkpOwogICAgICAgICAgICAgICAgICAgICAgICBMb2cuaShUQUcsICJldmVudD1ncmFwaHFsX3Jlc3VsdCBwb3N0cz0iICsgcG9zdENvdW50ICsKICAgICAgICAgICAgICAgICAgICAgICAgICAgICIgcGFnZXM9IiArIHBhZ2VzICsgIiBub2Rlcz0iICsgbm9kZXMgKwogICAgICAgICAgICAgICAgICAgICAgICAgICAgIiBjYW5kaWRhdGVzPSIgKyBjYW5kaWRhdGVzVHJpZWQgKyAiIHdpbm5lcj0iICsgd2lubmluZ0NhbmRpZGF0ZSArCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAiIHJlc29sdmVyPSIgKyByZXNvbHZlclBhdHRlcm4pOwo=
         run: |
           set -euo pipefail
           git fetch origin test/android-physical-local-recovery-20260909
           git checkout -B physical-code-fix FETCH_HEAD
           python3 - <<'PY'
+          import base64, os
           from pathlib import Path
           p=Path('android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java')
           s=p.read_text(encoding='utf-8')
-
-          old='''    private static String desktopUrl(String rawUrl) {
-        try {
-            Uri uri = Uri.parse(rawUrl);
-            String host = uri.getHost();
-            if (host == null || host.equalsIgnoreCase("fb.watch")) return rawUrl;
-            return uri.buildUpon().authority("www.facebook.com").build().toString();
-        } catch (Exception ignored) {
-            return rawUrl;
-        }
-    }
-'''
-          new='''    private static String desktopUrl(String rawUrl) {
-        try {
-            Uri uri = Uri.parse(rawUrl);
-            String host = uri.getHost();
-            if (host == null || host.equalsIgnoreCase("fb.watch")) return rawUrl;
-            Uri.Builder builder = uri.buildUpon().authority("www.facebook.com");
-            if (uri.getQueryParameter("locale") == null) {
-                builder.appendQueryParameter("locale", "en_US");
-            }
-            return builder.build().toString();
-        } catch (Exception ignored) {
-            return rawUrl;
-        }
-    }
-'''
+          old=base64.b64decode(os.environ['OLD_DESKTOP_B64']).decode()
+          new=base64.b64decode(os.environ['NEW_DESKTOP_B64']).decode()
           if s.count(old)!=1: raise SystemExit('DESKTOP_URL_ANCHOR_MISMATCH')
           s=s.replace(old,new,1)
-
           start="              let sourceId = '';\n"
           end="              const cleanTitle = "
           a=s.index(start); b=s.index(end,a)
-          resolver='''              let sourceId = '';
-              let resolverPattern = -1;
-              const numericId = (raw) => {
-                const value = String(raw || '').trim();
-                if (value.length < 5 || value.length > 32) return '';
-                return [...value].every(ch => ch >= '0' && ch <= '9') ? value : '';
-              };
-              try {
-                const u = new URL(sourceUrl);
-                const direct = numericId(u.searchParams.get('id') || '');
-                if (direct) { sourceId = direct; resolverPattern = -2; }
-              } catch (_) {}
-
-              // Exact semantic port of facebook-graphql-scraper/client.py::get_page_id:
-              // first match wins in this order on the locale=en_US Facebook document.
-              const html = document.documentElement?.innerHTML || '';
-              const firstDigitsAfter = (text, marker) => {
-                const at = String(text || '').indexOf(marker);
-                if (at < 0) return '';
-                let pos = at + marker.length;
-                let digits = '';
-                while (pos < text.length && text[pos] >= '0' && text[pos] <= '9') digits += text[pos++];
-                return numericId(digits);
-              };
-              if (!sourceId) {
-                const markers = [
-                  'fb://profile/',
-                  'fb://page/',
-                  '"pageID":"',
-                  '"id":"',
-                  'profile_id='
-                ];
-                for (let i = 0; i < markers.length; i++) {
-                  const candidate = firstDigitsAfter(html, markers[i]);
-                  if (candidate) { sourceId = candidate; resolverPattern = i; break; }
-                }
-              }
-              if (!sourceId) {
-                return JSON.stringify({pending:true, diagnostics:{collector:'graphql', surface:host, waitingFor:'source_id'}});
-              }
-              const sourceCandidates = [sourceId];
-
-'''
-          s=s[:a]+resolver+s[b:]
-
+          s=s[:a]+base64.b64decode(os.environ['RESOLVER_B64']).decode()+s[b:]
           old_diag="diagnostics:{collector:'graphql', surface:host, pages, nodes, candidatesTried, winningCandidate}"
           new_diag="diagnostics:{collector:'graphql', surface:host, pages, nodes, candidatesTried, winningCandidate, resolverPattern}"
           if s.count(old_diag)!=1: raise SystemExit('DIAGNOSTIC_ANCHOR_MISMATCH')
           s=s.replace(old_diag,new_diag,1)
-
-          old_log='''                        int winningCandidate = diagnostics == null ? -1 : diagnostics.optInt("winningCandidate", -1);
-                        Log.i(TAG, "event=graphql_result posts=" + postCount +
-                            " pages=" + pages + " nodes=" + nodes +
-                            " candidates=" + candidatesTried + " winner=" + winningCandidate);
-'''
-          new_log='''                        int winningCandidate = diagnostics == null ? -1 : diagnostics.optInt("winningCandidate", -1);
-                        int resolverPattern = diagnostics == null ? -99 : diagnostics.optInt("resolverPattern", -99);
-                        Log.i(TAG, "event=graphql_result posts=" + postCount +
-                            " pages=" + pages + " nodes=" + nodes +
-                            " candidates=" + candidatesTried + " winner=" + winningCandidate +
-                            " resolver=" + resolverPattern);
-'''
+          old_log=base64.b64decode(os.environ['OLD_LOG_B64']).decode()
+          new_log=base64.b64decode(os.environ['NEW_LOG_B64']).decode()
           if s.count(old_log)!=1: raise SystemExit('LOG_ANCHOR_MISMATCH')
           s=s.replace(old_log,new_log,1)
           p.write_text(s,encoding='utf-8')
           PY
-
           git diff --check
           export JAVA_HOME=/home/tarik/actions-runnerr/_work/_tool/Java_Temurin-Hotspot_jdk/21.0.12-101.0.LTS/x64
           export PATH="$JAVA_HOME/bin:/home/tarik/actions-runnerr/_work/_tool/node/22.23.2/x64/bin:$PATH"
