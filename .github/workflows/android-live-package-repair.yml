@@ -14,7 +14,7 @@ jobs:
     runs-on: [self-hosted, Linux]
     timeout-minutes: 10
     steps:
-      - name: Restart emulator with gfxstream DMA workaround
+      - name: Restart emulator with full gfxstream DMA workaround
         shell: bash
         run: |
           set -euo pipefail
@@ -55,6 +55,7 @@ jobs:
             '-no-snapshot',
             '-gpu','swiftshader_indirect',
             '-feature','-HasSharedSlotsHostMemoryAllocator',
+            '-feature','-GLDirectMem',
             '-no-window'
           )
           Write-Output ('EMULATOR_ARGS=' + (\$args -join ' '))
