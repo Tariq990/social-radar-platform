@@ -14,7 +14,7 @@ jobs:
     runs-on: [self-hosted, Linux]
     timeout-minutes: 10
     steps:
-      - name: Reset AVD data once and boot clean
+      - name: Ensure current AVD is booted
         shell: bash
         run: |
           set -euo pipefail
@@ -24,88 +24,28 @@ jobs:
           adb="${sdk_wsl}/platform-tools/adb.exe"
           image_win="${sdk_win}\\system-images\\android-36\\google_apis\\x86_64"
           avd_dir="/mnt/c/Users/${win_user}/.android/avd/test_avd.avd"
-          data="${avd_dir}/userdata-qemu.img"
-          backup="${avd_dir}/userdata-qemu.pre-clean.img"
+          test -s "${avd_dir}/userdata-qemu.img"
+          test -s "${avd_dir}/userdata-qemu.pre-clean.img"
 
-          command -v mkfs.ext4 >/dev/null
-          test -s "$data"
-
-          echo "=== STOP ALL AVD HOLDER PROCESSES ==="
-          "$adb" kill-server >/dev/null 2>&1 || true
-          preserve_ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-preserve-userdata.ps1"
-          data_win="$(wslpath -w "$data")"
-          backup_win="$(wslpath -w "$backup")"
-          avd_win="$(wslpath -w "$avd_dir")"
-          cat > "$preserve_ps1" <<POWERSHELL
+          "$adb" start-server >/dev/null 2>&1 || true
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
+          if [ -z "$serial" ]; then
+            echo EMULATOR_RESTART_REQUIRED=1
+            ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-diagnostic-start.ps1"
+            cat > "$ps1" <<POWERSHELL
           \$ErrorActionPreference = 'Stop'
-          \$sdk = '${sdk_win}'
-          \$avd = '${avd_win}'
-          \$data = '${data_win}'
-          \$backup = '${backup_win}'
-
-          function Get-AvdHolders {
-            @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-              \$path = [string]\$_.ExecutablePath
-              \$cmd = [string]\$_.CommandLine
-              (\$path -like (\$sdk + '\\emulator\\*')) -or
-              (\$_.Name -eq 'adb.exe') -or
-              (\$cmd -like '*@test_avd*') -or
-              (\$cmd -like '*userdata-qemu.img*')
-            })
-          }
-
-          \$holders = Get-AvdHolders
-          foreach (\$p in \$holders) {
-            Write-Output ('KILL_PROCESS=' + \$p.ProcessId + ':' + \$p.Name)
-            Stop-Process -Id \$p.ProcessId -Force -ErrorAction SilentlyContinue
-          }
-
-          for (\$i = 0; \$i -lt 30; \$i++) {
-            Start-Sleep -Milliseconds 500
-            \$left = Get-AvdHolders
-            if (\$left.Count -eq 0) { break }
-            foreach (\$p in \$left) { Stop-Process -Id \$p.ProcessId -Force -ErrorAction SilentlyContinue }
-          }
-          \$left = Get-AvdHolders
-          Write-Output ('AVD_HOLDERS_REMAINING=' + \$left.Count)
-          if (\$left.Count -ne 0) {
-            foreach (\$p in \$left) { Write-Output ('REMAINING_PROCESS=' + \$p.ProcessId + ':' + \$p.Name) }
-            throw 'AVD_PROCESS_STILL_RUNNING'
-          }
-
-          if (-not (Test-Path -LiteralPath \$data)) { throw 'USERDATA_MISSING' }
-          if (Test-Path -LiteralPath \$backup) { Remove-Item -LiteralPath \$backup -Force }
-          Move-Item -LiteralPath \$data -Destination \$backup -Force
-          foreach (\$name in @('userdata-qemu.img.qcow2','cache.img','cache.img.qcow2','multiinstance.lock')) {
-            Remove-Item -LiteralPath (Join-Path \$avd \$name) -Force -Recurse -ErrorAction SilentlyContinue
-          }
-          Remove-Item -LiteralPath (Join-Path \$avd 'snapshots') -Force -Recurse -ErrorAction SilentlyContinue
-          Get-ChildItem -LiteralPath \$avd -Filter '*.lock' -Force -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
-          Write-Output 'WINDOWS_USERDATA_PRESERVED=1'
-          POWERSHELL
-          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(wslpath -w "$preserve_ps1")" | tr -d '\r'
-          test -s "$backup"
-          ls -lh "$backup"
-
-          echo "=== CREATE CLEAN 4GB EXT4 USERDATA ==="
-          truncate -s 4G "$data"
-          mkfs.ext4 -F -L userdata "$data"
-          sed -i 's/^disk.dataPartition.size=.*/disk.dataPartition.size=4096M/' "${avd_dir}/config.ini"
-          grep '^disk.dataPartition.size=' "${avd_dir}/config.ini"
-          echo AVD_DATA_RESET_READY=1
-
-          echo "=== START CLEAN EMULATOR ==="
-          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-clean-start.ps1"
-          cat > "$ps1" <<POWERSHELL
-          \$ErrorActionPreference = 'Stop'
-          \$sdk = '${sdk_win}'
-          \$emu = Join-Path \$sdk 'emulator\\emulator.exe'
+          Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+            ([string]\$_.CommandLine -like '*@test_avd*') -or
+            ([string]\$_.ExecutablePath -like '${sdk_win}\\emulator\\*')
+          } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }
+          Start-Sleep -Seconds 2
+          \$emu = '${sdk_win}\\emulator\\emulator.exe'
           \$args = @('@test_avd','-sysdir','${image_win}','-no-audio','-no-boot-anim','-no-snapshot','-gpu','swiftshader_indirect','-no-window')
           Start-Process -FilePath \$emu -ArgumentList \$args -WindowStyle Hidden
           POWERSHELL
-          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
+            /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
+          fi
 
-          "$adb" start-server >/dev/null 2>&1 || true
           serial=''
           for i in $(seq 1 48); do
             serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
@@ -117,75 +57,125 @@ jobs:
             fi
             sleep 5
           done
-          test -n "$serial" || { echo CLEAN_EMULATOR_ADB_READY=0; exit 10; }
-          echo CLEAN_EMULATOR_ADB_READY=1
+          test -n "$serial" || { echo EMULATOR_DEVICE_FOUND=0; exit 10; }
 
           boot=''
-          for i in $(seq 1 45); do
+          activity=''
+          for i in $(seq 1 60); do
             boot="$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1 || true)"
-            [ "$boot" = "1" ] && break
-            sleep 4
+            activity="$($adb -s "$serial" shell service check activity 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+            if [ "$boot" = "1" ] && echo "$activity" | grep -q 'found'; then break; fi
+            sleep 3
           done
           echo "BOOT_COMPLETED=$boot"
-          test "$boot" = "1" || { echo CLEAN_EMULATOR_BOOT_READY=0; exit 11; }
-          echo CLEAN_EMULATOR_BOOT_READY=1
+          echo "ACTIVITY_SERVICE=$activity"
+          test "$boot" = "1"
+          echo "$activity" | grep -q 'found'
+          sleep 10
 
           echo "ADB=$adb" >> "$GITHUB_ENV"
           echo "SERIAL=$serial" >> "$GITHUB_ENV"
-          echo "AVD_BACKUP=$backup" >> "$GITHUB_ENV"
+          echo "WINUSER=$win_user" >> "$GITHUB_ENV"
+          echo EMULATOR_RUNTIME_READY=1
 
-      - name: Install existing APK and launch
+      - name: Control launch and capture MR SCRAP system death
         shell: bash
         run: |
           set -u
           pkg="com.mrscrap.socialradar"
           apk="$RUNNER_WORKSPACE/SCRAP-APP/android/app/build/outputs/apk/debug/app-debug.apk"
-          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
-          win_tmp="/mnt/c/Users/${win_user}/AppData/Local/Temp/MRSCRAP/app-debug.apk"
+          win_tmp="/mnt/c/Users/${WINUSER}/AppData/Local/Temp/MRSCRAP/app-debug.apk"
+          trace="$RUNNER_TEMP/mrscrap-prelaunch-logcat.txt"
+          crashtrace="$RUNNER_TEMP/mrscrap-crash-logcat.txt"
 
-          test -s "$apk"
-          mkdir -p "$(dirname "$win_tmp")"
-          cp -f "$apk" "$win_tmp"
-
-          echo "=== INSTALL ==="
-          "$ADB" -s "$SERIAL" install "$(wslpath -w "$win_tmp")" 2>&1 | tr -d '\r'
-          install_rc=${PIPESTATUS[0]}
-          test "$install_rc" -eq 0 || exit "$install_rc"
-
-          echo "=== PACKAGE ==="
-          "$ADB" -s "$SERIAL" shell pm path "$pkg" 2>&1 | tr -d '\r'
-          "$ADB" -s "$SERIAL" shell cmd package query-activities --brief --components --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p "$pkg" 2>&1 | tr -d '\r' || true
-          "$ADB" -s "$SERIAL" shell pm enable --user 0 "$pkg" 2>&1 | tr -d '\r' || true
-
-          echo "=== SYSTEM_SERVER BEFORE ==="
-          ss_before="$($ADB -s "$SERIAL" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
-          echo "SYSTEM_SERVER_PID_BEFORE=$ss_before"
-          "$ADB" -s "$SERIAL" logcat -c >/dev/null 2>&1 || true
-
-          echo "=== LAUNCH ==="
-          set +e
-          "$ADB" -s "$SERIAL" shell am start --user 0 -W -f 0x20 -n "$pkg/.MainActivity" 2>&1 | tr -d '\r'
-          launch_rc=${PIPESTATUS[0]}
-          set -e
-          echo "LAUNCH_RC=$launch_rc"
-
-          sleep 5
-          pid="$($ADB -s "$SERIAL" shell pidof "$pkg" 2>/dev/null | tr -d '\r' || true)"
-          ss_after="$($ADB -s "$SERIAL" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
-          echo "APP_PID=$pid"
-          echo "SYSTEM_SERVER_PID_AFTER=$ss_after"
-
-          if [ "$launch_rc" -eq 0 ] && [ -n "$pid" ]; then
-            echo EMULATOR_APP_LAUNCHED=1
-            rm -f "$AVD_BACKUP"
-            echo OLD_USERDATA_BACKUP_REMOVED=1
-            exit 0
+          if ! "$ADB" -s "$SERIAL" shell pm path "$pkg" >/dev/null 2>&1; then
+            test -s "$apk"
+            mkdir -p "$(dirname "$win_tmp")"
+            cp -f "$apk" "$win_tmp"
+            "$ADB" -s "$SERIAL" install "$(wslpath -w "$win_tmp")" 2>&1 | tr -d '\r'
           fi
+          "$ADB" -s "$SERIAL" shell pm enable --user 0 "$pkg" >/dev/null 2>&1 || true
 
-          echo "=== FAILURE LOGCAT ==="
-          "$ADB" -s "$SERIAL" logcat -b all -d -v threadtime 2>/dev/null | tr -d '\r' | tail -n 900 || true
-          echo "=== DROPBOX SYSTEM SERVER ==="
-          "$ADB" -s "$SERIAL" shell dumpsys dropbox --print system_server_crash 2>/dev/null | tr -d '\r' | tail -n 400 || true
-          "$ADB" -s "$SERIAL" shell dumpsys dropbox --print system_server_wtf 2>/dev/null | tr -d '\r' | tail -n 300 || true
-          echo EMULATOR_APP_LAUNCHED=0
-          exit 20
+          echo "=== PRE-CONTROL ==="
+          ss0="$($ADB -s "$SERIAL" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
+          echo "SYSTEM_SERVER_PID_INITIAL=$ss0"
+          "$ADB" -s "$SERIAL" shell service check activity 2>&1 | tr -d '\r' || true
+
+          echo "=== CONTROL: SETTINGS ==="
+          set +e
+          "$ADB" -s "$SERIAL" shell am start --user 0 -a android.settings.SETTINGS 2>&1 | tr -d '\r'
+          control_rc=${PIPESTATUS[0]}
+          sleep 5
+          ss1="$($ADB -s "$SERIAL" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
+          settings_pid="$($ADB -s "$SERIAL" shell pidof com.android.settings 2>/dev/null | tr -d '\r' || true)"
+          set -e
+          echo "CONTROL_RC=$control_rc"
+          echo "SETTINGS_PID=$settings_pid"
+          echo "SYSTEM_SERVER_PID_AFTER_SETTINGS=$ss1"
+          if [ -z "$ss1" ] || [ "$ss0" != "$ss1" ]; then
+            echo CONTROL_SYSTEM_SERVER_STABLE=0
+            exit 31
+          fi
+          echo CONTROL_SYSTEM_SERVER_STABLE=1
+
+          echo "=== PACKAGE RESOLUTION ==="
+          "$ADB" -s "$SERIAL" shell cmd package query-activities --brief --components --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p "$pkg" 2>&1 | tr -d '\r' || true
+          "$ADB" -s "$SERIAL" shell pm path "$pkg" 2>&1 | tr -d '\r' || true
+
+          echo "=== START LIVE LOG CAPTURE ==="
+          rm -f "$trace" "$crashtrace"
+          "$ADB" -s "$SERIAL" logcat -b all -v threadtime >"$trace" 2>&1 &
+          logger_pid=$!
+          "$ADB" -s "$SERIAL" logcat -b crash -v threadtime >"$crashtrace" 2>&1 &
+          crash_logger_pid=$!
+          sleep 2
+
+          ss_before="$($ADB -s "$SERIAL" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
+          echo "SYSTEM_SERVER_PID_BEFORE_MRSCRAP=$ss_before"
+
+          echo "=== MR SCRAP LAUNCH (NO -W) ==="
+          set +e
+          "$ADB" -s "$SERIAL" shell am start --user 0 -f 0x20 -n "$pkg/.MainActivity" 2>&1 | tr -d '\r'
+          launch_rc=${PIPESTATUS[0]}
+          echo "LAUNCH_RC=$launch_rc"
+          sleep 10
+          set -e
+
+          kill "$logger_pid" "$crash_logger_pid" >/dev/null 2>&1 || true
+          wait "$logger_pid" "$crash_logger_pid" >/dev/null 2>&1 || true
+
+          "$ADB" start-server >/dev/null 2>&1 || true
+          serial2=''
+          for i in $(seq 1 15); do
+            serial2="$($ADB devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
+            [ -n "$serial2" ] && break
+            sleep 2
+          done
+          [ -n "$serial2" ] || serial2="$SERIAL"
+          ss_after="$($ADB -s "$serial2" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
+          app_pid="$($ADB -s "$serial2" shell pidof "$pkg" 2>/dev/null | tr -d '\r' || true)"
+          echo "SYSTEM_SERVER_PID_AFTER_MRSCRAP=$ss_after"
+          echo "APP_PID=$app_pid"
+
+          echo "=== CAPTURED CRITICAL LOGS ==="
+          grep -E -i 'FATAL|Fatal signal|system_server|ActivityTaskManager|ActivityManager|Watchdog|binder|IPCThreadState|mrscrap|MainActivity|tombstone|SIG[A-Z]+|abort|crash|RuntimeException|Exception' "$trace" | tail -n 700 || true
+          echo "=== CRASH BUFFER ==="
+          tail -n 300 "$crashtrace" || true
+
+          echo "=== DROPBOX TAGS ==="
+          "$ADB" -s "$serial2" shell dumpsys dropbox 2>/dev/null | tr -d '\r' | grep -E -i 'system_server|tombstone|crash|anr|wtf|last_kmsg' | tail -n 120 || true
+
+          echo "=== ROOT / TOMBSTONES PROBE ==="
+          "$ADB" -s "$serial2" root 2>&1 | tr -d '\r' || true
+          sleep 2
+          "$ADB" -s "$serial2" shell 'ls -lt /data/tombstones 2>/dev/null | head -20' 2>&1 | tr -d '\r' || true
+
+          if [ -n "$ss_before" ] && [ -n "$ss_after" ] && [ "$ss_before" != "$ss_after" ]; then
+            echo MRSCRAP_CAUSES_SYSTEM_SERVER_RESTART=1
+            exit 40
+          fi
+          if [ -z "$app_pid" ]; then
+            echo MRSCRAP_APP_LAUNCHED=0
+            exit 41
+          fi
+          echo MRSCRAP_APP_LAUNCHED=1
