@@ -1,0 +1,79 @@
+name: Android Facebook GraphQL HTTP Probe
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-facebook-graphql-http-probe.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 6
+    env:
+      PKG: com.mrscrap.socialradar
+    steps:
+      - name: Prepare live app CDP
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1;exit}')"
+          test -s "$adb"; test -n "$serial"
+          pid="$($adb -s "$serial" shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"; test -n "$pid"
+          version="$($adb -s "$serial" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"; echo "INSTALLED_VERSION_CODE=$version"; test "$version" = 143
+          marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"; printf '%s' "$marker"|grep -q facebook_connected_at; echo FACEBOOK_SESSION_METADATA=1
+          socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | grep -E "${pid}$|_${pid}($|_)" | head -n1 || true)"; [ -n "$socket" ] || socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | head -n1 || true)"; test -n "$socket"
+          $adb -s "$serial" forward --remove tcp:9223 >/dev/null 2>&1 || true; $adb -s "$serial" forward tcp:9223 "localabstract:$socket" >/dev/null
+          echo "ADB=$adb" >> "$GITHUB_ENV"; echo "SERIAL=$serial" >> "$GITHUB_ENV"; echo "WIN_USER=$win_user" >> "$GITHUB_ENV"
+
+      - name: Click real Grab 10 and probe Facebook fetch stages
+        shell: bash
+        run: |
+          set -euo pipefail
+          $ADB -s "$SERIAL" logcat -c >/dev/null 2>&1 || true
+          ps1="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-http-probe.ps1"
+          cat > "$ps1" <<'PS'
+          $ErrorActionPreference='Stop'
+          function Targets { @(Invoke-RestMethod -Uri 'http://127.0.0.1:9223/json/list' -TimeoutSec 3) }
+          function Eval([string]$raw,[string]$expr,[int]$sec=15){$uri=[Uri]$raw;$url='ws://127.0.0.1:9223'+$uri.PathAndQuery;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($sec));$ws.ConnectAsync([Uri]$url,$cts.Token).GetAwaiter().GetResult()|Out-Null;$payload=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 12;$bytes=[Text.Encoding]::UTF8.GetBytes($payload);$ws.SendAsync([ArraySegment[byte]]::new($bytes),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null;$buf=New-Object byte[] 131072;$sb=[Text.StringBuilder]::new();while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();if($r.MessageType -eq 'Close'){throw 'cdp close'};[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id -ne 1){continue};if($m.result.exceptionDetails){throw 'eval exception'};$v=$m.result.result.value;try{$ws.Abort()}catch{};return $v}}
+          $app=@(Targets|?{$_.type -eq 'page' -and [string]$_.url -like 'https://localhost*'}|select -First 1);if(!$app){throw 'app target missing'}
+          $click=@'
+          (()=>{const ar='\u0627\u062c\u0644\u0628 \u0622\u062e\u0631 10 \u0648\u062d\u0644\u0644\u0647\u0627';const b=[...document.querySelectorAll('button')].find(x=>{const t=String(x.innerText||x.textContent||'').replace(/\s+/g,' ').trim();return t.includes(ar)||/Grab latest 10 and analyze/i.test(t)});if(!b)return{clicked:false};b.click();return{clicked:true}})()
+          '@
+          $c=Eval ([string]$app[0].webSocketDebuggerUrl) $click 8;Write-Output ('REAL_GRAB_BUTTON_CLICKED='+$(if($c.clicked){'1'}else{'0'}));if(!$c.clicked){exit 60}
+          Start-Sleep -Seconds 4
+          $fb=@(Targets|?{$_.type -eq 'page' -and [string]$_.url -match 'facebook\.com'}|select -First 1);Write-Output ('FACEBOOK_TARGET_FOUND='+$(if($fb){'1'}else{'0'}));if(!$fb){exit 61}
+          $state=@'
+          (()=>{const h=String(location.hostname||'').toLowerCase(),K='__mrscrapFacebookTimelineGraphqlV1',s=window[K]||{},req=n=>{try{return typeof require==='function'?require(n):null}catch(_){return null}};return{host:h.endsWith('facebook.com'),ready:document.readyState,graph:String(s.status||'none'),code:String(s.code||''),dtsg:Boolean(req('DTSGInitialData')?.token),lsd:Boolean(req('LSD')?.token),user:Boolean(req('CurrentUserInitialData')?.USER_ID),login:Boolean(document.querySelector('form[action*="login"],input[name="email"],input[name="pass"]'))}})()
+          '@
+          $s=Eval ([string]$fb[0].webSocketDebuggerUrl) $state 8;Write-Output ('RUNTIME_HOST_FACEBOOK='+$(if($s.host){'1'}else{'0'}));Write-Output ('RUNTIME_READY='+$s.ready);Write-Output ('GRAPH_STATE='+$s.graph);Write-Output ('GRAPH_CODE='+$s.code);Write-Output ('DTSG_AVAILABLE='+$(if($s.dtsg){'1'}else{'0'}));Write-Output ('LSD_AVAILABLE='+$(if($s.lsd){'1'}else{'0'}));Write-Output ('CURRENT_USER_AVAILABLE='+$(if($s.user){'1'}else{'0'}));Write-Output ('LOGIN_FORM='+$(if($s.login){'1'}else{'0'}))
+          if(!$s.host){exit 62}
+          $probe=@'
+          (async()=>{const D='27465012859856795',F='ProfileCometTimelineFeedRefetchQuery',html=document.documentElement?.innerHTML||'',meta=document.querySelector('meta[property="al:ios:url"],meta[property="al:android:url"]')?.content||'';let id='';try{id=(new URL(location.href)).searchParams.get('id')||''}catch(_){};for(const p of [/fb:\/\/(?:profile|page)\/(\d{5,})/i,/["']profile_id["']\s*[:=]\s*["']?(\d{5,})/i,/["']pageID["']\s*:\s*["'](\d{5,})["']/i,/profile_id=(\d{5,})/i]){if(id)break;const m=String(meta).match(p)||html.match(p);if(m?.[1])id=m[1]}if(!/^\d{5,}$/.test(id))return{resolved:false};const v={afterTime:null,beforeTime:null,count:10,cursor:null,feedLocation:'TIMELINE',feedbackSource:0,focusCommentID:null,memorializedSplitTimeFilter:null,omitPinnedPost:true,postedBy:{group:'OWNER'},privacy:null,privacySelectorRenderLocation:'COMET_STREAM',referringStoryRenderLocation:null,renderLocation:'timeline',scale:1,stream_count:1,taggedInOnly:null,trackingCode:null,useDefaultActor:false,id,__relay_internal__pv__IsWorkUserrelayprovider:false,__relay_internal__pv__CometUFICommentActionLinksRewriteEnabledrelayprovider:true,__relay_internal__pv__CometUFISingleLineUFIrelayprovider:true};const body=new URLSearchParams({doc_id:D,fb_api_req_friendly_name:F,variables:JSON.stringify(v)});const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),6000),t=performance.now();try{const r=await fetch('/api/graphql/',{method:'POST',credentials:'include',headers:{'Content-Type':'application/x-www-form-urlencoded','X-FB-Friendly-Name':F},body:body.toString(),signal:ctl.signal});const ms=Math.round(performance.now()-t),ct=String(r.headers.get('content-type')||'').toLowerCase();let first=false,done=false,n=0;if(r.body?.getReader){const rd=r.body.getReader(),x=await Promise.race([rd.read(),new Promise(z=>setTimeout(()=>z(null),2500))]);if(x){first=true;done=!!x.done;n=x.value?.byteLength||0}try{await rd.cancel()}catch(_){}}clearTimeout(timer);return{resolved:true,fetch:true,status:r.status,ms,ct:ct.includes('json')?'json':ct.includes('text')?'text':ct.includes('multipart')?'multipart':'other',first,done,n}}catch(e){clearTimeout(timer);return{resolved:true,fetch:false,err:String(e?.name||'Error'),ms:Math.round(performance.now()-t)}}})()
+          '@
+          $p=Eval ([string]$fb[0].webSocketDebuggerUrl) $probe 15;Write-Output ('SOURCE_ID_RESOLVED='+$(if($p.resolved){'1'}else{'0'}));Write-Output ('BASE_FETCH_RESOLVED='+$(if($p.fetch){'1'}else{'0'}));if($p.fetch){Write-Output ('BASE_HTTP_STATUS='+$p.status);Write-Output ('BASE_FETCH_MS='+$p.ms);Write-Output ('BASE_CT='+$p.ct);Write-Output ('BASE_FIRST_CHUNK='+$(if($p.first){'1'}else{'0'}));Write-Output ('BASE_FIRST_DONE='+$(if($p.done){'1'}else{'0'}));Write-Output ('BASE_CHUNK_BYTES='+$p.n)}else{Write-Output ('BASE_ERROR='+$p.err);Write-Output ('BASE_ELAPSED_MS='+$p.ms)}
+          $enrich=@'
+          (async()=>{const req=n=>{try{return typeof require==='function'?require(n):null}catch(_){return null}},d=String(req('DTSGInitialData')?.token||''),l=String(req('LSD')?.token||''),u=String(req('CurrentUserInitialData')?.USER_ID||''),html=document.documentElement?.innerHTML||'',meta=document.querySelector('meta[property="al:ios:url"],meta[property="al:android:url"]')?.content||'';let id='';try{id=(new URL(location.href)).searchParams.get('id')||''}catch(_){};for(const p of [/fb:\/\/(?:profile|page)\/(\d{5,})/i,/["']profile_id["']\s*[:=]\s*["']?(\d{5,})/i,/["']pageID["']\s*:\s*["'](\d{5,})["']/i,/profile_id=(\d{5,})/i]){if(id)break;const m=String(meta).match(p)||html.match(p);if(m?.[1])id=m[1]}if(!(d&&l&&u&&/^\d{5,}$/.test(id)))return{tokens:!!(d&&l&&u),resolved:/^\d{5,}$/.test(id),skip:true};const F='ProfileCometTimelineFeedRefetchQuery',v={afterTime:null,beforeTime:null,count:10,cursor:null,feedLocation:'TIMELINE',feedbackSource:0,focusCommentID:null,memorializedSplitTimeFilter:null,omitPinnedPost:true,postedBy:{group:'OWNER'},privacy:null,privacySelectorRenderLocation:'COMET_STREAM',referringStoryRenderLocation:null,renderLocation:'timeline',scale:1,stream_count:1,taggedInOnly:null,trackingCode:null,useDefaultActor:false,id,__relay_internal__pv__IsWorkUserrelayprovider:false,__relay_internal__pv__CometUFICommentActionLinksRewriteEnabledrelayprovider:true,__relay_internal__pv__CometUFISingleLineUFIrelayprovider:true};const body=new URLSearchParams({av:u,__user:u,__a:'1',fb_api_caller_class:'RelayModern',fb_api_req_friendly_name:F,variables:JSON.stringify(v),doc_id:'27465012859856795',fb_dtsg:d,jazoest:'2'+[...d].map(c=>c.charCodeAt(0)).join(''),lsd:l});const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),6000),t=performance.now();try{const r=await fetch('/api/graphql/',{method:'POST',credentials:'include',headers:{'Content-Type':'application/x-www-form-urlencoded','X-FB-Friendly-Name':F,'X-FB-LSD':l},body:body.toString(),signal:ctl.signal});const ms=Math.round(performance.now()-t),ct=String(r.headers.get('content-type')||'').toLowerCase();let first=false,done=false,n=0;if(r.body?.getReader){const rd=r.body.getReader(),x=await Promise.race([rd.read(),new Promise(z=>setTimeout(()=>z(null),2500))]);if(x){first=true;done=!!x.done;n=x.value?.byteLength||0}try{await rd.cancel()}catch(_){}}clearTimeout(timer);return{tokens:true,resolved:true,fetch:true,status:r.status,ms,ct:ct.includes('json')?'json':ct.includes('text')?'text':ct.includes('multipart')?'multipart':'other',first,done,n}}catch(e){clearTimeout(timer);return{tokens:true,resolved:true,fetch:false,err:String(e?.name||'Error'),ms:Math.round(performance.now()-t)}}})()
+          '@
+          $e=Eval ([string]$fb[0].webSocketDebuggerUrl) $enrich 15;Write-Output ('ENRICHED_TOKENS='+$(if($e.tokens){'1'}else{'0'}));Write-Output ('ENRICHED_FETCH_RESOLVED='+$(if($e.fetch){'1'}else{'0'}));if($e.fetch){Write-Output ('ENRICHED_HTTP_STATUS='+$e.status);Write-Output ('ENRICHED_FETCH_MS='+$e.ms);Write-Output ('ENRICHED_CT='+$e.ct);Write-Output ('ENRICHED_FIRST_CHUNK='+$(if($e.first){'1'}else{'0'}));Write-Output ('ENRICHED_FIRST_DONE='+$(if($e.done){'1'}else{'0'}));Write-Output ('ENRICHED_CHUNK_BYTES='+$e.n)}else{Write-Output ('ENRICHED_ERROR='+$e.err);Write-Output ('ENRICHED_ELAPSED_MS='+$e.ms)}
+          Write-Output GRAPHQL_HTTP_PROBE=PASS
+          PS
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
+
+      - name: Final safe session check
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          marker="$($ADB -s "$SERIAL" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"; if printf '%s' "$marker"|grep -q facebook_connected_at;then echo FACEBOOK_SESSION_METADATA_FINAL=1;else echo FACEBOOK_SESSION_METADATA_FINAL=0;fi
+          echo "INVALID_JS_SYNTAX_COUNT=$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -c 'Uncaught SyntaxError: Invalid or unexpected token' || true)"
+          $ADB -s "$SERIAL" forward --remove tcp:9223 >/dev/null 2>&1 || true; rm -f "/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-http-probe.ps1" 2>/dev/null || true
