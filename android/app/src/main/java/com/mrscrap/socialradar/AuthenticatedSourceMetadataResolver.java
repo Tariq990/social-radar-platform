@@ -37,6 +37,9 @@ final class AuthenticatedSourceMetadataResolver {
             int[] attempts = new int[] { 0 };
             WebView webView = new WebView(context.getApplicationContext());
             WebSettings settings = webView.getSettings();
+            // Facebook mobile navigation aborts with the Android WebView UA on the
+            // physical test device. Desktop UA keeps metadata navigation in this WebView.
+            settings.setUserAgentString("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
             settings.setJavaScriptEnabled(true);
             settings.setDomStorageEnabled(true);
             settings.setDatabaseEnabled(true);
