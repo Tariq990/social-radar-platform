@@ -20,3 +20,9 @@ replace_once(
     """  assert.match(plugin, /MRSCRAP_FLOW/);\n  assert.match(plugin, /event=collect_source_enter/);\n});\n""",
     """  assert.match(plugin, /MRSCRAP_FLOW/);\n  assert.match(plugin, /event=collect_source_enter/);\n  assert.match(plugin, /FacebookGraphqlWebViewCollector\\.collect/);\n\n  const graphqlCollector = read('android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java');\n  assert.match(graphqlCollector, /ProfileCometTimelineFeedRefetchQuery/);\n  assert.match(graphqlCollector, /27465012859856795/);\n  assert.match(graphqlCollector, /\\/api\\/graphql\\//);\n  assert.match(graphqlCollector, /timeline_list_feed_units/);\n  assert.match(graphqlCollector, /credentials:'include'/);\n  assert.doesNotMatch(graphqlCollector, /getCookie\\(/);\n});\n""",
 )
+
+replace_once(
+    "server/tests/architectureRegression.test.ts",
+    "assert.match(plugin, /AuthenticatedWebCollector\\.collect\\(foregroundContext\\(\\)/);",
+    "assert.match(plugin, /FacebookGraphqlWebViewCollector\\.collect\\(foregroundContext\\(\\)/);",
+)
