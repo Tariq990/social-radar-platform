@@ -1,0 +1,66 @@
+name: Fix Android Java Text Block Escapes
+
+on:
+  push:
+    branches:
+      - test/android-headless-emulator-20260909
+    paths:
+      - .github/workflows/android-fix-java-textblock-escapes.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 5
+    steps:
+      - name: Checkout emulator test branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fix Java text block escaping deterministically
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java')
+          text = path.read_text(encoding='utf-8')
+
+          replacements = [
+              (r'''/fb:\/\/(?:profile|page)\/(\d{5,})/i,''', r'''/fb:\\/\\/(?:profile|page)\\/(\\d{5,})/i,'''),
+              (r'''/["']profile_id["']\s*[:=]\s*["']?(\d{5,})/i,''', r'''/["']profile_id["']\\s*[:=]\\s*["']?(\\d{5,})/i,'''),
+              (r'''/["']pageID["']\s*:\s*["'](\d{5,})["']/i,''', r'''/["']pageID["']\\s*:\\s*["'](\\d{5,})["']/i,'''),
+              (r'''/profile_id=(\d{5,})/i''', r'''/profile_id=(\\d{5,})/i'''),
+              (r'''/^\d{5,}$/.test(sourceId)''', r'''/^\\d{5,}$/.test(sourceId)'''),
+              (r'''replace(/\s*[|·-]\s*Facebook\s*$/i, '')''', r'''replace(/\\s*[|·-]\\s*Facebook\\s*$/i, '')'''),
+          ]
+
+          changed = 0
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'EXPECTED_ONE_MATCH got={count} pattern_index={changed + 1}')
+              text = text.replace(old, new, 1)
+              changed += 1
+
+          path.write_text(text, encoding='utf-8')
+          print(f'JAVA_TEXTBLOCK_ESCAPE_FIXES={changed}')
+          PY
+
+          git diff --check
+          git diff -- android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java
+
+      - name: Commit source fix on test branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Tariq Ziad"
+          git config user.email "102293222+Tariq990@users.noreply.github.com"
+          git add android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java
+          git diff --cached --check
+          git commit -m "fix: escape JavaScript regexes in Android collector"
+          git push origin HEAD:test/android-headless-emulator-20260909
