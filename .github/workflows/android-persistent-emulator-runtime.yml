@@ -18,9 +18,9 @@ permissions:
 jobs:
   runtime:
     runs-on: [self-hosted, Linux]
-    timeout-minutes: 12
+    timeout-minutes: 15
     steps:
-      - name: Create or reuse persistent AVD and start it on Windows
+      - name: Repair persistent AVD and start Android 36 on Windows
         shell: bash
         run: |
           set -euo pipefail
@@ -31,6 +31,8 @@ jobs:
           android_wsl="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidCLI/android.exe"
           sdk_wsl="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk"
           sdk_win="C:\\Users\\${win_user}\\AppData\\Local\\MRSCRAP\\AndroidSdk"
+          image_rel='system-images\\android-36\\google_apis\\x86_64\\'
+          image_win="${sdk_win}\\system-images\\android-36\\google_apis\\x86_64"
           emulator_wsl="${sdk_wsl}/emulator/emulator.exe"
           adb_wsl="${sdk_wsl}/platform-tools/adb.exe"
           image_wsl="${sdk_wsl}/system-images/android-36/google_apis/x86_64/system.img"
@@ -41,43 +43,33 @@ jobs:
           test -s "$emulator_wsl"
           test -s "$adb_wsl"
           test -s "$image_wsl"
-
-          export ANDROID_SDK_ROOT="$sdk_win"
-          export ANDROID_HOME="$sdk_win"
-
           echo RUNTIME_SDK_READY=1
 
           avds="$($emulator_wsl -list-avds 2>/dev/null | tr -d '\r' | sed '/^[[:space:]]*$/d' || true)"
           avd_name="$(printf '%s\n' "$avds" | head -n1)"
-
           if [ -z "$avd_name" ]; then
             echo AVD_CREATE_REQUIRED=1
             set +e
             "$android_wsl" --no-metrics --sdk="$sdk_win" emulator create medium_phone 2>&1 |
               tr -d '\r' |
               sed -E 's/([0-9]{5,})/[number]/g'
-            create_rc=("${PIPESTATUS[@]}")
+            rc=("${PIPESTATUS[@]}")
             set -e
-            echo "AVD_CREATE_RC=${create_rc[0]}"
+            echo "AVD_CREATE_RC=${rc[0]}"
+            avds="$($emulator_wsl -list-avds 2>/dev/null | tr -d '\r' | sed '/^[[:space:]]*$/d' || true)"
+            avd_name="$(printf '%s\n' "$avds" | head -n1)"
           else
             echo AVD_REUSED=1
           fi
-
-          avds="$($emulator_wsl -list-avds 2>/dev/null | tr -d '\r' | sed '/^[[:space:]]*$/d' || true)"
-          avd_name="$(printf '%s\n' "$avds" | head -n1)"
-          if [ -z "$avd_name" ]; then
-            echo AVD_VERIFY=FAIL
-            exit 1
-          fi
+          test -n "$avd_name"
           echo AVD_READY=1
 
           existing="$($adb_wsl devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
           if [ -n "$existing" ]; then
             echo EMULATOR_REUSED=1
-            echo EMULATOR_SERIAL_PRESENT=1
+            serial="$existing"
           else
             echo EMULATOR_START_REQUIRED=1
-
             launch_headless=true
             if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.headless }}" != "true" ]; then
               launch_headless=false
@@ -86,9 +78,47 @@ jobs:
             ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-start-emulator.ps1"
             cat > "$ps1" <<POWERSHELL
           \$ErrorActionPreference = 'Stop'
-          \$env:ANDROID_SDK_ROOT = '${sdk_win}'
-          \$env:ANDROID_HOME = '${sdk_win}'
-          \$emulator = '${sdk_win}\\emulator\\emulator.exe'
+          \$sdk = '${sdk_win}'
+          \$emulator = Join-Path \$sdk 'emulator\\emulator.exe'
+          \$imageDir = '${image_win}'
+          \$avdName = '${avd_name}'
+          \$avdDir = Join-Path \$env:USERPROFILE ('.android\\avd\\' + \$avdName + '.avd')
+          \$config = Join-Path \$avdDir 'config.ini'
+          if (-not (Test-Path \$config)) { throw 'AVD_CONFIG_MISSING' }
+
+          \$expectedImage = 'system-images\\android-36\\google_apis\\x86_64\\'
+          \$lines = @(Get-Content \$config -ErrorAction Stop)
+          \$oldImage = [string](\$lines | Where-Object { \$_ -like 'image.sysdir.1=*' } | Select-Object -First 1)
+          \$needsRebase = -not (\$oldImage -eq ('image.sysdir.1=' + \$expectedImage))
+
+          function Set-AvdKey([string]\$key, [string]\$value) {
+            \$script:lines = @(\$script:lines | Where-Object { \$_ -notmatch ('^' + [regex]::Escape(\$key) + '=') })
+            \$script:lines += (\$key + '=' + \$value)
+          }
+
+          Set-AvdKey 'image.sysdir.1' \$expectedImage
+          Set-AvdKey 'target' 'android-36'
+          Set-AvdKey 'abi.type' 'x86_64'
+          Set-AvdKey 'hw.cpu.arch' 'x86_64'
+          Set-AvdKey 'tag.id' 'google_apis'
+          Set-AvdKey 'tag.display' 'Google APIs'
+          Set-AvdKey 'hw.ramSize' '3072'
+          Set-AvdKey 'hw.gpu.enabled' 'yes'
+          Set-AvdKey 'hw.gpu.mode' 'auto'
+          Set-Content -Path \$config -Value \$lines -Encoding ASCII
+
+          if (\$needsRebase) {
+            foreach (\$name in @('userdata-qemu.img','userdata-qemu.img.qcow2','cache.img','cache.img.qcow2','hardware-qemu.ini')) {
+              Remove-Item (Join-Path \$avdDir \$name) -Force -ErrorAction SilentlyContinue
+            }
+            Remove-Item (Join-Path \$avdDir 'snapshots') -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Output 'AVD_IMAGE_REBASED=1'
+          } else {
+            Write-Output 'AVD_IMAGE_REBASED=0'
+          }
+
+          \$env:ANDROID_SDK_ROOT = \$sdk
+          \$env:ANDROID_HOME = \$sdk
           \$stdout = Join-Path \$env:LOCALAPPDATA 'Temp\\mrscrap-emulator.stdout.log'
           \$stderr = Join-Path \$env:LOCALAPPDATA 'Temp\\mrscrap-emulator.stderr.log'
           Remove-Item \$stdout,\$stderr -Force -ErrorAction SilentlyContinue
@@ -98,7 +128,8 @@ jobs:
             ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }
           Start-Sleep -Seconds 1
 
-          \$args = @('@${avd_name}','-no-audio','-no-boot-anim','-no-snapshot','-gpu','swiftshader_indirect','-verbose')
+          \$args = @('@' + \$avdName,'-sysdir',\$imageDir,'-no-audio','-no-boot-anim','-no-snapshot','-gpu','swiftshader_indirect','-verbose')
+          if (\$needsRebase) { \$args += '-wipe-data' }
           if ('${launch_headless}' -eq 'true') { \$args += '-no-window' }
           \$windowStyle = if ('${launch_headless}' -eq 'true') { 'Hidden' } else { 'Normal' }
           \$p = Start-Process -FilePath \$emulator -ArgumentList \$args -WindowStyle \$windowStyle -RedirectStandardOutput \$stdout -RedirectStandardError \$stderr -PassThru
@@ -110,28 +141,27 @@ jobs:
             /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe \
               -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
               -File "$ps1_win" | tr -d '\r'
+
+            "$adb_wsl" start-server >/dev/null 2>&1 || true
+            serial=''
+            for i in $(seq 1 60); do
+              serial="$($adb_wsl devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
+              [ -n "$serial" ] && break
+              sleep 5
+            done
           fi
 
-          "$adb_wsl" start-server >/dev/null 2>&1 || true
-
-          serial=''
-          for i in $(seq 1 48); do
-            serial="$($adb_wsl devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
-            if [ -n "$serial" ]; then break; fi
-            sleep 5
-          done
-
-          if [ -z "$serial" ]; then
+          if [ -z "${serial:-}" ]; then
             echo EMULATOR_ADB_READY=0
             "$emulator_wsl" -accel-check 2>&1 | tr -d '\r' | sed 's/^/ACCEL_CHECK=/' || true
             echo EMULATOR_STDERR_TAIL_BEGIN
             if [ -f "$stderr_wsl" ]; then
-              tail -n 120 "$stderr_wsl" | tr -d '\r' | sed "s#${win_user}#[USER]#g" | sed -E 's/([0-9]{5,})/[number]/g'
+              tail -n 140 "$stderr_wsl" | tr -d '\r' | sed "s#${win_user}#[USER]#g" | sed -E 's/([0-9]{5,})/[number]/g'
             fi
             echo EMULATOR_STDERR_TAIL_END
             echo EMULATOR_STDOUT_TAIL_BEGIN
             if [ -f "$stdout_wsl" ]; then
-              tail -n 120 "$stdout_wsl" | tr -d '\r' | sed "s#${win_user}#[USER]#g" | sed -E 's/([0-9]{5,})/[number]/g'
+              tail -n 140 "$stdout_wsl" | tr -d '\r' | sed "s#${win_user}#[USER]#g" | sed -E 's/([0-9]{5,})/[number]/g'
             fi
             echo EMULATOR_STDOUT_TAIL_END
             exit 1
@@ -139,12 +169,11 @@ jobs:
           echo EMULATOR_ADB_READY=1
 
           boot=''
-          for i in $(seq 1 60); do
+          for i in $(seq 1 72); do
             boot="$($adb_wsl -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1 || true)"
-            if [ "$boot" = '1' ]; then break; fi
+            [ "$boot" = '1' ] && break
             sleep 5
           done
-
           if [ "$boot" != '1' ]; then
             echo EMULATOR_BOOT_READY=0
             exit 1
