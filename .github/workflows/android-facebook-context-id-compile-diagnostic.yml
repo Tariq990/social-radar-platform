@@ -1,0 +1,42 @@
+name: Facebook Context ID Compile Diagnostic
+
+on:
+  push:
+    branches: [test/android-physical-fix-20260909]
+    paths: [.github/workflows/android-facebook-context-id-compile-diagnostic.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply helper and expose Java source compiler diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+          git show "$GITHUB_SHA:scripts/apply-facebook-context-id-sweep.py" > /tmp/apply-facebook-context-id-sweep.py
+          git fetch origin test/android-physical-local-recovery-20260909
+          git checkout -B context-id-compile FETCH_HEAD
+          python3 /tmp/apply-facebook-context-id-sweep.py
+          export JAVA_HOME=/home/tarik/actions-runnerr/_work/_tool/Java_Temurin-Hotspot_jdk/21.0.12-101.0.LTS/x64
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, subprocess, tempfile
+          root=Path('.')
+          source=(root/'android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java').read_text()
+          block=source.split('return """',1)[1].split('"""',1)[0]
+          java=str(Path(os.environ['JAVA_HOME'])/'bin/java')
+          with tempfile.TemporaryDirectory() as d:
+              probe=Path(d)/'ScriptProbe.java'
+              probe.write_text('public class ScriptProbe { public static void main(String[] args) { System.out.print("""'+block+'"""); }}')
+              result=subprocess.run([java,str(probe)],text=True,capture_output=True)
+              print('JAVA_PROBE_EXIT='+str(result.returncode))
+              print(result.stderr[-5000:])
+              raise SystemExit(result.returncode)
+          PY
