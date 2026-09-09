@@ -1,0 +1,74 @@
+name: Fix Facebook GraphQL newline escaping
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-fix-facebook-graphql-newline.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: test/android-headless-emulator-20260909
+          fetch-depth: 0
+
+      - name: Apply exact Java text-block escaping fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java')
+          s = p.read_text()
+          old = "for (const line of String(text || '').split('\\n')) {"
+          new = "for (const line of String(text || '').split('\\\\n')) {"
+          count = s.count(old)
+          print(f'OLD_MATCH_COUNT={count}')
+          if count != 1:
+              raise SystemExit('expected exactly one vulnerable newline split')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          if old in s:
+              raise SystemExit('old newline escape still present')
+          if new not in s:
+              raise SystemExit('fixed newline escape missing')
+          print('FACEBOOK_GRAPHQL_NEWLINE_SOURCE_FIX=PASS')
+          PY
+
+          git diff --check
+          git diff -- android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java
+
+      - name: Verify intended Java source representation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          s = Path('android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java').read_text()
+          expected = "for (const line of String(text || '').split('\\\\n')) {"
+          print('FIXED_SOURCE_MATCH_COUNT=' + str(s.count(expected)))
+          assert s.count(expected) == 1
+          # Java source \\n compiles to JS source \n inside the quoted JS string, which is syntactically valid.
+          js = "for (const line of String(text || '').split('\\n')) {}"
+          Path('/tmp/mrscrap-js-check.js').write_text("new Function(" + repr(js) + ");\n")
+          PY
+          node /tmp/mrscrap-js-check.js
+          echo GENERATED_JS_SYNTAX_CHECK=PASS
+
+      - name: Commit exact source fix only
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java
+          test "$(git diff --cached --name-only | wc -l)" -eq 1
+          git commit -m 'fix: escape Facebook GraphQL payload newline in WebView JS'
+          git push origin HEAD:test/android-headless-emulator-20260909
