@@ -142,11 +142,20 @@ final class FacebookGraphqlWebViewCollector {
                         int nodes = diagnostics == null ? 0 : diagnostics.optInt("nodes", 0);
                         int candidatesTried = diagnostics == null ? 0 : diagnostics.optInt("candidatesTried", 0);
                         int winningCandidate = diagnostics == null ? -1 : diagnostics.optInt("winningCandidate", -1);
-                        int resolverPattern = diagnostics == null ? -99 : diagnostics.optInt("resolverPattern", -99);
+                        int queryErrors = diagnostics == null ? 0 : diagnostics.optInt("queryErrors", 0);
+                        int winningResolverPattern = diagnostics == null ? -99 : diagnostics.optInt("winningResolverPattern", -99);
+                        int winningResolverOccurrence = diagnostics == null ? -1 : diagnostics.optInt("winningResolverOccurrence", -1);
+                        int p0 = diagnostics == null ? 0 : diagnostics.optInt("p0", 0);
+                        int p1 = diagnostics == null ? 0 : diagnostics.optInt("p1", 0);
+                        int p2 = diagnostics == null ? 0 : diagnostics.optInt("p2", 0);
+                        int p3 = diagnostics == null ? 0 : diagnostics.optInt("p3", 0);
+                        int p4 = diagnostics == null ? 0 : diagnostics.optInt("p4", 0);
                         Log.i(TAG, "event=graphql_result posts=" + postCount +
                             " pages=" + pages + " nodes=" + nodes +
-                            " candidates=" + candidatesTried + " winner=" + winningCandidate +
-                            " resolver=" + resolverPattern);
+                            " candidates=" + candidatesTried + " qerr=" + queryErrors +
+                            " winner=" + winningCandidate + " winp=" + winningResolverPattern +
+                            " wino=" + winningResolverOccurrence + " p0=" + p0 + " p1=" + p1 +
+                            " p2=" + p2 + " p3=" + p3 + " p4=" + p4);
                         if (postCount <= 0) {
                             finishError(main, timeout[0], webView, finished, callback,
                                 "GRAPHQL_NO_POSTS|pages=" + pages + "|nodes=" + nodes);
@@ -283,47 +292,61 @@ final class FacebookGraphqlWebViewCollector {
               } catch (_) {}
 
               let sourceId = '';
-              let resolverPattern = -1;
+              let resolverPattern = -99;
+              let resolverOccurrence = -1;
+              const sourceCandidates = [];
+              const sourceCandidatePatterns = [];
+              const sourceCandidateOccurrences = [];
               const numericId = (raw) => {
                 const value = String(raw || '').trim();
                 if (value.length < 5 || value.length > 32) return '';
                 return [...value].every(ch => ch >= '0' && ch <= '9') ? value : '';
               };
+              const addCandidate = (raw, pattern, occurrence) => {
+                const value = numericId(raw);
+                if (!value || sourceCandidates.includes(value) || sourceCandidates.length >= 24) return;
+                sourceCandidates.push(value);
+                sourceCandidatePatterns.push(pattern);
+                sourceCandidateOccurrences.push(occurrence);
+              };
               try {
                 const u = new URL(sourceUrl);
-                const direct = numericId(u.searchParams.get('id') || '');
-                if (direct) { sourceId = direct; resolverPattern = -2; }
+                addCandidate(u.searchParams.get('id') || '', -2, 0);
               } catch (_) {}
 
-              // Semantic port of facebook-graphql-scraper/client.py::get_page_id:
-              // first matching pattern wins on the locale=en_US Facebook document.
               const html = document.documentElement?.innerHTML || '';
-              const firstDigitsAfter = (text, marker) => {
-                const value = String(text || '');
-                const at = value.indexOf(marker);
-                if (at < 0) return '';
-                let pos = at + marker.length;
-                let digits = '';
-                while (pos < value.length && value[pos] >= '0' && value[pos] <= '9') digits += value[pos++];
-                return numericId(digits);
-              };
-              if (!sourceId) {
-                const markers = [
-                  'fb://profile/',
-                  'fb://page/',
-                  '"pageID":"',
-                  '"id":"',
-                  'profile_id='
-                ];
-                for (let i = 0; i < markers.length; i++) {
-                  const candidate = firstDigitsAfter(html, markers[i]);
-                  if (candidate) { sourceId = candidate; resolverPattern = i; break; }
+              const scanAll = (marker, pattern, maxHits) => {
+                let from = 0, occurrence = 0;
+                while (occurrence < maxHits && sourceCandidates.length < 24) {
+                  const at = html.indexOf(marker, from);
+                  if (at < 0) break;
+                  let pos = at + marker.length;
+                  let digits = '';
+                  while (pos < html.length && html[pos] >= '0' && html[pos] <= '9') digits += html[pos++];
+                  addCandidate(digits, pattern, occurrence);
+                  occurrence++;
+                  from = at + marker.length;
                 }
-              }
-              if (!sourceId) {
+              };
+
+              // Strong, source-specific markers first. Generic JSON id is last because an
+              // authenticated Facebook document contains many unrelated object IDs.
+              scanAll('fb://profile/', 0, 6);
+              scanAll('fb://page/', 1, 6);
+              scanAll('"pageID":"', 2, 6);
+              scanAll('profile_id=', 4, 8);
+              scanAll('"id":"', 3, 20);
+
+              if (sourceCandidates.length === 0) {
                 return JSON.stringify({pending:true, diagnostics:{collector:'graphql', surface:host, waitingFor:'source_id'}});
               }
-              const sourceCandidates = [sourceId];
+              sourceId = sourceCandidates[0];
+              resolverPattern = sourceCandidatePatterns[0];
+              resolverOccurrence = sourceCandidateOccurrences[0];
+              const candidatePatternCounts = [0,0,0,0,0];
+              for (const pattern of sourceCandidatePatterns) {
+                if (pattern >= 0 && pattern <= 4) candidatePatternCounts[pattern]++;
+              }
 
               const cleanTitle = (raw) => String(raw || '').replace(/\\s*[|·-]\\s*Facebook\\s*$/i, '').trim();
               const title = cleanTitle(
@@ -464,11 +487,13 @@ final class FacebookGraphqlWebViewCollector {
               (async () => {
                 const posts = [], seen = new Set();
                 let pages = 0, nodes = 0, candidatesTried = 0, queryErrors = 0;
-                let winningSourceId = '', winningCandidate = -1;
-                const maxCandidates = Math.min(10, sourceCandidates.length);
+                let winningSourceId = '', winningCandidate = -1, winningResolverPattern = -99, winningResolverOccurrence = -1;
+                const maxCandidates = Math.min(24, sourceCandidates.length);
                 candidateLoop:
                 for (let candidateIndex = 0; candidateIndex < maxCandidates; candidateIndex++) {
                   sourceId = sourceCandidates[candidateIndex];
+                  resolverPattern = sourceCandidatePatterns[candidateIndex];
+                  resolverOccurrence = sourceCandidateOccurrences[candidateIndex];
                   candidatesTried++;
                   let cursor = null;
                   for (let page = 0; page < 4 && posts.length < LIMIT; page++) {
@@ -494,6 +519,8 @@ final class FacebookGraphqlWebViewCollector {
                     if (!winningSourceId) {
                       winningSourceId = sourceId;
                       winningCandidate = candidateIndex;
+                      winningResolverPattern = resolverPattern;
+                      winningResolverOccurrence = resolverOccurrence;
                     }
                     for (const post of parsed.posts) {
                       if (seen.has(post.externalPostId)) continue;
@@ -515,7 +542,7 @@ final class FacebookGraphqlWebViewCollector {
                   result:{
                     source:{platform:'facebook', externalId:stableExternalId, url:sourceUrl, displayName:title || (handle ? '@'+handle : 'Facebook'), handle, avatarUrl:avatar, visibilityType:'authenticated'},
                     posts:posts.slice(0, LIMIT),
-                    diagnostics:{collector:'graphql', surface:host, pages, nodes, candidatesTried, winningCandidate, resolverPattern}
+                    diagnostics:{collector:'graphql', surface:host, pages, nodes, candidatesTried, queryErrors, winningCandidate, winningResolverPattern, winningResolverOccurrence, p0:candidatePatternCounts[0], p1:candidatePatternCounts[1], p2:candidatePatternCounts[2], p3:candidatePatternCounts[3], p4:candidatePatternCounts[4]}
                   }
                 };
               })().catch((error) => {
