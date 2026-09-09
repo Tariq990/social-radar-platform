@@ -10,174 +10,73 @@ permissions:
   contents: read
 
 jobs:
-  repair-live-package:
+  diagnose-gfxstream:
     runs-on: [self-hosted, Linux]
-    timeout-minutes: 12
+    timeout-minutes: 8
     steps:
-      - name: Configure pinned emulator feature overrides
-        shell: bash
-        run: |
-          set -euo pipefail
-          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
-          sdk_wsl="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk"
-          sdk_win="C:\\Users\\${win_user}\\AppData\\Local\\MRSCRAP\\AndroidSdk"
-          emu="${sdk_wsl}/emulator/emulator.exe"
-          adb="${sdk_wsl}/platform-tools/adb.exe"
-          avd_dir="/mnt/c/Users/${win_user}/.android/avd/test_avd.avd"
-          test -x "$emu" && test -x "$adb" && test -s "${avd_dir}/userdata-qemu.img"
-          version="$(timeout 30s "$emu" -version 2>&1 | tr -d '\r' | head -n 6 || true)"
-          printf '%s\n' "$version"
-          printf '%s\n' "$version" | grep -q '36\.4\.9'
-
-          "$adb" kill-server >/dev/null 2>&1 || true
-          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/MRSCRAP/configure-emulator-features.ps1"
-          mkdir -p "$(dirname "$ps1")"
-          cat > "$ps1" <<POWERSHELL
-          \$ErrorActionPreference = 'Stop'
-          \$sdk = '${sdk_win}'
-          @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-            \$cmd = [string]\$_.CommandLine
-            \$path = [string]\$_.ExecutablePath
-            (\$cmd -like '*@test_avd*') -or (\$path -like (\$sdk + '\\emulator\\*')) -or
-            (\$_.Name -in @('emulator.exe','qemu-system-x86_64.exe','qemu-system-x86_64-headless.exe'))
-          }) | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }
-          Start-Sleep -Seconds 3
-          \$androidDir = Join-Path \$env:USERPROFILE '.android'
-          New-Item -ItemType Directory -Force -Path \$androidDir | Out-Null
-          \$features = Join-Path \$androidDir 'advancedFeatures.ini'
-          \$backup = Join-Path \$androidDir 'advancedFeatures.ini.mrscrap-pre-dma-fix'
-          if ((Test-Path \$features) -and -not (Test-Path \$backup)) { Copy-Item \$features \$backup }
-          \$lines = @(); if (Test-Path \$features) { \$lines = @(Get-Content \$features) }
-          \$lines = @(\$lines | Where-Object { \$_ -notmatch '^\s*(GLDirectMem|HasSharedSlotsHostMemoryAllocator|GLESDynamicVersion)\s*=' })
-          \$lines += 'GLESDynamicVersion = on'
-          \$lines += 'GLDirectMem = off'
-          \$lines += 'HasSharedSlotsHostMemoryAllocator = off'
-          Set-Content -LiteralPath \$features -Value \$lines -Encoding ASCII
-          Get-Content \$features | Where-Object { \$_ -match '^(GLESDynamicVersion|GLDirectMem|HasSharedSlotsHostMemoryAllocator)\s*=' }
-          POWERSHELL
-          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
-          echo "ADB=$adb" >> "$GITHUB_ENV"
-          echo "WINUSER=$win_user" >> "$GITHUB_ENV"
-          echo "SDK_WIN=$sdk_win" >> "$GITHUB_ENV"
-
-      - name: Boot and hold stable for 60 seconds
-        shell: bash
-        run: |
-          set -euo pipefail
-          image_win="${SDK_WIN}\\system-images\\android-36\\google_apis\\x86_64"
-          ps1="/mnt/c/Users/${WINUSER}/AppData/Local/Temp/MRSCRAP/start-dma-fixed-emulator.ps1"
-          cat > "$ps1" <<POWERSHELL
-          \$ErrorActionPreference = 'Stop'
-          \$emu = '${SDK_WIN}\\emulator\\emulator.exe'
-          \$args = @('@test_avd','-sysdir','${image_win}','-no-audio','-no-boot-anim','-no-snapshot','-gpu','swangle_indirect','-no-window')
-          Write-Output ('EMULATOR_ARGS=' + (\$args -join ' '))
-          Start-Process -FilePath \$emu -ArgumentList \$args -WindowStyle Hidden
-          POWERSHELL
-          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
-
-          "$ADB" start-server >/dev/null 2>&1 || true
-          serial=''
-          for i in $(seq 1 60); do
-            serial="$($ADB devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
-            [ -n "$serial" ] && break
-            sleep 5
-          done
-          test -n "$serial" || exit 10
-
-          stable_count=0; base_ss=''; base_sf=''
-          for i in $(seq 1 100); do
-            boot="$($ADB -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1 || true)"
-            activity="$($ADB -s "$serial" shell service check activity 2>/dev/null | tr -d '\r' | tail -n1 || true)"
-            package="$($ADB -s "$serial" shell service check package 2>/dev/null | tr -d '\r' | tail -n1 || true)"
-            ss="$($ADB -s "$serial" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
-            sf="$($ADB -s "$serial" shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true)"
-            if [ "$boot" = 1 ] && echo "$activity" | grep -q found && echo "$package" | grep -q found && [ -n "$ss" ] && [ -n "$sf" ]; then
-              if [ "$ss" = "$base_ss" ] && [ "$sf" = "$base_sf" ]; then stable_count=$((stable_count+1)); else base_ss="$ss"; base_sf="$sf"; stable_count=1; fi
-            else stable_count=0; base_ss="$ss"; base_sf="$sf"; fi
-            if (( i % 5 == 0 )); then echo "CORE_WAIT_$((i*3))S BOOT=${boot:-none} SS=${ss:-none} SF=${sf:-none} STABLE=$stable_count"; fi
-            [ "$stable_count" -ge 7 ] && break
-            sleep 3
-          done
-          test "$stable_count" -ge 7 || exit 20
-
-          host_lines="$($ADB -s "$serial" logcat -d 2>/dev/null | tr -d '\r' | grep 'HostComposition ext' | tail -n 20 || true)"
-          if printf '%s\n' "$host_lines" | grep -q ANDROID_EMU_read_color_buffer_dma; then
-            echo READ_COLOR_BUFFER_DMA_ADVERTISED=1; exit 22
-          fi
-          echo READ_COLOR_BUFFER_DMA_ADVERTISED=0
-
-          "$ADB" -s "$serial" logcat -b crash -c >/dev/null 2>&1 || true
-          echo '=== 60 SECOND QUIET STABILITY ==='
-          quiet_ok=1
-          for i in $(seq 1 12); do
-            sleep 5
-            ss="$($ADB -s "$serial" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
-            sf="$($ADB -s "$serial" shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true)"
-            package="$($ADB -s "$serial" shell service check package 2>/dev/null | tr -d '\r' | tail -n1 || true)"
-            echo "QUIET_$((i*5))S SS=${ss:-none} SF=${sf:-none} PACKAGE='${package:-none}'"
-            if [ "$ss" != "$base_ss" ] || [ "$sf" != "$base_sf" ] || ! echo "$package" | grep -q found; then quiet_ok=0; break; fi
-          done
-          if [ "$quiet_ok" -ne 1 ]; then
-            echo POST_BOOT_STABLE=0
-            echo '=== CRASH BUFFER ==='
-            "$ADB" -s "$serial" logcat -b crash -d -v threadtime 2>/dev/null | tr -d '\r' | tail -n 320 || true
-            echo '=== RELEVANT SYSTEM LOG ==='
-            "$ADB" -s "$serial" logcat -d -v threadtime 2>/dev/null | tr -d '\r' | grep -E -i 'surfaceflinger|system_server|PackageManager|Watchdog|Fatal signal|SIGABRT|Abort message|hasReadColorBufferDma' | tail -n 420 || true
-            exit 23
-          fi
-          echo POST_BOOT_STABLE=1
-          echo "SERIAL=$serial" >> "$GITHUB_ENV"
-          echo "BASE_SS=$base_ss" >> "$GITHUB_ENV"
-          echo "BASE_SF=$base_sf" >> "$GITHUB_ENV"
-
-      - name: Validate package Settings and MR SCRAP
+      - name: Trace effective graphics state
         shell: bash
         run: |
           set -u
-          pkg=com.mrscrap.socialradar
-          apk="$RUNNER_WORKSPACE/SCRAP-APP/android/app/build/outputs/apk/debug/app-debug.apk"
-          win_tmp="/mnt/c/Users/${WINUSER}/AppData/Local/Temp/MRSCRAP/app-debug.apk"
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          sdk="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk"
+          sdk_win="C:\\Users\\${win_user}\\AppData\\Local\\MRSCRAP\\AndroidSdk"
+          adb="${sdk}/platform-tools/adb.exe"
+          emu="${sdk}/emulator/emulator.exe"
+          avd="/mnt/c/Users/${win_user}/.android/avd/test_avd.avd"
+          features="/mnt/c/Users/${win_user}/.android/advancedFeatures.ini"
 
-          package_service="$($ADB -s "$SERIAL" shell service check package 2>/dev/null | tr -d '\r' | tail -n1 || true)"
-          ss_now="$($ADB -s "$SERIAL" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
-          sf_now="$($ADB -s "$SERIAL" shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true)"
-          echo "PRE_PACKAGE SS=$ss_now SF=$sf_now PACKAGE='$package_service'"
-          [ "$ss_now" = "$BASE_SS" ] && [ "$sf_now" = "$BASE_SF" ] && echo "$package_service" | grep -q found || exit 24
+          echo '=== LOCAL SYSTEM IMAGES ==='
+          find "${sdk}/system-images" -maxdepth 4 -type f \( -name system.img -o -name package.xml \) -printf '%p\n' 2>/dev/null | sort || true
+          echo '=== AVD GRAPHICS CONFIG ==='
+          grep -E -i '^(hw\.gpu|hw\.ramSize|image\.sysdir|tag\.|target|PlayStore|disk\.dataPartition)' "${avd}/config.ini" 2>/dev/null || true
+          echo '=== ADVANCED FEATURES ==='
+          grep -E -i '^(GLESDynamicVersion|GLDirectMem|HasSharedSlotsHostMemoryAllocator)\s*=' "$features" 2>/dev/null || true
+          echo '=== EMULATOR VERSION ==='
+          timeout 20s "$emu" -version 2>&1 | tr -d '\r' | head -n 8 || true
+          echo '=== EFFECTIVE FEATURE LIST ==='
+          timeout 20s "$emu" -feature-list 2>&1 | tr -d '\r' | grep -E -i 'GLDirectMem|HasSharedSlotsHostMemoryAllocator|GLESDynamicVersion|ReadColor|DMA' || true
 
-          pm_out="$($ADB -s "$SERIAL" shell pm path "$pkg" 2>&1 | tr -d '\r')"; pm_rc=$?
-          echo "PM_PATH_RC=$pm_rc PM_PATH=$pm_out"
-          if [ "$pm_rc" -ne 0 ]; then exit 25; fi
-          if ! printf '%s\n' "$pm_out" | grep -q '^package:'; then
-            echo PACKAGE_INSTALL_REQUIRED=1
-            test -s "$apk" || exit 12
-            mkdir -p "$(dirname "$win_tmp")"; cp -f "$apk" "$win_tmp"
-            "$ADB" -s "$SERIAL" install "$(wslpath -w "$win_tmp")" 2>&1 | tr -d '\r' || exit 13
-          else echo PACKAGE_INSTALL_REQUIRED=0; fi
+          "$adb" kill-server >/dev/null 2>&1 || true
+          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/MRSCRAP/gfx-trace-start.ps1"
+          hostlog="/mnt/c/Users/${win_user}/AppData/Local/Temp/MRSCRAP/gfx-trace-host.log"
+          cat > "$ps1" <<POWERSHELL
+          \$ErrorActionPreference='Stop'
+          \$sdk='${sdk_win}'
+          @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+            \$cmd=[string]\$_.CommandLine; \$path=[string]\$_.ExecutablePath
+            (\$cmd -like '*@test_avd*') -or (\$path -like (\$sdk+'\\emulator\\*')) -or
+            (\$_.Name -in @('emulator.exe','qemu-system-x86_64.exe','qemu-system-x86_64-headless.exe'))
+          }) | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }
+          Start-Sleep -Seconds 3
+          \$log='C:\\Users\\${win_user}\\AppData\\Local\\Temp\\MRSCRAP\\gfx-trace-host.log'
+          Remove-Item -Force \$log -ErrorAction SilentlyContinue
+          \$args=@('@test_avd','-sysdir','${sdk_win}\\system-images\\android-36\\google_apis\\x86_64','-no-audio','-no-boot-anim','-no-snapshot','-gpu','swangle_indirect','-no-window','-verbose')
+          Start-Process -FilePath (Join-Path \$sdk 'emulator\\emulator.exe') -ArgumentList \$args -RedirectStandardOutput \$log -RedirectStandardError \$log -WindowStyle Hidden
+          POWERSHELL
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
 
-          "$ADB" -s "$SERIAL" logcat -b crash -c >/dev/null 2>&1 || true
-          "$ADB" -s "$SERIAL" logcat -c >/dev/null 2>&1 || true
-          "$ADB" -s "$SERIAL" shell am start --user 0 -a android.settings.SETTINGS 2>&1 | tr -d '\r' || true
-          sleep 20
-          settings_pid="$($ADB -s "$SERIAL" shell pidof com.android.settings 2>/dev/null | tr -d '\r' || true)"
-          ss="$($ADB -s "$SERIAL" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"; sf="$($ADB -s "$SERIAL" shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true)"
-          crash="$($ADB -s "$SERIAL" logcat -b crash -d -v threadtime 2>/dev/null | tr -d '\r' || true)"; assertions="$(printf '%s\n' "$crash" | grep -c hasReadColorBufferDma || true)"
-          echo "SETTINGS_PID=$settings_pid SS=$ss SF=$sf DMA_ASSERTIONS=$assertions"
-          if [ -z "$settings_pid" ] || [ "$ss" != "$BASE_SS" ] || [ "$sf" != "$BASE_SF" ] || [ "$assertions" -gt 0 ]; then printf '%s\n' "$crash" | tail -n 300; exit 30; fi
-          echo SETTINGS_CONTROL_STABLE=1
-
-          "$ADB" -s "$SERIAL" shell am start --user 0 -f 0x20 -n "$pkg/.MainActivity" 2>&1 | tr -d '\r' || true
-          ever_app=0; stable=1
-          for i in $(seq 1 12); do
+          "$adb" start-server >/dev/null 2>&1 || true
+          serial=''
+          for i in $(seq 1 48); do
+            serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1; exit}')"
+            [ -n "$serial" ] && break
             sleep 5
-            ss="$($ADB -s "$SERIAL" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"; sf="$($ADB -s "$SERIAL" shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true)"; app="$($ADB -s "$SERIAL" shell pidof "$pkg" 2>/dev/null | tr -d '\r' || true)"
-            [ -n "$app" ] && ever_app=1
-            echo "APP_$((i*5))S SS=${ss:-none} SF=${sf:-none} APP=${app:-none}"
-            if [ "$ss" != "$BASE_SS" ] || [ "$sf" != "$BASE_SF" ]; then stable=0; break; fi
           done
-          crash="$($ADB -s "$SERIAL" logcat -b crash -d -v threadtime 2>/dev/null | tr -d '\r' || true)"; assertions="$(printf '%s\n' "$crash" | grep -c hasReadColorBufferDma || true)"; app_end="$($ADB -s "$SERIAL" shell pidof "$pkg" 2>/dev/null | tr -d '\r' || true)"
-          echo "DMA_ASSERTIONS=$assertions APP_END=$app_end"
-          if [ "$stable" -ne 1 ] || [ "$ever_app" -ne 1 ] || [ -z "$app_end" ] || [ "$assertions" -gt 0 ]; then printf '%s\n' "$crash" | tail -n 320; echo DMA_FIX_ACCEPTANCE=FAIL; exit 40; fi
-          echo MRSCRAP_APP_LAUNCHED=1
-          echo SURFACEFLINGER_STABLE=1
-          echo SYSTEM_SERVER_STABLE=1
-          echo DMA_FIX_ACCEPTANCE=PASS
+          if [ -z "$serial" ]; then echo EMULATOR_DEVICE_FOUND=0; tail -n 250 "$hostlog" 2>/dev/null || true; exit 10; fi
+
+          echo "SERIAL=$serial"
+          sleep 75
+          echo '=== ALL GUEST DMA / HOSTCONNECTION LINES ==='
+          full="$($adb -s "$serial" logcat -d -v threadtime 2>/dev/null | tr -d '\r' || true)"
+          printf '%s\n' "$full" | grep -E -i 'ANDROID_EMU_read_color_buffer_dma|HostConnection|HostComposition|GoldfishMapper|mapper\.ranchu|RegionSampling|hasReadColorBufferDma' | tail -n 700 || true
+          echo "GUEST_DMA_TOKEN_COUNT=$(printf '%s\n' "$full" | grep -c 'ANDROID_EMU_read_color_buffer_dma' || true)"
+          echo "GUEST_DMA_ASSERT_COUNT=$(printf '%s\n' "$full" | grep -c 'hasReadColorBufferDma' || true)"
+          echo '=== HOST EMULATOR DMA / FEATURE LINES ==='
+          grep -E -i 'GLDirectMem|HasSharedSlotsHostMemoryAllocator|GLESDynamicVersion|read_color_buffer_dma|ReadColor|DMA|gfxstream|swangle' "$hostlog" 2>/dev/null | tail -n 700 || true
+          echo '=== FINAL CORE STATE ==='
+          echo "BOOT=$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+          echo "SS=$($adb -s "$serial" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
+          echo "SF=$($adb -s "$serial" shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true)"
+          echo "PACKAGE=$($adb -s "$serial" shell service check package 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+          echo GFXSTREAM_TRACE_COMPLETE=1
