@@ -1,4 +1,4 @@
-name: Current Android Collector Surface Trace
+name: Current Android Target Identity Probe
 
 on:
   push:
@@ -9,11 +9,11 @@ permissions:
   contents: read
 
 jobs:
-  trace:
+  probe:
     runs-on: [self-hosted, Linux]
     timeout-minutes: 4
     steps:
-      - name: Invoke collector and trace safe WebView surface categories
+      - name: Probe target-specific Facebook identity safely
         shell: bash
         run: |
           set -euo pipefail
@@ -27,6 +27,7 @@ jobs:
           done
           test -n "$serial"
           echo "::add-mask::$serial"
+
           "$adb" -s "$serial" shell setprop log.tag.MRSCRAP_FLOW I || true
           "$adb" -s "$serial" shell setprop log.tag.MRSCRAP_COLLECTOR I || true
           "$adb" -s "$serial" shell am start -n com.mrscrap.socialradar/.MainActivity >/dev/null 2>&1 || true
@@ -44,15 +45,18 @@ jobs:
             sleep 1
           done
           test -n "$socket_name"
+
           "$adb" -s "$serial" forward --remove tcp:19222 >/dev/null 2>&1 || true
           "$adb" -s "$serial" forward tcp:19222 "localabstract:${socket_name}" >/dev/null
 
-          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-surface-trace.ps1"
+          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-target-identity-probe.ps1"
           cat > "$ps1" <<'PS'
           $ErrorActionPreference='Stop'
+
           function Get-Targets {
-            try { return @(Invoke-RestMethod -Uri 'http://127.0.0.1:19222/json' -TimeoutSec 3) } catch { return @() }
+            try { return @(Invoke-RestMethod -Uri 'http://127.0.0.1:19222/json' -TimeoutSec 2) } catch { return @() }
           }
+
           function Category([string]$raw) {
             if([string]::IsNullOrWhiteSpace($raw)){return 'blank'}
             try {
@@ -61,65 +65,320 @@ jobs:
               if($uri.Scheme -eq 'about' -or [string]::IsNullOrWhiteSpace($h)){return 'blank'}
               if($h -eq 'localhost' -or $h -eq '127.0.0.1'){return 'localhost'}
               if($h -match '(^|\.)facebook\.com$'){return 'facebook'}
-              if($h -match '(^|\.)instagram\.com$'){return 'instagram'}
               return 'other'
             } catch { return 'other' }
           }
+
+          function Invoke-CdpEval($target, [string]$expression, [int]$timeoutSeconds=12) {
+            $wsurl=([string]$target.webSocketDebuggerUrl) -replace '^ws://localhost:','ws://127.0.0.1:'
+            $ws=[System.Net.WebSockets.ClientWebSocket]::new()
+            $ws.Options.Proxy=$null
+            [void]$ws.ConnectAsync([Uri]$wsurl,[Threading.CancellationToken]::None).GetAwaiter().GetResult()
+            try {
+              $id=731
+              $payload=@{
+                id=$id
+                method='Runtime.evaluate'
+                params=@{
+                  expression=$expression
+                  returnByValue=$true
+                  awaitPromise=$true
+                }
+              } | ConvertTo-Json -Depth 12 -Compress
+              $bytes=[Text.Encoding]::UTF8.GetBytes($payload)
+              $seg=[ArraySegment[byte]]::new($bytes)
+              [void]$ws.SendAsync($seg,[Net.WebSockets.WebSocketMessageType]::Text,$true,[Threading.CancellationToken]::None).GetAwaiter().GetResult()
+
+              $buffer=New-Object byte[] 65536
+              $deadline=[DateTime]::UtcNow.AddSeconds($timeoutSeconds)
+              $builder=[Text.StringBuilder]::new()
+              while([DateTime]::UtcNow -lt $deadline) {
+                $recvSeg=[ArraySegment[byte]]::new($buffer)
+                $cts=[Threading.CancellationTokenSource]::new()
+                $cts.CancelAfter(1000)
+                try {
+                  $r=$ws.ReceiveAsync($recvSeg,$cts.Token).GetAwaiter().GetResult()
+                } catch {
+                  $cts.Dispose()
+                  continue
+                }
+                $cts.Dispose()
+                if($r.MessageType -eq [Net.WebSockets.WebSocketMessageType]::Close){break}
+                [void]$builder.Append([Text.Encoding]::UTF8.GetString($buffer,0,$r.Count))
+                if(-not $r.EndOfMessage){continue}
+                $raw=$builder.ToString()
+                $builder.Clear() | Out-Null
+                try { $obj=$raw | ConvertFrom-Json } catch { continue }
+                if($obj.id -eq $id){ return $obj }
+              }
+              throw 'CDP_EVAL_TIMEOUT'
+            } finally {
+              $ws.Dispose()
+            }
+          }
+
           $main=$null
           $deadline=[DateTime]::UtcNow.AddSeconds(25)
-          while([DateTime]::UtcNow -lt $deadline -and -not $main){
-            $targets=Get-Targets
-            $main=$targets|Where-Object {
+          while([DateTime]::UtcNow -lt $deadline -and -not $main) {
+            $main=Get-Targets | Where-Object {
               $_.type -eq 'page' -and (Category([string]$_.url)) -eq 'localhost'
-            }|Select-Object -First 1
-            if(-not $main){Start-Sleep -Milliseconds 500}
+            } | Select-Object -First 1
+            if(-not $main){Start-Sleep -Milliseconds 250}
           }
           if(-not $main){throw 'LOCALHOST_TARGET_NOT_READY'}
           Write-Output LOCALHOST_TARGET_READY
-          $wsurl=([string]$main.webSocketDebuggerUrl) -replace '^ws://localhost:','ws://127.0.0.1:'
-          $ws=[System.Net.WebSockets.ClientWebSocket]::new();$ws.Options.Proxy=$null
-          [void]$ws.ConnectAsync([Uri]$wsurl,[Threading.CancellationToken]::None).GetAwaiter().GetResult()
-          $expr="(() => { window.Capacitor.nativePromise('AuthenticatedSocialSession','collectSource',{sourceId:'surface-trace-diagnostic',url:'https://www.facebook.com/tarik.ziad.3914',platform:'facebook',limit:10}).catch(()=>null); return 'started'; })()"
-          $payload=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true}}|ConvertTo-Json -Depth 10 -Compress
-          $bytes=[Text.Encoding]::UTF8.GetBytes($payload);$seg=[ArraySegment[byte]]::new($bytes)
-          [void]$ws.SendAsync($seg,[Net.WebSockets.WebSocketMessageType]::Text,$true,[Threading.CancellationToken]::None).GetAwaiter().GetResult()
-          Start-Sleep -Milliseconds 350
-          $ws.Dispose()
+
+          $startExpr="(() => { window.Capacitor.nativePromise('AuthenticatedSocialSession','collectSource',{sourceId:'identity-probe-diagnostic',url:'https://www.facebook.com/tarik.ziad.3914',platform:'facebook',limit:20}).catch(()=>null); return 'started'; })()"
+          $null=Invoke-CdpEval $main $startExpr 5
           Write-Output COLLECTOR_INVOKED
 
-          $traceDeadline=[DateTime]::UtcNow.AddSeconds(34)
-          $last=''
-          $states=0
-          $maxTargets=0
-          $sawFacebook=$false
-          $sawBlank=$false
-          $sawOther=$false
-          while([DateTime]::UtcNow -lt $traceDeadline){
-            $targets=Get-Targets
-            if($targets.Count -gt $maxTargets){$maxTargets=$targets.Count}
-            $cats=@()
-            foreach($t in $targets){
-              if($t.type -ne 'page'){continue}
-              $c=Category([string]$t.url)
-              $cats += $c
-              if($c -eq 'facebook'){$sawFacebook=$true}
-              elseif($c -eq 'blank'){$sawBlank=$true}
-              elseif($c -eq 'other'){$sawOther=$true}
-            }
-            $signature=(($cats|Sort-Object) -join ',')
-            if($signature -ne $last -and $states -lt 20){
-              $states++
-              Write-Output ('TARGET_STATE_' + $states + '=' + $(if($signature){$signature}else{'none'}))
-              $last=$signature
-            }
-            Start-Sleep -Milliseconds 250
+          $fb=$null
+          $fbDeadline=[DateTime]::UtcNow.AddSeconds(7)
+          while([DateTime]::UtcNow -lt $fbDeadline -and -not $fb) {
+            $fb=Get-Targets | Where-Object {
+              $_.type -eq 'page' -and (Category([string]$_.url)) -eq 'facebook'
+            } | Select-Object -First 1
+            if(-not $fb){Start-Sleep -Milliseconds 60}
           }
-          Write-Output ('TARGET_MAX=' + $maxTargets)
-          Write-Output ('TARGET_SAW_FACEBOOK=' + $(if($sawFacebook){1}else{0}))
-          Write-Output ('TARGET_SAW_BLANK=' + $(if($sawBlank){1}else{0}))
-          Write-Output ('TARGET_SAW_OTHER=' + $(if($sawOther){1}else{0}))
+          if(-not $fb){throw 'FACEBOOK_TARGET_NOT_READY'}
+          Write-Output FACEBOOK_TARGET_READY
+
+          $probeExpr=@'
+          (async () => {
+            const HANDLE='tarik.ziad.3914';
+            const DOC_ID='27465012859856795';
+            const FRIENDLY='ProfileCometTimelineFeedRefetchQuery';
+            const result={
+              surface:'facebook',
+              requestedPath:0,
+              meta:{},
+              anchors:{total:0,targetish:0,profilePhpId:0,queryId:0,numericPath:0},
+              handleHits:0,
+              contextKeys:[],
+              candidateCount:0,
+              probes:[],
+              winnerSource:'none'
+            };
+
+            try {
+              const u=new URL(location.href);
+              result.requestedPath=(u.pathname.toLowerCase().split('/').filter(Boolean)[0]||'')===HANDLE.toLowerCase()?1:0;
+            } catch (_) {}
+
+            const numeric=(raw) => {
+              const v=String(raw||'').trim();
+              return /^\d{5,32}$/.test(v)?v:'';
+            };
+            const safeKey=(raw) => String(raw||'').replace(/[^A-Za-z0-9_]/g,'').slice(0,48);
+            const classify=(raw) => {
+              const s=String(raw||'');
+              if(!s)return 'none';
+              if(/fb:\/\/profile\/\d{5,32}/i.test(s))return 'fb_profile';
+              if(/fb:\/\/page\/\d{5,32}/i.test(s))return 'fb_page';
+              if(/profile\.php\?[^#]*\bid=\d{5,32}/i.test(s))return 'profile_php_id';
+              try {
+                const u=new URL(s,location.href);
+                if(numeric(u.searchParams.get('id')))return 'query_id';
+                const parts=u.pathname.split('/').filter(Boolean);
+                if(parts.length===1 && numeric(parts[0]))return 'numeric_path';
+                if(parts.some(p=>p.toLowerCase()===HANDLE.toLowerCase()))return 'handle_path';
+              } catch (_) {}
+              return 'other';
+            };
+
+            const candidates=[];
+            const byId=new Map();
+            const add=(raw,source) => {
+              const id=numeric(raw);
+              if(!id)return;
+              if(byId.has(id)){
+                const item=byId.get(id);
+                if(!item.sources.includes(source))item.sources.push(source);
+                return;
+              }
+              if(candidates.length>=12)return;
+              const item={id,sources:[source]};
+              byId.set(id,item);
+              candidates.push(item);
+            };
+            const addFromUrl=(raw,source) => {
+              const s=String(raw||'');
+              let m=s.match(/fb:\/\/profile\/(\d{5,32})/i); if(m)add(m[1],source);
+              m=s.match(/fb:\/\/page\/(\d{5,32})/i); if(m)add(m[1],source);
+              try {
+                const u=new URL(s,location.href);
+                add(u.searchParams.get('id'),source);
+                const parts=u.pathname.split('/').filter(Boolean);
+                if(parts.length===1)add(parts[0],source);
+              } catch (_) {}
+            };
+
+            const slots=[
+              ['alIos','meta[property="al:ios:url"]','content','meta_al_ios'],
+              ['alAndroid','meta[property="al:android:url"]','content','meta_al_android'],
+              ['ogUrl','meta[property="og:url"]','content','meta_og_url'],
+              ['canonical','link[rel="canonical"]','href','canonical']
+            ];
+            for(const [name,selector,field,source] of slots){
+              const els=[...document.querySelectorAll(selector)];
+              const raw=els[0]?.[field]||els[0]?.getAttribute?.(field)||'';
+              result.meta[name]={count:els.length,category:classify(raw)};
+              addFromUrl(raw,source);
+            }
+
+            const h1=(document.querySelector('h1')?.innerText||'').trim().toLowerCase();
+            const anchors=[...document.querySelectorAll('a[href]')];
+            result.anchors.total=anchors.length;
+            for(const a of anchors){
+              const raw=a.href||a.getAttribute('href')||'';
+              const low=String(raw).toLowerCase();
+              const txt=(a.innerText||a.getAttribute('aria-label')||'').trim().toLowerCase();
+              const h1Inside=Boolean(a.querySelector('h1'));
+              const targetish=low.includes(HANDLE.toLowerCase()) || h1Inside || (h1 && txt===h1);
+              if(!targetish)continue;
+              result.anchors.targetish++;
+              if(/profile\.php\?[^#]*\bid=\d{5,32}/i.test(raw))result.anchors.profilePhpId++;
+              try {
+                const u=new URL(raw,location.href);
+                if(numeric(u.searchParams.get('id')))result.anchors.queryId++;
+                const parts=u.pathname.split('/').filter(Boolean);
+                if(parts.length===1 && numeric(parts[0]))result.anchors.numericPath++;
+              } catch (_) {}
+              addFromUrl(raw,h1Inside?'anchor_h1':(low.includes(HANDLE.toLowerCase())?'anchor_handle':'anchor_title'));
+            }
+
+            const html=document.documentElement?.innerHTML||'';
+            const lower=html.toLowerCase();
+            const needle=HANDLE.toLowerCase();
+            const keys=new Set();
+            let from=0;
+            const likely=/^(?:pageID|profileID|profile_id|entityID|entity_id|ownerID|owner_id|userID|user_id|actorID|actor_id|delegatePageID|delegate_page_id|profileUserID|profile_user_id)$/i;
+            while(result.handleHits<10){
+              const at=lower.indexOf(needle,from);
+              if(at<0)break;
+              result.handleHits++;
+              let w=html.slice(Math.max(0,at-900),Math.min(html.length,at+needle.length+900));
+              w=w.replace(/&quot;|&#34;/g,'"').replace(/&amp;/g,'&');
+              const re=/["']([A-Za-z][A-Za-z0-9_]{1,48})["']\s*:\s*["']?(\d{5,32})/g;
+              let m, local=0;
+              while((m=re.exec(w)) && local<32){
+                const key=safeKey(m[1]);
+                if(key)keys.add(key);
+                if(likely.test(key))add(m[2],'ctx_'+key);
+                local++;
+              }
+              from=at+needle.length;
+            }
+            result.contextKeys=[...keys].slice(0,20);
+
+            const variablesFor=(id)=>({
+              afterTime:null,beforeTime:null,count:1,cursor:null,
+              feedLocation:'TIMELINE',feedbackSource:0,focusCommentID:null,
+              memorializedSplitTimeFilter:null,omitPinnedPost:true,
+              postedBy:{group:'OWNER'},privacy:null,
+              privacySelectorRenderLocation:'COMET_STREAM',referringStoryRenderLocation:null,
+              renderLocation:'timeline',scale:1,stream_count:1,taggedInOnly:null,
+              trackingCode:null,useDefaultActor:false,id,
+              __relay_internal__pv__GHLShouldChangeAdIdFieldNamerelayprovider:false,
+              __relay_internal__pv__GHLShouldChangeSponsoredDataFieldNamerelayprovider:false,
+              __relay_internal__pv__CometFeedStory_enable_reactor_facepilerelayprovider:false,
+              __relay_internal__pv__CometFeedStory_enable_social_bubblesrelayprovider:false,
+              __relay_internal__pv__CometFeedStory_enable_post_permalink_white_space_clickrelayprovider:false,
+              __relay_internal__pv__CometUFICommentActionLinksRewriteEnabledrelayprovider:true,
+              __relay_internal__pv__CometUFICommentAvatarStickerAnimatedImagerelayprovider:false,
+              __relay_internal__pv__IsWorkUserrelayprovider:false,
+              __relay_internal__pv__TestPilotShouldIncludeDemoAdUseCaserelayprovider:false,
+              __relay_internal__pv__FBReels_deprecate_short_form_video_context_gkrelayprovider:true,
+              __relay_internal__pv__FBReels_enable_view_dubbed_audio_type_gkrelayprovider:true,
+              __relay_internal__pv__CometFeedShareMedia_shouldPrefetchShareImagerelayprovider:false,
+              __relay_internal__pv__CometImmersivePhotoCanUserDisable3DMotionrelayprovider:false,
+              __relay_internal__pv__WorkCometIsEmployeeGKProviderrelayprovider:false,
+              __relay_internal__pv__IsMergQAPollsrelayprovider:false,
+              __relay_internal__pv__FBReelsMediaFooter_comet_enable_reels_ads_gkrelayprovider:true,
+              __relay_internal__pv__CometUFIReactionsEnableShortNamerelayprovider:false,
+              __relay_internal__pv__CometUFICommentAutoTranslationTyperelayprovider:'AUTO_TRANSLATE',
+              __relay_internal__pv__CometUFIShareActionMigrationrelayprovider:true,
+              __relay_internal__pv__CometUFISingleLineUFIrelayprovider:true,
+              __relay_internal__pv__relay_provider_comet_ufi_ssr_seo_deferrelayprovider:true,
+              __relay_internal__pv__CometUFI_dedicated_comment_routable_dialog_gkrelayprovider:true,
+              __relay_internal__pv__ReelsIFUCard_reelsIFULikeCountrelayprovider:false,
+              __relay_internal__pv__FBReelsIFUTileContent_reelsIFUPlayOnHoverrelayprovider:true,
+              __relay_internal__pv__GroupsCometGYSJFeedItemHeightrelayprovider:206,
+              __relay_internal__pv__ShouldEnableBakedInTextStoriesrelayprovider:false,
+              __relay_internal__pv__StoriesShouldIncludeFbNotesrelayprovider:true
+            });
+
+            const probe=async(item)=>{
+              const body=new URLSearchParams();
+              body.set('doc_id',DOC_ID);
+              body.set('fb_api_req_friendly_name',FRIENDLY);
+              body.set('variables',JSON.stringify(variablesFor(item.id)));
+              let text='',status=0;
+              try{
+                const r=await fetch('/api/graphql/',{
+                  method:'POST',credentials:'include',
+                  headers:{'Content-Type':'application/x-www-form-urlencoded','X-FB-Friendly-Name':FRIENDLY},
+                  body:body.toString()
+                });
+                status=r.status;
+                text=await r.text();
+              }catch(_){
+                return {source:item.sources.join('+'),http:0,node:0,timeline:0,edges:0,posts:0,errors:0};
+              }
+              let node=0,timeline=0,edges=0,posts=0,errors=0;
+              for(const line of String(text||'').split('\n')){
+                if(!line.trim())continue;
+                let p; try{p=JSON.parse(line)}catch(_){continue}
+                if(Array.isArray(p?.errors))errors+=p.errors.length;
+                const n=p?.data?.node;
+                if(n)node++;
+                const t=n?.timeline_list_feed_units;
+                if(t){
+                  timeline++;
+                  if(Array.isArray(t.edges)){
+                    edges+=t.edges.length;
+                    posts+=t.edges.filter(e=>e?.node?.post_id).length;
+                  }
+                }
+                if(n?.post_id)posts++;
+              }
+              return {source:item.sources.join('+'),http:status,node,timeline,edges,posts,errors};
+            };
+
+            result.candidateCount=candidates.length;
+            const probes=await Promise.all(candidates.slice(0,10).map(probe));
+            result.probes=probes;
+            const winner=probes.find(p=>p.posts>0 || p.edges>0 || (p.node>0 && p.timeline>0));
+            if(winner)result.winnerSource=winner.source;
+            return result;
+          })()
+          '@
+
+          $reply=Invoke-CdpEval $fb $probeExpr 15
+          if($reply.error){throw 'CDP_PROTOCOL_ERROR'}
+          if($reply.result.exceptionDetails){throw 'FACEBOOK_PROBE_JS_EXCEPTION'}
+          $v=$reply.result.result.value
+          if(-not $v){throw 'FACEBOOK_PROBE_EMPTY'}
+
+          Write-Output ('STRUCT_SURFACE=' + $v.surface)
+          Write-Output ('STRUCT_REQUESTED_PATH=' + $v.requestedPath)
+          Write-Output ('META_AL_IOS=' + $v.meta.alIos.count + ':' + $v.meta.alIos.category)
+          Write-Output ('META_AL_ANDROID=' + $v.meta.alAndroid.count + ':' + $v.meta.alAndroid.category)
+          Write-Output ('META_OG_URL=' + $v.meta.ogUrl.count + ':' + $v.meta.ogUrl.category)
+          Write-Output ('LINK_CANONICAL=' + $v.meta.canonical.count + ':' + $v.meta.canonical.category)
+          Write-Output ('ANCHORS total=' + $v.anchors.total + ' targetish=' + $v.anchors.targetish + ' profilePhpId=' + $v.anchors.profilePhpId + ' queryId=' + $v.anchors.queryId + ' numericPath=' + $v.anchors.numericPath)
+          Write-Output ('HANDLE_HITS=' + $v.handleHits)
+          Write-Output ('CONTEXT_KEYS=' + (($v.contextKeys | ForEach-Object { [string]$_ }) -join '.'))
+          Write-Output ('TARGET_CANDIDATES=' + $v.candidateCount)
+          foreach($p in @($v.probes)){
+            Write-Output ('PROBE source=' + $p.source + ' http=' + $p.http + ' node=' + $p.node + ' timeline=' + $p.timeline + ' edges=' + $p.edges + ' posts=' + $p.posts + ' errors=' + $p.errors)
+          }
+          Write-Output ('WINNER_SOURCE=' + $v.winnerSource)
+          if([string]$v.winnerSource -ne 'none'){ Write-Output TARGET_IDENTITY_RESOLVER_FOUND } else { Write-Output TARGET_IDENTITY_RESOLVER_NOT_FOUND }
+
           PS
-          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\\Users\\${win_user}\\AppData\\Local\\Temp\\mrscrap-surface-trace.ps1"
+
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\\Users\\${win_user}\\AppData\\Local\\Temp\\mrscrap-target-identity-probe.ps1"
 
           echo NATIVE_SAFE_TRACE_BEGIN
           "$adb" -s "$serial" logcat -d -v brief -s MRSCRAP_FLOW:I MRSCRAP_COLLECTOR:I '*:S' 2>/dev/null | tr -d '\r' | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' | grep -E 'collect_source_|graphql_(load_start|page_started|page_finished|stage|result|error|timeout)' | tail -n200 || true
