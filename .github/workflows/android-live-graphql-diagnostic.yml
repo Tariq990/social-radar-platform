@@ -1,0 +1,374 @@
+name: Live Android Facebook GraphQL Diagnostic
+
+on:
+  push:
+    branches:
+      - test/android-physical-fix-20260909
+    paths:
+      - .github/workflows/android-live-graphql-diagnostic.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-android-facebook-graphql-diagnostic
+  cancel-in-progress: true
+
+jobs:
+  trace-one-grab:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 8
+    steps:
+      - name: Checkout diagnostic branch
+        uses: actions/checkout@v4
+
+      - name: Connect authorized physical Android device
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-platform-tools/platform-tools/adb.exe"
+          test -x "$adb"
+          "$adb" start-server >/dev/null 2>&1 || true
+          serial=""
+          for attempt in $(seq 1 60); do
+            snapshot="$($adb devices 2>/dev/null | tr -d '\r' || true)"
+            serial="$(printf '%s\n' "$snapshot" | awk 'NR>1 && $2=="device" {print $1; exit}')"
+            [ -n "$serial" ] && break
+            sleep 2
+          done
+          test -n "$serial"
+          echo "ADB=$adb" >> "$GITHUB_ENV"
+          echo "SERIAL=$serial" >> "$GITHUB_ENV"
+          echo "AUTHORIZED_ANDROID_DEVICE_FOUND"
+          "$adb" -s "$serial" shell dumpsys package com.mrscrap.socialradar 2>/dev/null | tr -d '\r' | grep -E 'versionCode=|versionName=' | head -n 4
+
+      - name: Prepare WebView debugger without changing app data
+        shell: bash
+        run: |
+          set -euo pipefail
+          package=com.mrscrap.socialradar
+          "$ADB" -s "$SERIAL" shell setprop log.tag.MRSCRAP_FLOW I || true
+          "$ADB" -s "$SERIAL" shell setprop log.tag.MRSCRAP_COLLECTOR I || true
+          "$ADB" -s "$SERIAL" shell am start -n "$package/.MainActivity" >/dev/null 2>&1 || true
+          sleep 3
+          pid="$($ADB -s "$SERIAL" shell pidof "$package" 2>/dev/null | tr -d '\r' | awk '{print $1}')"
+          test -n "$pid"
+          socket="$($ADB -s "$SERIAL" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | grep -o "webview_devtools_remote_${pid}" | head -n1)"
+          test -n "$socket"
+          "$ADB" -s "$SERIAL" forward --remove tcp:19222 >/dev/null 2>&1 || true
+          "$ADB" -s "$SERIAL" forward tcp:19222 "localabstract:${socket}" >/dev/null
+          echo "WEBVIEW_DEBUGGER_READY"
+
+      - name: Monitor one real Smart Grab and inspect GraphQL contract safely
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64
+          import json
+          import re
+          import socket
+          import time
+          import urllib.parse
+          import urllib.request
+          import websocket
+
+          BASE = 'http://127.0.0.1:19222'
+          DESKTOP_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+          DOC_ID = '27465012859856795'
+          FRIENDLY = 'ProfileCometTimelineFeedRefetchQuery'
+          REFERENCE_KEYS = {
+              'afterTime','beforeTime','count','cursor','feedLocation','feedbackSource','focusCommentID',
+              'memorializedSplitTimeFilter','omitPinnedPost','postedBy','privacy','privacySelectorRenderLocation',
+              'referringStoryRenderLocation','renderLocation','scale','stream_count','taggedInOnly','trackingCode',
+              'useDefaultActor','id',
+              '__relay_internal__pv__GHLShouldChangeAdIdFieldNamerelayprovider',
+              '__relay_internal__pv__GHLShouldChangeSponsoredDataFieldNamerelayprovider',
+              '__relay_internal__pv__CometFeedStory_enable_reactor_facepilerelayprovider',
+              '__relay_internal__pv__CometFeedStory_enable_social_bubblesrelayprovider',
+              '__relay_internal__pv__CometFeedStory_enable_post_permalink_white_space_clickrelayprovider',
+              '__relay_internal__pv__CometUFICommentActionLinksRewriteEnabledrelayprovider',
+              '__relay_internal__pv__CometUFICommentAvatarStickerAnimatedImagerelayprovider',
+              '__relay_internal__pv__IsWorkUserrelayprovider',
+              '__relay_internal__pv__TestPilotShouldIncludeDemoAdUseCaserelayprovider',
+              '__relay_internal__pv__FBReels_deprecate_short_form_video_context_gkrelayprovider',
+              '__relay_internal__pv__FBReels_enable_view_dubbed_audio_type_gkrelayprovider',
+              '__relay_internal__pv__CometFeedShareMedia_shouldPrefetchShareImagerelayprovider',
+              '__relay_internal__pv__CometImmersivePhotoCanUserDisable3DMotionrelayprovider',
+              '__relay_internal__pv__WorkCometIsEmployeeGKProviderrelayprovider',
+              '__relay_internal__pv__IsMergQAPollsrelayprovider',
+              '__relay_internal__pv__FBReelsMediaFooter_comet_enable_reels_ads_gkrelayprovider',
+              '__relay_internal__pv__CometUFIReactionsEnableShortNamerelayprovider',
+              '__relay_internal__pv__CometUFICommentAutoTranslationTyperelayprovider',
+              '__relay_internal__pv__CometUFIShareActionMigrationrelayprovider',
+              '__relay_internal__pv__CometUFISingleLineUFIrelayprovider',
+              '__relay_internal__pv__relay_provider_comet_ufi_ssr_seo_deferrelayprovider',
+              '__relay_internal__pv__CometUFI_dedicated_comment_routable_dialog_gkrelayprovider',
+              '__relay_internal__pv__ReelsIFUCard_reelsIFULikeCountrelayprovider',
+              '__relay_internal__pv__FBReelsIFUTileContent_reelsIFUPlayOnHoverrelayprovider',
+              '__relay_internal__pv__GroupsCometGYSJFeedItemHeightrelayprovider',
+              '__relay_internal__pv__ShouldEnableBakedInTextStoriesrelayprovider',
+              '__relay_internal__pv__StoriesShouldIncludeFbNotesrelayprovider',
+          }
+
+          def targets():
+              with urllib.request.urlopen(BASE + '/json', timeout=2) as response:
+                  return json.load(response)
+
+          seq = 0
+          def command(ws, method, params=None, timeout=4, buffered=None):
+              global seq
+              seq += 1
+              current = seq
+              ws.send(json.dumps({'id': current, 'method': method, 'params': params or {}}))
+              deadline = time.time() + timeout
+              while time.time() < deadline:
+                  try:
+                      message = json.loads(ws.recv())
+                  except (socket.timeout, websocket.WebSocketTimeoutException):
+                      continue
+                  if message.get('id') == current:
+                      return message
+                  if buffered is not None:
+                      buffered.append(message)
+              raise TimeoutError(method)
+
+          all_targets = targets()
+          main = next((t for t in all_targets if str(t.get('url','')).startswith('https://localhost')), None)
+          if not main:
+              raise SystemExit('MAIN_CAPACITOR_TARGET_NOT_FOUND')
+          baseline = {t.get('id') for t in all_targets if t.get('type') == 'page'}
+          main_ws = websocket.create_connection(main['webSocketDebuggerUrl'], timeout=1, suppress_origin=True)
+          main_ws.settimeout(0.4)
+          command(main_ws, 'Runtime.enable')
+          hook = r"""
+          (() => {
+            const cap = window.Capacitor;
+            if (!cap || typeof cap.nativePromise !== 'function') return 'NO_CAPACITOR';
+            if (window.__mrscrapDiagNativeWrapped) return 'ALREADY_WRAPPED';
+            const original = cap.nativePromise.bind(cap);
+            cap.nativePromise = function(plugin, method, args) {
+              if (plugin === 'AuthenticatedSocialSession' && method === 'collectSource' && args && args.platform === 'facebook') {
+                window.__mrscrapDiagLastCollect = { url: String(args.url || ''), limit: Number(args.limit || 0), at: Date.now() };
+              }
+              return original(plugin, method, args);
+            };
+            window.__mrscrapDiagNativeWrapped = true;
+            return 'WRAPPED';
+          })()
+          """
+          hook_result = command(main_ws, 'Runtime.evaluate', {'expression': hook, 'returnByValue': True})
+          status = hook_result.get('result',{}).get('result',{}).get('value','')
+          print('CAPACITOR_COLLECT_HOOK=' + str(status))
+          print('READY_FOR_ONE_REAL_SMART_GRAB')
+
+          collector = None
+          deadline = time.time() + 210
+          while time.time() < deadline and collector is None:
+              try:
+                  current = targets()
+              except Exception:
+                  time.sleep(0.2)
+                  continue
+              for target in current:
+                  if target.get('type') != 'page' or target.get('id') in baseline:
+                      continue
+                  collector = target
+                  break
+              if collector is None:
+                  time.sleep(0.15)
+          if collector is None:
+              raise SystemExit('NO_NEW_COLLECTOR_WEBVIEW_SEEN')
+          print('COLLECTOR_WEBVIEW_SEEN=1')
+
+          source_result = command(main_ws, 'Runtime.evaluate', {
+              'expression': "(() => { const x=window.__mrscrapDiagLastCollect; return x && typeof x.url==='string' ? x.url : ''; })()",
+              'returnByValue': True
+          })
+          source_url = source_result.get('result',{}).get('result',{}).get('value','')
+          if not source_url.startswith('http'):
+              raise SystemExit('COLLECT_SOURCE_URL_NOT_CAPTURED')
+
+          ws = websocket.create_connection(collector['webSocketDebuggerUrl'], timeout=1, suppress_origin=True)
+          ws.settimeout(0.25)
+          event_buffer = []
+          command(ws, 'Runtime.enable', buffered=event_buffer)
+          command(ws, 'Network.enable', buffered=event_buffer)
+          command(ws, 'Page.enable', buffered=event_buffer)
+          command(ws, 'Network.setUserAgentOverride', {'userAgent': DESKTOP_UA}, buffered=event_buffer)
+          command(ws, 'Page.navigate', {'url': source_url}, buffered=event_buffer)
+          print('DESKTOP_UA_APPLIED_AND_SOURCE_RENAVIGATED=1')
+
+          graphql_request_id = None
+          graphql_status = None
+          request_contract = None
+          response_summary = None
+          document_statuses = []
+          load_failures = []
+          end = time.time() + 45
+
+          def parse_contract(post_data):
+              try:
+                  form = urllib.parse.parse_qs(post_data or '', keep_blank_values=True)
+                  variables = json.loads((form.get('variables') or ['{}'])[0])
+                  if not isinstance(variables, dict): variables = {}
+                  keys = set(variables)
+                  missing = sorted(REFERENCE_KEYS - keys)
+                  source_id = str(variables.get('id') or '')
+                  return {
+                      'doc_id_match': (form.get('doc_id') or [''])[0] == DOC_ID,
+                      'friendly_name_match': (form.get('fb_api_req_friendly_name') or [''])[0] == FRIENDLY,
+                      'variable_key_count': len(keys),
+                      'missing_reference_count': len(missing),
+                      'missing_reference_keys': missing,
+                      'source_id_numeric': source_id.isdigit(),
+                      'source_id_length': len(source_id),
+                      '_source_id': source_id,
+                  }
+              except Exception:
+                  return {'parse_failed': True, '_source_id': ''}
+
+          def parse_body(raw, requested_id):
+              json_lines = 0
+              errors = 0
+              error_codes = set()
+              edges = 0
+              posts_with_id = 0
+              direct_posts = 0
+              page_info = 0
+              node_id_match = False
+              for line in str(raw or '').splitlines():
+                  if not line.strip(): continue
+                  try:
+                      payload = json.loads(line)
+                  except Exception:
+                      continue
+                  json_lines += 1
+                  if isinstance(payload, dict) and isinstance(payload.get('errors'), list):
+                      errors += len(payload['errors'])
+                      for err in payload['errors']:
+                          if isinstance(err, dict) and err.get('code') is not None:
+                              error_codes.add(str(err.get('code'))[:32])
+                  data = payload.get('data') if isinstance(payload, dict) else None
+                  if not isinstance(data, dict): continue
+                  if isinstance(data.get('page_info'), dict): page_info += 1
+                  node = data.get('node')
+                  if not isinstance(node, dict): continue
+                  if requested_id and str(node.get('id') or '') == requested_id:
+                      node_id_match = True
+                  if node.get('post_id'):
+                      direct_posts += 1
+                      posts_with_id += 1
+                  feed = node.get('timeline_list_feed_units')
+                  if isinstance(feed, dict):
+                      if isinstance(feed.get('page_info'), dict): page_info += 1
+                      raw_edges = feed.get('edges')
+                      if isinstance(raw_edges, list):
+                          edges += len(raw_edges)
+                          for edge in raw_edges:
+                              enode = edge.get('node') if isinstance(edge, dict) else None
+                              if isinstance(enode, dict) and enode.get('post_id'):
+                                  posts_with_id += 1
+              return {
+                  'json_lines': json_lines,
+                  'graphql_error_count': errors,
+                  'graphql_error_codes': sorted(error_codes),
+                  'timeline_edges': edges,
+                  'post_nodes_with_post_id': posts_with_id,
+                  'direct_post_nodes': direct_posts,
+                  'page_info_blocks': page_info,
+                  'response_node_matches_requested_id': node_id_match,
+              }
+
+          pending = event_buffer
+          while time.time() < end:
+              if pending:
+                  message = pending.pop(0)
+              else:
+                  try:
+                      message = json.loads(ws.recv())
+                  except (socket.timeout, websocket.WebSocketTimeoutException):
+                      continue
+                  except Exception:
+                      break
+              method = message.get('method')
+              params = message.get('params') or {}
+              if method == 'Network.requestWillBeSent':
+                  req = params.get('request') or {}
+                  url = str(req.get('url') or '')
+                  parsed = urllib.parse.urlparse(url)
+                  if parsed.hostname and parsed.hostname.endswith('facebook.com') and params.get('type') == 'Document':
+                      pass
+                  if parsed.hostname and parsed.hostname.endswith('facebook.com') and parsed.path == '/api/graphql/':
+                      graphql_request_id = params.get('requestId')
+                      post_data = req.get('postData')
+                      if not post_data and graphql_request_id:
+                          try:
+                              got = command(ws, 'Network.getRequestPostData', {'requestId': graphql_request_id}, buffered=pending)
+                              post_data = got.get('result',{}).get('postData','')
+                          except Exception:
+                              post_data = ''
+                      request_contract = parse_contract(post_data)
+                      print('GRAPHQL_REQUEST_SEEN=1')
+              elif method == 'Network.responseReceived':
+                  response = params.get('response') or {}
+                  url = str(response.get('url') or '')
+                  parsed = urllib.parse.urlparse(url)
+                  if parsed.hostname and parsed.hostname.endswith('facebook.com') and params.get('type') == 'Document':
+                      document_statuses.append(int(response.get('status') or 0))
+                  if graphql_request_id and params.get('requestId') == graphql_request_id:
+                      graphql_status = int(response.get('status') or 0)
+              elif method == 'Network.loadingFailed':
+                  rid = params.get('requestId')
+                  if rid == graphql_request_id:
+                      load_failures.append('graphql:' + re.sub(r'[^A-Za-z0-9_.:-]','_',str(params.get('errorText') or ''))[:80])
+              elif method == 'Network.loadingFinished' and graphql_request_id and params.get('requestId') == graphql_request_id:
+                  try:
+                      got = command(ws, 'Network.getResponseBody', {'requestId': graphql_request_id}, timeout=3, buffered=pending)
+                      result = got.get('result') or {}
+                      body = result.get('body','')
+                      if result.get('base64Encoded'):
+                          body = base64.b64decode(body).decode('utf-8','replace')
+                      requested_id = (request_contract or {}).get('_source_id','')
+                      response_summary = parse_body(body, requested_id)
+                  except Exception:
+                      response_summary = {'body_unavailable': True}
+                  break
+
+          if request_contract:
+              safe_contract = {k:v for k,v in request_contract.items() if not k.startswith('_')}
+              print('GRAPHQL_CONTRACT=' + json.dumps(safe_contract, sort_keys=True, separators=(',',':')))
+          else:
+              print('GRAPHQL_REQUEST_SEEN=0')
+          print('FACEBOOK_DOCUMENT_STATUSES=' + json.dumps(document_statuses[-8:]))
+          print('GRAPHQL_HTTP_STATUS=' + str(graphql_status if graphql_status is not None else 'NONE'))
+          print('GRAPHQL_RESPONSE_SUMMARY=' + json.dumps(response_summary or {'not_captured':True}, sort_keys=True, separators=(',',':')))
+          if load_failures:
+              print('SAFE_LOAD_FAILURES=' + json.dumps(load_failures[-5:]))
+
+          try:
+              main_state = command(main_ws, 'Runtime.evaluate', {
+                  'expression': "(() => { const x=window.__mrscrapDiagLastCollect; return {captured:Boolean(x),limit:Number(x?.limit||0)}; })()",
+                  'returnByValue': True
+              })
+              val = main_state.get('result',{}).get('result',{}).get('value',{})
+              print('REAL_UI_COLLECT_CALL=' + json.dumps(val, sort_keys=True, separators=(',',':')))
+          except Exception:
+              pass
+          try: ws.close()
+          except Exception: pass
+          try: main_ws.close()
+          except Exception: pass
+          PY
+
+      - name: Capture only safe native collector markers
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "SAFE_NATIVE_MARKERS_BEGIN"
+          "$ADB" -s "$SERIAL" logcat -d -v threadtime -s MRSCRAP_FLOW:I MRSCRAP_COLLECTOR:I '*:S' 2>/dev/null | tr -d '\r' | tail -n 300 || true
+          echo "SAFE_NATIVE_MARKERS_END"
+          "$ADB" -s "$SERIAL" forward --remove tcp:19222 >/dev/null 2>&1 || true
