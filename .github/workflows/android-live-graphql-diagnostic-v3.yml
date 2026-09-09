@@ -48,18 +48,18 @@ jobs:
           "$adb" -s "$serial" shell setprop log.tag.MRSCRAP_COLLECTOR I || true
           "$adb" -s "$serial" shell am start -n com.mrscrap.socialradar/.MainActivity >/dev/null 2>&1 || true
           "$adb" -s "$serial" shell dumpsys package com.mrscrap.socialradar 2>/dev/null | tr -d '\r' | grep -E 'versionCode=|versionName=' | head -n4
-          pid=""; socket=""
+          pid=""; socket_name=""
           for attempt in $(seq 1 60); do
             pid="$($adb -s "$serial" shell pidof com.mrscrap.socialradar 2>/dev/null | tr -d '\r' | awk '{print $1}')"
             if [ -n "$pid" ]; then
-              socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | grep -o "webview_devtools_remote_${pid}" | head -n1 || true)"
-              [ -n "$socket" ] && break
+              socket_name="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | grep -o "webview_devtools_remote_${pid}" | head -n1 || true)"
+              [ -n "$socket_name" ] && break
             fi
             sleep 1
           done
-          test -n "$socket"
+          test -n "$socket_name"
           "$adb" -s "$serial" forward --remove tcp:19222 >/dev/null 2>&1 || true
-          "$adb" -s "$serial" forward tcp:19222 "localabstract:${socket}" >/dev/null
+          "$adb" -s "$serial" forward tcp:19222 "localabstract:${socket_name}" >/dev/null
           CURL=/mnt/c/Windows/System32/curl.exe
           for attempt in $(seq 1 30); do
             if "$CURL" -fsS http://127.0.0.1:19222/json -o NUL >/dev/null 2>&1; then break; fi
@@ -67,12 +67,12 @@ jobs:
           done
           "$CURL" -fsS http://127.0.0.1:19222/json -o NUL >/dev/null
           CMD=/mnt/c/Windows/System32/cmd.exe
-          if "$CMD" /d /c "python -c \"import websocket; print('WINDOWS_CDP_READY')\"" 2>/dev/null | tr -d '\r' | grep -q WINDOWS_CDP_READY; then
+          if "$CMD" /d /c "python -c \"import socket,json,urllib.request; print('WINDOWS_PY_READY')\"" 2>/dev/null | tr -d '\r' | grep -q WINDOWS_PY_READY; then
             echo "WINDOWS_PY_MODE=python" >> "$GITHUB_ENV"
-          elif "$CMD" /d /c "py -3 -c \"import websocket; print('WINDOWS_CDP_READY')\"" 2>/dev/null | tr -d '\r' | grep -q WINDOWS_CDP_READY; then
+          elif "$CMD" /d /c "py -3 -c \"import socket,json,urllib.request; print('WINDOWS_PY_READY')\"" 2>/dev/null | tr -d '\r' | grep -q WINDOWS_PY_READY; then
             echo "WINDOWS_PY_MODE=py" >> "$GITHUB_ENV"
           else
-            echo "WINDOWS_WEBSOCKET_CLIENT_UNAVAILABLE"
+            echo "WINDOWS_PYTHON_UNAVAILABLE"
             exit 1
           fi
           echo "WINDOWS_WEBVIEW_DEBUGGER_READY"
@@ -83,8 +83,7 @@ jobs:
           set -euo pipefail
           script="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-live-cdp.py"
           cat > "$script" <<'PY'
-          import base64, json, re, socket, time, urllib.parse, urllib.request
-          import websocket
+          import base64, json, os, socket, struct, time, urllib.parse, urllib.request
 
           BASE='http://127.0.0.1:19222'
           UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
@@ -94,28 +93,73 @@ jobs:
             'afterTime','beforeTime','count','cursor','feedLocation','feedbackSource','focusCommentID','memorializedSplitTimeFilter','omitPinnedPost','postedBy','privacy','privacySelectorRenderLocation','referringStoryRenderLocation','renderLocation','scale','stream_count','taggedInOnly','trackingCode','useDefaultActor','id',
             '__relay_internal__pv__GHLShouldChangeAdIdFieldNamerelayprovider','__relay_internal__pv__GHLShouldChangeSponsoredDataFieldNamerelayprovider','__relay_internal__pv__CometFeedStory_enable_reactor_facepilerelayprovider','__relay_internal__pv__CometFeedStory_enable_social_bubblesrelayprovider','__relay_internal__pv__CometFeedStory_enable_post_permalink_white_space_clickrelayprovider','__relay_internal__pv__CometUFICommentActionLinksRewriteEnabledrelayprovider','__relay_internal__pv__CometUFICommentAvatarStickerAnimatedImagerelayprovider','__relay_internal__pv__IsWorkUserrelayprovider','__relay_internal__pv__TestPilotShouldIncludeDemoAdUseCaserelayprovider','__relay_internal__pv__FBReels_deprecate_short_form_video_context_gkrelayprovider','__relay_internal__pv__FBReels_enable_view_dubbed_audio_type_gkrelayprovider','__relay_internal__pv__CometFeedShareMedia_shouldPrefetchShareImagerelayprovider','__relay_internal__pv__CometImmersivePhotoCanUserDisable3DMotionrelayprovider','__relay_internal__pv__WorkCometIsEmployeeGKProviderrelayprovider','__relay_internal__pv__IsMergQAPollsrelayprovider','__relay_internal__pv__FBReelsMediaFooter_comet_enable_reels_ads_gkrelayprovider','__relay_internal__pv__CometUFIReactionsEnableShortNamerelayprovider','__relay_internal__pv__CometUFICommentAutoTranslationTyperelayprovider','__relay_internal__pv__CometUFIShareActionMigrationrelayprovider','__relay_internal__pv__CometUFISingleLineUFIrelayprovider','__relay_internal__pv__relay_provider_comet_ufi_ssr_seo_deferrelayprovider','__relay_internal__pv__CometUFI_dedicated_comment_routable_dialog_gkrelayprovider','__relay_internal__pv__ReelsIFUCard_reelsIFULikeCountrelayprovider','__relay_internal__pv__FBReelsIFUTileContent_reelsIFUPlayOnHoverrelayprovider','__relay_internal__pv__GroupsCometGYSJFeedItemHeightrelayprovider','__relay_internal__pv__ShouldEnableBakedInTextStoriesrelayprovider','__relay_internal__pv__StoriesShouldIncludeFbNotesrelayprovider'
           }
+
+          class WS:
+            def __init__(self,url,timeout=.35):
+              u=urllib.parse.urlparse(url); self.sock=socket.create_connection((u.hostname,u.port or 80),3); self.sock.settimeout(timeout); self.buf=b''
+              key=base64.b64encode(os.urandom(16)).decode(); path=u.path or '/'
+              if u.query: path+='?'+u.query
+              req=(f'GET {path} HTTP/1.1\r\nHost: {u.netloc}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n').encode()
+              self.sock.sendall(req); header=self._until(b'\r\n\r\n')
+              if b' 101 ' not in header.split(b'\r\n',1)[0]: raise RuntimeError('WS_HANDSHAKE_FAILED')
+            def _read(self,n):
+              while len(self.buf)<n: self.buf+=self.sock.recv(max(4096,n-len(self.buf)))
+              out,self.buf=self.buf[:n],self.buf[n:]; return out
+            def _until(self,marker):
+              while marker not in self.buf: self.buf+=self.sock.recv(4096)
+              i=self.buf.index(marker)+len(marker); out,self.buf=self.buf[:i],self.buf[i:]; return out
+            def _send_frame(self,payload,opcode=1):
+              payload=payload if isinstance(payload,bytes) else payload.encode(); mask=os.urandom(4); n=len(payload); head=bytearray([0x80|opcode])
+              if n<126: head.append(0x80|n)
+              elif n<65536: head.append(0x80|126); head.extend(struct.pack('!H',n))
+              else: head.append(0x80|127); head.extend(struct.pack('!Q',n))
+              head.extend(mask); head.extend(bytes(b^mask[i%4] for i,b in enumerate(payload))); self.sock.sendall(head)
+            def send(self,text): self._send_frame(text,1)
+            def recv(self):
+              chunks=[]; started=False
+              while True:
+                b1,b2=self._read(2); fin=bool(b1&0x80); op=b1&0x0f; masked=bool(b2&0x80); n=b2&0x7f
+                if n==126: n=struct.unpack('!H',self._read(2))[0]
+                elif n==127: n=struct.unpack('!Q',self._read(8))[0]
+                mask=self._read(4) if masked else None; data=self._read(n)
+                if mask: data=bytes(b^mask[i%4] for i,b in enumerate(data))
+                if op==9: self._send_frame(data,10); continue
+                if op==8: raise EOFError('WS_CLOSED')
+                if op==1: chunks=[data]; started=True
+                elif op==0 and started: chunks.append(data)
+                else: continue
+                if fin: return b''.join(chunks).decode('utf-8','replace')
+            def close(self):
+              try: self._send_frame(b'',8)
+              except Exception: pass
+              try: self.sock.close()
+              except Exception: pass
+
           def targets():
             with urllib.request.urlopen(BASE+'/json',timeout=2) as r: return json.load(r)
           seq=0
           def command(ws,method,params=None,timeout=4,buffer=None):
             global seq
             seq+=1; ident=seq; ws.send(json.dumps({'id':ident,'method':method,'params':params or {}})); end=time.time()+timeout
-            while time.time()<end:
-              try: msg=json.loads(ws.recv())
-              except (socket.timeout,websocket.WebSocketTimeoutException): continue
-              if msg.get('id')==ident: return msg
-              if buffer is not None: buffer.append(msg)
+            old=ws.sock.gettimeout(); ws.sock.settimeout(min(.35,timeout))
+            try:
+              while time.time()<end:
+                try: msg=json.loads(ws.recv())
+                except socket.timeout: continue
+                if msg.get('id')==ident: return msg
+                if buffer is not None: buffer.append(msg)
+            finally: ws.sock.settimeout(old)
             raise TimeoutError(method)
-          all_targets=targets()
-          main=next((t for t in all_targets if str(t.get('url','')).startswith('https://localhost')),None)
+
+          all_targets=targets(); main=next((t for t in all_targets if str(t.get('url','')).startswith('https://localhost')),None)
           if not main: raise SystemExit('MAIN_CAPACITOR_TARGET_NOT_FOUND')
           baseline={t.get('id') for t in all_targets if t.get('type')=='page'}
-          main_ws=websocket.create_connection(main['webSocketDebuggerUrl'],timeout=1,suppress_origin=True); main_ws.settimeout(.35)
-          command(main_ws,'Runtime.enable')
+          main_ws=WS(main['webSocketDebuggerUrl']); command(main_ws,'Runtime.enable')
           hook="""(()=>{const c=window.Capacitor;if(!c||typeof c.nativePromise!=='function')return 'NO_CAPACITOR';if(window.__mrsDiagWrap)return 'ALREADY_WRAPPED';const o=c.nativePromise.bind(c);c.nativePromise=function(p,m,a){if(p==='AuthenticatedSocialSession'&&m==='collectSource'&&a&&a.platform==='facebook')window.__mrsDiagLast={url:String(a.url||''),limit:Number(a.limit||0)};return o(p,m,a)};window.__mrsDiagWrap=true;return 'WRAPPED'})()"""
           result=command(main_ws,'Runtime.evaluate',{'expression':hook,'returnByValue':True})
           print('CAPACITOR_COLLECT_HOOK='+str(result.get('result',{}).get('result',{}).get('value','')),flush=True)
           print('READY_FOR_ONE_REAL_SMART_GRAB',flush=True)
+
           collector=None; deadline=time.time()+210
           while time.time()<deadline and collector is None:
             try: current=targets()
@@ -125,12 +169,12 @@ jobs:
             if collector is None: time.sleep(.12)
           if collector is None: raise SystemExit('NO_NEW_COLLECTOR_WEBVIEW_SEEN')
           print('COLLECTOR_WEBVIEW_SEEN=1',flush=True)
-          r=command(main_ws,'Runtime.evaluate',{'expression':"String(window.__mrsDiagLast?.url||'')",'returnByValue':True})
-          source=str(r.get('result',{}).get('result',{}).get('value',''))
+          r=command(main_ws,'Runtime.evaluate',{'expression':"String(window.__mrsDiagLast?.url||'')",'returnByValue':True}); source=str(r.get('result',{}).get('result',{}).get('value',''))
           if not source.startswith('http'): raise SystemExit('COLLECT_SOURCE_URL_NOT_CAPTURED')
-          ws=websocket.create_connection(collector['webSocketDebuggerUrl'],timeout=1,suppress_origin=True); ws.settimeout(.2); buf=[]
+          ws=WS(collector['webSocketDebuggerUrl']); buf=[]
           for method,params in [('Runtime.enable',{}),('Network.enable',{}),('Page.enable',{}),('Network.setUserAgentOverride',{'userAgent':UA}),('Page.navigate',{'url':source})]: command(ws,method,params,buffer=buf)
           print('DESKTOP_UA_APPLIED_AND_SOURCE_RENAVIGATED=1',flush=True)
+
           reqid=None; status=None; contract=None; summary=None; docs=[]
           def parse_contract(data):
             try:
@@ -163,16 +207,15 @@ jobs:
                   out['timeline_edges']+=len(edges)
                   out['post_nodes_with_post_id']+=sum(1 for e in edges if isinstance(e,dict) and isinstance(e.get('node'),dict) and e['node'].get('post_id'))
             out['graphql_error_codes']=sorted(codes); return out
+
           end=time.time()+45
           while time.time()<end:
             try: msg=buf.pop(0) if buf else json.loads(ws.recv())
-            except (socket.timeout,websocket.WebSocketTimeoutException): continue
+            except socket.timeout: continue
             except Exception: break
             method=msg.get('method'); p=msg.get('params') or {}
             if method=='Network.requestWillBeSent':
-              req=p.get('request') or {}
-              try: u=urllib.parse.urlparse(str(req.get('url') or ''))
-              except Exception: continue
+              req=p.get('request') or {}; u=urllib.parse.urlparse(str(req.get('url') or ''))
               if u.hostname and u.hostname.endswith('facebook.com') and u.path=='/api/graphql/':
                 reqid=p.get('requestId'); post=req.get('postData') or ''
                 if not post and reqid:
@@ -195,10 +238,7 @@ jobs:
           print('FACEBOOK_DOCUMENT_STATUSES='+json.dumps(docs[-8:]),flush=True)
           print('GRAPHQL_HTTP_STATUS='+str(status if status is not None else 'NONE'),flush=True)
           print('GRAPHQL_RESPONSE_SUMMARY='+json.dumps(summary or {'not_captured':True},sort_keys=True,separators=(',',':')),flush=True)
-          try: ws.close()
-          except Exception: pass
-          try: main_ws.close()
-          except Exception: pass
+          ws.close(); main_ws.close()
           PY
           win_script="C:\\Users\\${WIN_USER}\\AppData\\Local\\Temp\\mrscrap-live-cdp.py"
           CMD=/mnt/c/Windows/System32/cmd.exe
