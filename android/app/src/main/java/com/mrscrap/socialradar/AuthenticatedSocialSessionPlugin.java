@@ -7,6 +7,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.webkit.CookieManager;
 
 import androidx.activity.result.ActivityResult;
@@ -31,6 +32,7 @@ import java.util.concurrent.TimeUnit;
 @CapacitorPlugin(name = "AuthenticatedSocialSession")
 public class AuthenticatedSocialSessionPlugin extends Plugin {
     private static final int MINIMUM_INTERVAL_MINUTES = 15;
+    private static final String FLOW_TAG = "MRSCRAP_FLOW";
 
     @PluginMethod
     public void status(PluginCall call) {
@@ -253,10 +255,14 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
             return;
         }
 
+        Log.i(FLOW_TAG, "event=collect_source_enter platform=" + platform +
+            " foreground=" + (getActivity() != null));
         AuthenticatedWebCollector.collect(foregroundContext(), url, limit, new AuthenticatedWebCollector.Callback() {
             @Override
             public void onSuccess(JSONObject result) {
                 try {
+                    int postCount = result.optJSONArray("posts") == null ? 0 : result.optJSONArray("posts").length();
+                    Log.i(FLOW_TAG, "event=collect_source_success platform=" + platform + " posts=" + postCount);
                     SessionStateStore.markChecked(getContext());
                     JSObject output = new JSObject();
                     output.put("posts", result.getJSONArray("posts"));
@@ -267,7 +273,10 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
                     call.reject("Could not normalize collected posts");
                 }
             }
-            @Override public void onError(String message) { call.reject(message); }
+            @Override public void onError(String message) {
+                Log.w(FLOW_TAG, "event=collect_source_error platform=" + platform + " code=" + safeErrorCode(message));
+                call.reject(message);
+            }
         });
     }
 
@@ -386,6 +395,12 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
     private Context foregroundContext() {
         Activity activity = getActivity();
         return activity != null ? activity : getContext();
+    }
+
+    private static String safeErrorCode(String message) {
+        if (message == null || message.isBlank()) return "unknown";
+        String code = message.split("\\|", 2)[0];
+        return code.replaceAll("[^A-Za-z0-9_.:-]", "_").substring(0, Math.min(80, code.length()));
     }
 
     private static String uniqueWorkName(String sourceId) {

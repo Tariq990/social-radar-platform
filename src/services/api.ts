@@ -40,6 +40,7 @@ class ApiRequestError extends Error {
 }
 
 let registrationPromise: Promise<ApiDeviceAuthSession> | null = null;
+let authSessionPromise: Promise<AppAuthSessionResponse> | null = null;
 
 function isNativeAndroid(): boolean {
   return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
@@ -143,7 +144,21 @@ async function clearStoredDeviceAuth(): Promise<void> {
 }
 
 export async function apiGetAuthSession(): Promise<AppAuthSessionResponse> {
-  return requestJson<AppAuthSessionResponse>('/api/auth/me');
+  if (authSessionPromise) return authSessionPromise;
+  const controller = new AbortController();
+  const timeout = globalThis.setTimeout(() => controller.abort(), 6_000);
+  authSessionPromise = requestJson<AppAuthSessionResponse>('/api/auth/me', { signal: controller.signal })
+    .catch(error => {
+      if (error instanceof ApiRequestError && error.status === 401) {
+        return { authenticated: false, user: null } as AppAuthSessionResponse;
+      }
+      throw error;
+    })
+    .finally(() => {
+      globalThis.clearTimeout(timeout);
+      authSessionPromise = null;
+    });
+  return authSessionPromise;
 }
 
 export async function apiRegister(email: string, password: string, name?: string): Promise<AppAuthSessionResponse> {

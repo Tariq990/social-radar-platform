@@ -11,7 +11,7 @@ test('foreground Meta collector stays fully renderable and starts DOM polling be
 
   assert.match(host, /root\.addView\(host, hostParams\)/);
   assert.match(host, /host\.addView\(webView, webParams\)/);
-  assert.match(host, /new FrameLayout\.LayoutParams\(1, 1\)/);
+  assert.match(host, /new FrameLayout\.LayoutParams\(48, 48\)/);
   assert.match(host, /webView\.setAlpha\(1f\)/);
   assert.match(host, /webView\.setLayerType\(View\.LAYER_TYPE_HARDWARE, null\)/);
   assert.match(host, /webView\.resumeTimers\(\)/);
@@ -24,6 +24,23 @@ test('foreground Meta collector stays fully renderable and starts DOM polling be
   assert.match(collector, /void onPageStarted\(WebView view, String loadedUrl/);
   assert.match(collector, /scheduleExtraction\(PAGE_STARTED_EXTRACTION_DELAY_MS\)/);
   assert.match(collector, /main\.postDelayed\(extractionRunner\[0\], PAGE_STARTED_EXTRACTION_DELAY_MS\)/);
+  assert.match(collector, /event=eval_result/);
+  assert.match(collector, /event=no_posts/);
+
+  const plugin = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSocialSessionPlugin.java');
+  assert.match(plugin, /MRSCRAP_FLOW/);
+  assert.match(plugin, /event=collect_source_enter/);
+});
+
+test('native startup paints before remote fonts or auth network complete', () => {
+  const index = read('index.html');
+  const app = read('src/App.tsx');
+  const api = read('src/services/api.ts');
+  assert.match(index, /id="mrscrap-boot-shell"/);
+  assert.match(index, /media="print" onload="this.media='all'"/);
+  assert.match(app, /isNativeAndroid\(\) \? 'authenticated' : 'checking'/);
+  assert.match(api, /authSessionPromise/);
+  assert.match(api, /6_000/);
 });
 
 test('Android update check keeps the app bootstrap mounted instead of serializing startup behind a dark screen', () => {

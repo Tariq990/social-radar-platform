@@ -188,6 +188,15 @@ final class AuthenticatedWebCollector {
                         int postCount = posts == null ? 0 : posts.length();
                         boolean reliableSource = errorCode.isBlank() && source != null &&
                             isAllowedSocialUrl(sourceUrl) && !isBlank(displayName) && !isBlank(externalId);
+                        JSONObject diagnostics = result.optJSONObject("diagnostics");
+                        String surface = diagnostics == null ? "unknown" : diagnostics.optString("surface", "unknown").replaceAll("[^A-Za-z0-9._-]", "");
+                        int containers = diagnostics == null ? 0 : diagnostics.optInt("containers", 0);
+                        int anchors = diagnostics == null ? 0 : diagnostics.optInt("anchors", 0);
+                        int postLinks = diagnostics == null ? 0 : diagnostics.optInt("postLinks", 0);
+                        int bodyLength = diagnostics == null ? 0 : diagnostics.optInt("bodyTextLength", 0);
+                        Log.i(TAG, "event=eval_result attempt=" + attempts[0] + " posts=" + postCount +
+                            " reliable=" + reliableSource + " surface=" + surface + " containers=" + containers +
+                            " anchors=" + anchors + " postLinks=" + postLinks + " body=" + bodyLength);
 
                         if (reliableSource && postCount >= targetLimit) {
                             finishSuccess(main, timeoutHolder[0], webView, finished, callback, result);
@@ -229,7 +238,9 @@ final class AuthenticatedWebCollector {
 
                         if (reliableSource) {
                             if (postCount == 0 && !result.optBoolean("explicitEmptyState", false)) {
-                                finishError(main, timeoutHolder[0], webView, finished, callback, noPostsDiagnostic(result));
+                                String diagnostic = noPostsDiagnostic(result);
+                                Log.w(TAG, "event=no_posts " + diagnostic);
+                                finishError(main, timeoutHolder[0], webView, finished, callback, diagnostic);
                             } else {
                                 finishSuccess(main, timeoutHolder[0], webView, finished, callback, result);
                             }

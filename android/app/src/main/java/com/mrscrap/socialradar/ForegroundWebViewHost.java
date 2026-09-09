@@ -48,10 +48,10 @@ final class ForegroundWebViewHost {
         host.setFocusable(false);
         host.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
 
-        FrameLayout.LayoutParams hostParams = new FrameLayout.LayoutParams(1, 1);
-        hostParams.gravity = Gravity.TOP | Gravity.START;
-        // Keep one physical pixel topmost so Surface/WebView visibility accounting cannot mark the
-        // collector fully occluded, while clipping all Facebook/Instagram pixels from the user.
+        FrameLayout.LayoutParams hostParams = new FrameLayout.LayoutParams(48, 48);
+        hostParams.gravity = Gravity.BOTTOM | Gravity.END;
+        // The 1x1 intersection still produced an empty physical Facebook feed. Keep a tiny but
+        // material topmost intersection while retaining a full-size child layout/JS viewport.
         root.addView(host, hostParams);
 
         FrameLayout.LayoutParams webParams = new FrameLayout.LayoutParams(

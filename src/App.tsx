@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Capacitor } from '@capacitor/core';
 import { RadarProvider, useRadar } from './context/RadarContext';
 import { Header } from './components/Header';
 import { Navigation } from './components/Navigation';
@@ -18,6 +19,8 @@ import { ForceUpdateGate } from './components/ForceUpdateGate';
 import { apiGetAuthSession } from './services/api';
 import { extractSupportedSocialUrl } from './lib/socialUrl';
 
+const isNativeAndroid = () => Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
+
 const RadarAppContent: React.FC = () => {
   const {
     currentScreen,
@@ -33,7 +36,7 @@ const RadarAppContent: React.FC = () => {
   } = useRadar();
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [authState, setAuthState] = useState<'checking' | 'authenticated' | 'anonymous'>('checking');
+  const [authState, setAuthState] = useState<'checking' | 'authenticated' | 'anonymous'>(() => isNativeAndroid() ? 'authenticated' : 'checking');
 
   useEffect(() => {
     let cancelled = false;
@@ -42,7 +45,9 @@ const RadarAppContent: React.FC = () => {
         if (!cancelled) setAuthState(session.authenticated && session.user ? 'authenticated' : 'anonymous');
       })
       .catch(() => {
-        if (!cancelled) setAuthState('anonymous');
+        // Network/cold-start failures must not blank a native shell. Protected API calls still
+        // enforce the server session, while a definitive anonymous response above switches to auth.
+        if (!cancelled && !isNativeAndroid()) setAuthState('anonymous');
       });
     return () => { cancelled = true; };
   }, []);
