@@ -14,69 +14,70 @@ permissions:
 jobs:
   probe:
     runs-on: [self-hosted, Linux]
-    timeout-minutes: 5
+    timeout-minutes: 7
     steps:
-      - name: Locate adb
+      - name: Detect runner boundary and adb backend
         shell: bash
         run: |
           set -euo pipefail
-          ADB="$(command -v adb || true)"
-          if [ -z "$ADB" ]; then
-            for sdk in \
-              "${ANDROID_HOME:-}" \
-              "${ANDROID_SDK_ROOT:-}" \
-              "$HOME/Android/Sdk" \
-              "$HOME/Android/sdk" \
-              "$HOME/.android/sdk" \
-              "/opt/android-sdk" \
-              "/usr/local/lib/android/sdk"
-            do
-              if [ -n "$sdk" ] && [ -x "$sdk/platform-tools/adb" ]; then
-                ADB="$(realpath "$sdk/platform-tools/adb")"
-                break
-              fi
+          if grep -qi microsoft /proc/version 2>/dev/null || [ -n "${WSL_DISTRO_NAME:-}" ]; then
+            echo "RUNNER_ENV=WSL"
+            is_wsl=1
+          else
+            echo "RUNNER_ENV=LINUX"
+            is_wsl=0
+          fi
+
+          linux_adb="$(command -v adb || true)"
+          if [ -z "$linux_adb" ]; then
+            for sdk in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" "$HOME/Android/Sdk" "$HOME/Android/sdk" "$HOME/.android/sdk" "/opt/android-sdk" "/usr/local/lib/android/sdk"; do
+              if [ -n "$sdk" ] && [ -x "$sdk/platform-tools/adb" ]; then linux_adb="$(realpath "$sdk/platform-tools/adb")"; break; fi
             done
           fi
-          if [ -z "$ADB" ]; then
-            ADB="$(find "$HOME" /opt /usr/local -maxdepth 8 -type f -path '*/platform-tools/adb' -perm -u+x -print -quit 2>/dev/null || true)"
+
+          selected="$linux_adb"
+          backend="linux"
+          if [ "$is_wsl" = 1 ] && command -v cmd.exe >/dev/null 2>&1; then
+            win_adb="$(cmd.exe /c where adb 2>/dev/null | tr -d '\r' | head -n1 || true)"
+            if [ -z "$win_adb" ]; then
+              win_user="$(cmd.exe /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+              candidate="/mnt/c/Users/${win_user}/AppData/Local/Android/Sdk/platform-tools/adb.exe"
+              if [ -n "$win_user" ] && [ -x "$candidate" ]; then win_adb="$candidate"; fi
+            elif command -v wslpath >/dev/null 2>&1; then
+              win_adb="$(wslpath "$win_adb" 2>/dev/null || printf '%s' "$win_adb")"
+            fi
+            if [ -n "$win_adb" ] && [ -x "$win_adb" ]; then
+              selected="$win_adb"
+              backend="windows"
+            else
+              echo "WINDOWS_ADB_NOT_FOUND"
+            fi
           fi
-          if [ -z "$ADB" ]; then
+
+          if [ -z "$selected" ] || [ ! -x "$selected" ]; then
             echo "ADB_NOT_FOUND"
             exit 2
           fi
-          echo "ADB=$ADB" >> "$GITHUB_ENV"
-          "$ADB" version | head -n 2
-
-      - name: Inspect USB layer safely
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "USB_LAYER_BEGIN"
-          if command -v lsusb >/dev/null 2>&1; then
-            # Show vendor/product descriptors only; do not print device serial numbers.
-            lsusb | sed -E 's/Bus [0-9]+ Device [0-9]+: ID /USB ID /' || true
-          else
-            echo "LSUSB_NOT_AVAILABLE"
-          fi
-          echo "RUNNER_GROUPS=$(id -Gn)"
-          echo "USB_LAYER_END"
+          echo "ADB=$selected" >> "$GITHUB_ENV"
+          echo "ADB_BACKEND=$backend" >> "$GITHUB_ENV"
+          echo "ADB_BACKEND=$backend"
+          "$selected" version | head -n 2
 
       - name: Detect authorized physical device
         shell: bash
         run: |
           set -euo pipefail
           "$ADB" kill-server >/dev/null 2>&1 || true
-          "$ADB" start-server >/dev/null
-
+          "$ADB" start-server >/dev/null 2>&1 || true
           SERIAL=""
-          for attempt in $(seq 1 10); do
-            states="$($ADB devices | awk 'NR>1 && NF>=2 {print $2}' | sort | uniq -c | xargs || true)"
+          for attempt in $(seq 1 12); do
+            snapshot="$($ADB devices 2>/dev/null | tr -d '\r' || true)"
+            states="$(printf '%s\n' "$snapshot" | awk 'NR>1 && NF>=2 {print $2}' | sort | uniq -c | xargs || true)"
             echo "ADB_ATTEMPT_${attempt}_STATES=${states:-none}"
-            SERIAL="$($ADB devices | awk 'NR>1 && $2=="device" {print $1; exit}')"
+            SERIAL="$(printf '%s\n' "$snapshot" | awk 'NR>1 && $2=="device" {print $1; exit}')"
             if [ -n "$SERIAL" ]; then break; fi
             sleep 3
           done
-
           if [ -z "$SERIAL" ]; then
             echo "NO_AUTHORIZED_ANDROID_DEVICE"
             exit 3
@@ -90,20 +91,25 @@ jobs:
           set -euo pipefail
           echo "APP_PACKAGE_INFO_BEGIN"
           "$ADB" -s "$SERIAL" shell dumpsys package com.mrscrap.socialradar 2>/dev/null \
+            | tr -d '\r' \
             | grep -E 'versionName=|versionCode=|firstInstallTime=|lastUpdateTime=' \
             | head -n 12 || true
           echo "APP_PACKAGE_INFO_END"
 
+          echo "ANDROID_RUNTIME_BEGIN"
+          android_release="$($ADB -s "$SERIAL" shell getprop ro.build.version.release 2>/dev/null | tr -d '\r' || true)"
+          android_sdk="$($ADB -s "$SERIAL" shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' || true)"
+          echo "ANDROID_RELEASE=${android_release:-unknown}"
+          echo "ANDROID_SDK=${android_sdk:-unknown}"
+          echo "ANDROID_RUNTIME_END"
+
           echo "WEBVIEW_PROVIDER_BEGIN"
-          "$ADB" -s "$SERIAL" shell cmd webviewupdate getCurrentWebViewPackage 2>/dev/null || true
+          "$ADB" -s "$SERIAL" shell cmd webviewupdate getCurrentWebViewPackage 2>/dev/null | tr -d '\r' || true
           echo "WEBVIEW_PROVIDER_END"
 
-          echo "APP_PROCESS_BEGIN"
           if "$ADB" -s "$SERIAL" shell pidof com.mrscrap.socialradar >/dev/null 2>&1; then
             echo "APP_PROCESS_RUNNING"
           else
             echo "APP_PROCESS_NOT_RUNNING"
           fi
-          echo "APP_PROCESS_END"
-
           echo "No cookies, credentials, DOM text, page content, or device serials are printed by this probe."

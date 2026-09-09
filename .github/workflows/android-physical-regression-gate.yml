@@ -1,9 +1,7 @@
 name: Android Physical Regression Gate
 
 on:
-  push:
-    branches:
-      - test/android-timeout-startup-20260909
+  workflow_dispatch:
 
 permissions:
   contents: read
