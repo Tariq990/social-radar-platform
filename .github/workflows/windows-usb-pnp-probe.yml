@@ -1,0 +1,41 @@
+name: Windows USB PnP Probe
+
+on:
+  push:
+    branches:
+      - test/android-timeout-startup-20260909
+    paths:
+      - .github/workflows/windows-usb-pnp-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 3
+    steps:
+      - name: Inspect Windows phone and ADB device classes safely
+        shell: bash
+        run: |
+          set -euo pipefail
+          ps=/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
+          if [ ! -x "$ps" ]; then
+            echo "WINDOWS_POWERSHELL_UNAVAILABLE"
+            exit 2
+          fi
+          "$ps" -NoProfile -NonInteractive -Command '
+            $items = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object {
+              $_.Class -in @("AndroidUsbDeviceClass","WPD","USBDevice") -or
+              $_.FriendlyName -match "Android|ADB|MTP|Phone|Mobile|Samsung|Pixel|Xiaomi|Redmi|POCO|OnePlus|Motorola|Huawei|OPPO|vivo|Nothing"
+            } | Select-Object Status,Class,FriendlyName;
+            if (-not $items) { Write-Output "WINDOWS_PHONE_PNP=none"; exit 0 }
+            Write-Output ("WINDOWS_PHONE_PNP_COUNT=" + @($items).Count)
+            $items | ForEach-Object {
+              $name = if ($_.FriendlyName) { $_.FriendlyName -replace "[\r\n|]"," " } else { "unknown" }
+              $class = if ($_.Class) { $_.Class } else { "unknown" }
+              Write-Output ("PNP|status=" + $_.Status + "|class=" + $class + "|name=" + $name)
+            }
+          ' | tr -d '\r'
+          echo "No hardware IDs, serial numbers, cookies, credentials, or app content are printed."
