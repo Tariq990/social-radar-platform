@@ -40,6 +40,8 @@ test('native collector supports bounded multi-post collection', () => {
   assert.match(collector, /window\.scrollBy/);
   assert.match(collector, /posts\.slice\(0, LIMIT\)/);
   assert.match(collector, /setOffscreenPreRaster\(true\)/);
+  assert.match(collector, /EVALUATION_WATCHDOG_MS/);
+  assert.match(collector, /evaluationInFlight/);
   assert.match(collector, /authority\("www\.facebook\.com"\)/);
   assert.match(collector, /webView\.loadUrl\(desktopUrl\)/);
   assert.match(collector, /SURFACE_FALLBACK_ATTEMPT\s*=\s*4/);
@@ -148,6 +150,7 @@ test('Android updater UI follows stored MR SCRAP locale', () => {
   assert.match(gate, /mrscrap_locale_v2/);
   assert.match(gate, /stored === 'ar'/);
   assert.match(gate, /stored === 'en'/);
+  assert.match(gate, /const \[checking, setChecking\] = useState\(false\)/);
 });
 
 test('initial monitoring snapshot is a baseline except for explicit latest-post rules', () => {
@@ -246,7 +249,8 @@ test('foreground Smart Grab uses an Activity-attached Meta WebView while backgro
   const collector = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedWebCollector.java');
   const detail = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedPostDetailCollector.java');
   const worker = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSourceWorker.java');
-  assert.match(host, /root\.addView\(webView, 0, params\)/);
+  assert.match(host, /root\.addView\(host, hostParams\)/);
+  assert.match(host, /host\.addView\(webView, webParams\)/);
   assert.match(host, /webView\.onResume\(\)/);
   assert.match(host, /context instanceof Activity/);
   assert.match(plugin, /AuthenticatedWebCollector\.collect\(foregroundContext\(\)/);

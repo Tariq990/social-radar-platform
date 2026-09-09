@@ -4,6 +4,7 @@ import android.content.Context;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.view.View;
 import android.webkit.CookieManager;
 import android.webkit.WebResourceRequest;
@@ -32,10 +33,12 @@ final class AuthenticatedWebCollector {
     private static final long PAGE_STARTED_EXTRACTION_DELAY_MS = 900;
     private static final long FIRST_EXTRACTION_DELAY_MS = 450;
     private static final long RETRY_DELAY_MS = 750;
+    private static final long EVALUATION_WATCHDOG_MS = 2_500;
     private static final int SURFACE_FALLBACK_ATTEMPT = 4;
     private static final int MAX_EXTRACTION_ATTEMPTS = 12;
     private static final int DEFAULT_LIMIT = 10;
     private static final int MAX_LIMIT = 20;
+    private static final String TAG = "MRSCRAP_COLLECTOR";
 
     private AuthenticatedWebCollector() {}
 
@@ -74,6 +77,8 @@ final class AuthenticatedWebCollector {
 
         main.post(() -> {
             AtomicBoolean finished = new AtomicBoolean(false);
+            AtomicBoolean evaluationInFlight = new AtomicBoolean(false);
+            int[] evaluationGeneration = new int[] { 0 };
             int[] attempts = new int[] { 0 };
             boolean[] triedMobileFallback = new boolean[] { false };
             boolean[] triedBasicFallback = new boolean[] { false };
@@ -105,16 +110,65 @@ final class AuthenticatedWebCollector {
             cookieManager.setAcceptThirdPartyCookies(webView, true);
 
             final Runnable[] timeoutHolder = new Runnable[1];
-            timeoutHolder[0] = () -> finishError(main, null, webView, finished, callback, "Authenticated source load timed out");
+            timeoutHolder[0] = () -> {
+                Log.w(TAG, "event=global_timeout attempts=" + attempts[0] +
+                    " progress=" + webView.getProgress() + " attached=" + webView.isAttachedToWindow());
+                finishError(main, null, webView, finished, callback,
+                    "COLLECTOR_TIMEOUT|attempts=" + attempts[0] +
+                    "|progress=" + webView.getProgress() +
+                    "|attached=" + webView.isAttachedToWindow());
+            };
             main.postDelayed(timeoutHolder[0], TIMEOUT_MS);
 
             final Runnable[] extractionRunner = new Runnable[1];
             extractionRunner[0] = () -> {
                 if (finished.get()) return;
+                if (!evaluationInFlight.compareAndSet(false, true)) return;
                 attempts[0]++;
+                final int generation = ++evaluationGeneration[0];
+                Log.i(TAG, "event=extract_start attempt=" + attempts[0] +
+                    " progress=" + webView.getProgress() + " attached=" + webView.isAttachedToWindow());
+
+                main.postDelayed(() -> {
+                    if (finished.get() || evaluationGeneration[0] != generation ||
+                        !evaluationInFlight.compareAndSet(true, false)) return;
+                    evaluationGeneration[0]++; // Invalidate a callback that arrives after this watchdog.
+                    Log.w(TAG, "event=eval_watchdog attempt=" + attempts[0] +
+                        " progress=" + webView.getProgress() + " attached=" + webView.isAttachedToWindow());
+
+                    if (attempts[0] >= SURFACE_FALLBACK_ATTEMPT) {
+                        if (!triedMobileFallback[0] && mobileUrl != null && !mobileUrl.equals(desktopUrl)) {
+                            triedMobileFallback[0] = true;
+                            attempts[0] = 0;
+                            Log.i(TAG, "event=fallback surface=mobile");
+                            webView.loadUrl(mobileUrl);
+                            main.postDelayed(extractionRunner[0], PAGE_STARTED_EXTRACTION_DELAY_MS);
+                            return;
+                        }
+                        if (!triedBasicFallback[0] && basicFallbackUrl != null &&
+                            !basicFallbackUrl.equals(desktopUrl) && !basicFallbackUrl.equals(mobileUrl)) {
+                            triedBasicFallback[0] = true;
+                            attempts[0] = 0;
+                            Log.i(TAG, "event=fallback surface=basic");
+                            webView.loadUrl(basicFallbackUrl);
+                            main.postDelayed(extractionRunner[0], PAGE_STARTED_EXTRACTION_DELAY_MS);
+                            return;
+                        }
+                    }
+
+                    if (attempts[0] >= MAX_EXTRACTION_ATTEMPTS) {
+                        finishError(main, timeoutHolder[0], webView, finished, callback,
+                            "COLLECTOR_EVAL_TIMEOUT|attempts=" + attempts[0] +
+                            "|progress=" + webView.getProgress() +
+                            "|attached=" + webView.isAttachedToWindow());
+                    } else {
+                        main.postDelayed(extractionRunner[0], RETRY_DELAY_MS);
+                    }
+                }, EVALUATION_WATCHDOG_MS);
 
                 webView.evaluateJavascript(extractionScript(url, targetLimit), value -> {
-                    if (finished.get()) return;
+                    if (finished.get() || evaluationGeneration[0] != generation) return;
+                    evaluationInFlight.set(false);
                     try {
                         Object decoded = new JSONTokener(value).nextValue();
                         String json = decoded instanceof String ? (String) decoded : value;
@@ -144,14 +198,18 @@ final class AuthenticatedWebCollector {
                             if (!triedMobileFallback[0] && mobileUrl != null && !mobileUrl.equals(desktopUrl)) {
                                 triedMobileFallback[0] = true;
                                 attempts[0] = 0;
+                                Log.i(TAG, "event=fallback surface=mobile");
                                 webView.loadUrl(mobileUrl);
+                                main.postDelayed(extractionRunner[0], PAGE_STARTED_EXTRACTION_DELAY_MS);
                                 return;
                             }
                             if (!triedBasicFallback[0] && basicFallbackUrl != null &&
                                 !basicFallbackUrl.equals(desktopUrl) && !basicFallbackUrl.equals(mobileUrl)) {
                                 triedBasicFallback[0] = true;
                                 attempts[0] = 0;
+                                Log.i(TAG, "event=fallback surface=basic");
                                 webView.loadUrl(basicFallbackUrl);
+                                main.postDelayed(extractionRunner[0], PAGE_STARTED_EXTRACTION_DELAY_MS);
                                 return;
                             }
                         }
@@ -160,8 +218,9 @@ final class AuthenticatedWebCollector {
                             if (reliableSource) {
                                 webView.evaluateJavascript(
                                     "(() => { const h=Math.max(window.innerHeight||700,700); const max=Math.max(document.body?.scrollHeight||0,document.documentElement?.scrollHeight||0); window.scrollBy(0,Math.round(h*1.7)); if(window.scrollY+h>=max-80) window.scrollTo(0,max); return window.scrollY; })()",
-                                    ignored -> main.postDelayed(extractionRunner[0], RETRY_DELAY_MS)
+                                    ignored -> { }
                                 );
+                                main.postDelayed(extractionRunner[0], RETRY_DELAY_MS);
                             } else {
                                 main.postDelayed(extractionRunner[0], RETRY_DELAY_MS);
                             }
@@ -198,7 +257,9 @@ final class AuthenticatedWebCollector {
             webView.setWebViewClient(new WebViewClient() {
                 private void scheduleExtraction(long delayMs) {
                     if (finished.get()) return;
-                    main.removeCallbacks(extractionRunner[0]);
+                    // Never cancel the independent poll loop. Some Android WebViews emit repeated
+                    // navigation callbacks while Facebook is hydrating, which previously kept
+                    // postponing the only extraction runnable until the global timeout fired.
                     main.postDelayed(extractionRunner[0], delayMs);
                 }
 
@@ -211,6 +272,8 @@ final class AuthenticatedWebCollector {
                 public void onPageStarted(WebView view, String loadedUrl, android.graphics.Bitmap favicon) {
                     super.onPageStarted(view, loadedUrl, favicon);
                     if (!isAllowedSocialUrl(loadedUrl) || finished.get()) return;
+                    Log.i(TAG, "event=page_started progress=" + view.getProgress() +
+                        " attached=" + view.isAttachedToWindow());
                     // Facebook can keep network activity alive for a long time. Start DOM polling as
                     // soon as navigation begins instead of waiting only for commit/finished callbacks.
                     scheduleExtraction(PAGE_STARTED_EXTRACTION_DELAY_MS);
@@ -227,11 +290,16 @@ final class AuthenticatedWebCollector {
                 public void onPageFinished(WebView view, String loadedUrl) {
                     super.onPageFinished(view, loadedUrl);
                     if (!isAllowedSocialUrl(loadedUrl) || finished.get()) return;
+                    Log.i(TAG, "event=page_finished progress=" + view.getProgress() +
+                        " attached=" + view.isAttachedToWindow());
                     scheduleExtraction(180);
                 }
             });
 
+            Log.i(TAG, "event=load_start attached=" + webView.isAttachedToWindow());
             webView.loadUrl(desktopUrl);
+            // Physical Android must not depend on WebViewClient callbacks to begin extraction.
+            main.postDelayed(extractionRunner[0], PAGE_STARTED_EXTRACTION_DELAY_MS);
         });
     }
 

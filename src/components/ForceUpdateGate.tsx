@@ -47,7 +47,7 @@ function cacheDecision(decision: AndroidUpdateDecision | null) {
 }
 
 export const ForceUpdateGate: React.FC<Props> = ({ children }) => {
-  const [checking, setChecking] = useState(isNativeAndroid());
+  const [checking, setChecking] = useState(false);
   const [requiredUpdate, setRequiredUpdate] = useState<AndroidUpdateDecision | null>(null);
   const [installing, setInstalling] = useState(false);
   const [message, setMessage] = useState('');

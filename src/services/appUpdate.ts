@@ -56,10 +56,17 @@ export async function checkAndroidUpdate(): Promise<{
   const baseUrl = getApiBaseUrl().replace(/\/+$/, '');
   if (!baseUrl) throw new Error('Android update check is missing the backend base URL');
 
-  const response = await fetch(
-    `${baseUrl}/api/app/update?versionCode=${encodeURIComponent(String(installed.versionCode))}`,
-    { credentials: 'omit', cache: 'no-store' }
-  );
+  const controller = new AbortController();
+  const timeout = globalThis.setTimeout(() => controller.abort(), 5_000);
+  let response: Response;
+  try {
+    response = await fetch(
+      `${baseUrl}/api/app/update?versionCode=${encodeURIComponent(String(installed.versionCode))}`,
+      { credentials: 'omit', cache: 'no-store', signal: controller.signal }
+    );
+  } finally {
+    globalThis.clearTimeout(timeout);
+  }
   const raw = await response.text();
   let body: any = null;
   try {
