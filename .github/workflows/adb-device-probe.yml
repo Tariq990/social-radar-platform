@@ -55,15 +55,8 @@ jobs:
               if [ ! -x "$cache/platform-tools/adb.exe" ]; then
                 echo "WINDOWS_ADB_BOOTSTRAP=download"
                 zip="$cache/platform-tools.zip"
-                curl -fsSL --retry 3 --retry-delay 2 \
-                  https://dl.google.com/android/repository/platform-tools-latest-windows.zip \
-                  -o "$zip"
-                python3 - "$zip" "$cache" <<'PY'
-import sys, zipfile
-zip_path, target = sys.argv[1], sys.argv[2]
-with zipfile.ZipFile(zip_path) as z:
-    z.extractall(target)
-PY
+                curl -fsSL --retry 3 --retry-delay 2 https://dl.google.com/android/repository/platform-tools-latest-windows.zip -o "$zip"
+                python3 -c 'import sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); z.extractall(sys.argv[2]); z.close()' "$zip" "$cache"
                 rm -f "$zip"
               fi
               if [ -x "$cache/platform-tools/adb.exe" ]; then
@@ -115,10 +108,7 @@ PY
         run: |
           set -euo pipefail
           echo "APP_PACKAGE_INFO_BEGIN"
-          "$ADB" -s "$SERIAL" shell dumpsys package com.mrscrap.socialradar 2>/dev/null \
-            | tr -d '\r' \
-            | grep -E 'versionName=|versionCode=|firstInstallTime=|lastUpdateTime=' \
-            | head -n 12 || true
+          "$ADB" -s "$SERIAL" shell dumpsys package com.mrscrap.socialradar 2>/dev/null | tr -d '\r' | grep -E 'versionName=|versionCode=|firstInstallTime=|lastUpdateTime=' | head -n 12 || true
           echo "APP_PACKAGE_INFO_END"
 
           echo "ANDROID_RUNTIME_BEGIN"
