@@ -25,6 +25,8 @@ jobs:
           emu="${sdk}/emulator/emulator.exe"
           avd="/mnt/c/Users/${win_user}/.android/avd/test_avd.avd"
           features="/mnt/c/Users/${win_user}/.android/advancedFeatures.ini"
+          temp="/mnt/c/Users/${win_user}/AppData/Local/Temp/MRSCRAP"
+          mkdir -p "$temp"
 
           echo '=== LOCAL SYSTEM IMAGES ==='
           find "${sdk}/system-images" -maxdepth 4 -type f \( -name system.img -o -name package.xml \) -printf '%p\n' 2>/dev/null | sort || true
@@ -33,14 +35,39 @@ jobs:
           echo '=== ADVANCED FEATURES ==='
           grep -E -i '^(GLESDynamicVersion|GLDirectMem|HasSharedSlotsHostMemoryAllocator)\s*=' "$features" 2>/dev/null || true
           echo '=== EMULATOR VERSION ==='
-          timeout 20s "$emu" -version 2>&1 | tr -d '\r' | head -n 8 || true
+          "$emu" -version 2>&1 | tr -d '\r' | head -n 8 || true
+
           echo '=== EFFECTIVE FEATURE LIST ==='
-          timeout 20s "$emu" -feature-list 2>&1 | tr -d '\r' | grep -E -i 'GLDirectMem|HasSharedSlotsHostMemoryAllocator|GLESDynamicVersion|ReadColor|DMA' || true
+          feature_ps1="${temp}/gfx-feature-list.ps1"
+          feature_log="${temp}/gfx-feature-list.log"
+          cat > "$feature_ps1" <<POWERSHELL
+          \$ErrorActionPreference='Stop'
+          \$exe='${sdk_win}\\emulator\\emulator.exe'
+          \$log='C:\\Users\\${win_user}\\AppData\\Local\\Temp\\MRSCRAP\\gfx-feature-list.log'
+          Remove-Item -Force \$log -ErrorAction SilentlyContinue
+          \$cmd='cmd.exe /d /s /c ""' + \$exe + '" -feature-list >"' + \$log + '" 2>&1"'
+          \$r=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=\$cmd}
+          Write-Output ("FEATURE_LIST_LAUNCH_RETURN={0} PID={1}" -f \$r.ReturnValue,\$r.ProcessId)
+          if (\$r.ReturnValue -ne 0) { exit 2 }
+          \$deadline=(Get-Date).AddSeconds(15)
+          while ((Get-Date) -lt \$deadline) {
+            if (-not (Get-Process -Id \$r.ProcessId -ErrorAction SilentlyContinue)) { break }
+            Start-Sleep -Milliseconds 500
+          }
+          if (Get-Process -Id \$r.ProcessId -ErrorAction SilentlyContinue) {
+            Stop-Process -Id \$r.ProcessId -Force -ErrorAction SilentlyContinue
+            Write-Output 'FEATURE_LIST_TIMEOUT=1'
+          } else {
+            Write-Output 'FEATURE_LIST_TIMEOUT=0'
+          }
+          POWERSHELL
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(wslpath -w "$feature_ps1")" | tr -d '\r'
+          tr -d '\r' < "$feature_log" 2>/dev/null | grep -E -i 'GLDirectMem|HasSharedSlotsHostMemoryAllocator|GLESDynamicVersion|ReadColor|DMA' || true
 
           "$adb" kill-server >/dev/null 2>&1 || true
-          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/MRSCRAP/gfx-trace-start.ps1"
-          hostout="/mnt/c/Users/${win_user}/AppData/Local/Temp/MRSCRAP/gfx-trace-host.out.log"
-          hosterr="/mnt/c/Users/${win_user}/AppData/Local/Temp/MRSCRAP/gfx-trace-host.err.log"
+          ps1="${temp}/gfx-trace-start.ps1"
+          hostout="${temp}/gfx-trace-host.out.log"
+          hosterr="${temp}/gfx-trace-host.err.log"
           cat > "$ps1" <<POWERSHELL
           \$ErrorActionPreference='Stop'
           \$sdk='${sdk_win}'
@@ -53,8 +80,12 @@ jobs:
           \$out='C:\\Users\\${win_user}\\AppData\\Local\\Temp\\MRSCRAP\\gfx-trace-host.out.log'
           \$err='C:\\Users\\${win_user}\\AppData\\Local\\Temp\\MRSCRAP\\gfx-trace-host.err.log'
           Remove-Item -Force \$out,\$err -ErrorAction SilentlyContinue
-          \$args=@('@test_avd','-sysdir','${sdk_win}\\system-images\\android-36\\google_apis\\x86_64','-no-audio','-no-boot-anim','-no-snapshot','-gpu','swangle_indirect','-no-window','-verbose')
-          Start-Process -FilePath (Join-Path \$sdk 'emulator\\emulator.exe') -ArgumentList \$args -RedirectStandardOutput \$out -RedirectStandardError \$err -WindowStyle Hidden
+          \$exe=Join-Path \$sdk 'emulator\\emulator.exe'
+          \$args='@test_avd -sysdir ${sdk_win}\\system-images\\android-36\\google_apis\\x86_64 -no-audio -no-boot-anim -no-snapshot -gpu swangle_indirect -no-window -verbose'
+          \$cmd='cmd.exe /d /s /c ""' + \$exe + '" ' + \$args + ' 1>"' + \$out + '" 2>"' + \$err + '""'
+          \$r=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=\$cmd}
+          Write-Output ("DETACHED_LAUNCH_RETURN={0} PID={1}" -f \$r.ReturnValue,\$r.ProcessId)
+          if (\$r.ReturnValue -ne 0) { exit 3 }
           POWERSHELL
           /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
 
@@ -73,7 +104,13 @@ jobs:
           fi
 
           echo "SERIAL=$serial"
-          sleep 75
+          boot=''
+          for i in $(seq 1 15); do
+            boot="$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+            [ "$boot" = '1' ] && break
+            sleep 5
+          done
+          echo "BOOT_AFTER_WAIT=$boot"
           echo '=== ALL GUEST DMA / HOSTCONNECTION LINES ==='
           full="$($adb -s "$serial" logcat -d -v threadtime 2>/dev/null | tr -d '\r' || true)"
           printf '%s\n' "$full" | grep -E -i 'ANDROID_EMU_read_color_buffer_dma|HostConnection|HostComposition|GoldfishMapper|mapper\.ranchu|RegionSampling|hasReadColorBufferDma' | tail -n 700 || true
@@ -85,5 +122,6 @@ jobs:
           echo "BOOT=$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1 || true)"
           echo "SS=$($adb -s "$serial" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
           echo "SF=$($adb -s "$serial" shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true)"
+          echo "ACTIVITY=$($adb -s "$serial" shell service check activity 2>/dev/null | tr -d '\r' | tail -n1 || true)"
           echo "PACKAGE=$($adb -s "$serial" shell service check package 2>/dev/null | tr -d '\r' | tail -n1 || true)"
           echo GFXSTREAM_TRACE_COMPLETE=1
