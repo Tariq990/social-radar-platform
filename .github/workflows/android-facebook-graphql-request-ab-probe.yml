@@ -1,0 +1,309 @@
+name: Android Facebook GraphQL Request AB Probe
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-facebook-graphql-request-ab-probe.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 8
+    env:
+      PKG: com.mrscrap.socialradar
+    steps:
+      - name: Restart only installed v144 and preserve Facebook session
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1;exit}')"
+          test -s "$adb"; test -n "$serial"
+          version="$($adb -s "$serial" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"
+          echo "INSTALLED_VERSION_CODE=$version"; test "$version" = 144
+          before="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          printf '%s' "$before" | grep -q facebook_connected_at
+          echo FACEBOOK_SESSION_BEFORE=1
+          $adb -s "$serial" shell am force-stop "$PKG" >/dev/null 2>&1 || true
+          $adb -s "$serial" shell am start -W -n "$PKG/.MainActivity" >/dev/null
+          sleep 7
+          after="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          printf '%s' "$after" | grep -q facebook_connected_at
+          echo FACEBOOK_SESSION_AFTER=1
+          pid="$($adb -s "$serial" shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"; test -n "$pid"
+          socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | grep -E "${pid}$|_${pid}($|_)" | head -n1 || true)"
+          [ -n "$socket" ] || socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | head -n1 || true)"
+          test -n "$socket"
+          $adb -s "$serial" forward --remove tcp:9223 >/dev/null 2>&1 || true
+          $adb -s "$serial" forward tcp:9223 "localabstract:$socket" >/dev/null
+          $adb -s "$serial" logcat -c >/dev/null 2>&1 || true
+          echo "ADB=$adb" >> "$GITHUB_ENV"
+          echo "SERIAL=$serial" >> "$GITHUB_ENV"
+          echo "WIN_USER=$win_user" >> "$GITHUB_ENV"
+          echo AB_PROBE_PREREQS=PASS
+
+      - name: Open Radar and trigger real Facebook collector
+        shell: bash
+        run: |
+          set -euo pipefail
+          ps1="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-graphql-ab.ps1"
+          cat > "$ps1" <<'PS'
+          $ErrorActionPreference='Stop'
+
+          function Get-Targets {
+            return @(Invoke-RestMethod -Uri 'http://127.0.0.1:9223/json/list' -TimeoutSec 4)
+          }
+
+          function Get-AppTarget {
+            $targets=Get-Targets
+            $app=@($targets | Where-Object { $_.type -eq 'page' -and [string]$_.url -like 'https://localhost*' } | Select-Object -First 1)
+            if($app.Count -eq 0){ throw 'Capacitor target missing' }
+            return $app[0]
+          }
+
+          function Invoke-CdpEval([string]$raw,[string]$expression,[int]$timeoutSeconds=15) {
+            $uri=[Uri]$raw
+            $wsUrl='ws://127.0.0.1:9223'+$uri.PathAndQuery
+            $ws=[System.Net.WebSockets.ClientWebSocket]::new()
+            $cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($timeoutSeconds))
+            $ws.ConnectAsync([Uri]$wsUrl,$cts.Token).GetAwaiter().GetResult() | Out-Null
+            $payload=@{id=1;method='Runtime.evaluate';params=@{expression=$expression;returnByValue=$true;awaitPromise=$true}} | ConvertTo-Json -Compress -Depth 12
+            $bytes=[Text.Encoding]::UTF8.GetBytes($payload)
+            $ws.SendAsync([ArraySegment[byte]]::new($bytes),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult() | Out-Null
+            $buffer=New-Object byte[] 262144
+            $builder=[Text.StringBuilder]::new()
+            while($true){
+              $received=$ws.ReceiveAsync([ArraySegment[byte]]::new($buffer),$cts.Token).GetAwaiter().GetResult()
+              if($received.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close){ throw 'CDP closed before result' }
+              [void]$builder.Append([Text.Encoding]::UTF8.GetString($buffer,0,$received.Count))
+              if(!$received.EndOfMessage){ continue }
+              $message=$builder.ToString() | ConvertFrom-Json
+              $builder.Clear() | Out-Null
+              if($message.id -ne 1){ continue }
+              if($message.result.exceptionDetails){ throw 'Runtime.evaluate exception' }
+              $value=$message.result.result.value
+              try{$ws.Abort()}catch{}
+              return $value
+            }
+          }
+
+          $app=Get-AppTarget
+          $nav="(()=>{window.dispatchEvent(new CustomEvent('mrscrap:navigate',{detail:{screen:'radar'}}));return true})()"
+          $null=Invoke-CdpEval ([string]$app.webSocketDebuggerUrl) $nav 8
+
+          $buttonExpr=@'
+          (()=>{
+            const norm=s=>String(s||'').replace(/\s+/g,' ').trim();
+            const b=[...document.querySelectorAll('button')].find(x=>{
+              const t=norm(x.innerText||x.textContent);
+              return t.includes('\u0627\u062c\u0644\u0628 \u0622\u062e\u0631 10 \u0648\u062d\u0644\u0644\u0647\u0627') || /Grab latest 10 and analyze/i.test(t);
+            });
+            return {found:Boolean(b),enabled:Boolean(b&&!b.disabled)};
+          })()
+          '@
+          $state=$null
+          for($i=0;$i -lt 30;$i++){
+            Start-Sleep -Milliseconds 400
+            $app=Get-AppTarget
+            $state=Invoke-CdpEval ([string]$app.webSocketDebuggerUrl) $buttonExpr 8
+            if($state.found){break}
+          }
+          Write-Output ('GRAB_BUTTON_FOUND='+$(if($state.found){'1'}else{'0'}))
+          Write-Output ('GRAB_BUTTON_ENABLED='+$(if($state.enabled){'1'}else{'0'}))
+          if(!$state.found -or !$state.enabled){ exit 90 }
+
+          $clickExpr=@'
+          (()=>{
+            const norm=s=>String(s||'').replace(/\s+/g,' ').trim();
+            const b=[...document.querySelectorAll('button')].find(x=>{
+              const t=norm(x.innerText||x.textContent);
+              return t.includes('\u0627\u062c\u0644\u0628 \u0622\u062e\u0631 10 \u0648\u062d\u0644\u0644\u0647\u0627') || /Grab latest 10 and analyze/i.test(t);
+            });
+            if(!b||b.disabled)return false;
+            b.click(); return true;
+          })()
+          '@
+          $clicked=Invoke-CdpEval ([string]$app.webSocketDebuggerUrl) $clickExpr 8
+          Write-Output ('REAL_GRAB_CLICKED='+$(if($clicked){'1'}else{'0'}))
+          if(!$clicked){exit 91}
+
+          $fb=$null
+          for($i=0;$i -lt 40;$i++){
+            Start-Sleep -Milliseconds 250
+            $targets=Get-Targets
+            $matches=@($targets | Where-Object {
+              if($_.type -ne 'page'){ return $false }
+              try {
+                $h=([Uri][string]$_.url).Host.ToLowerInvariant()
+                return ($h -eq 'facebook.com' -or $h.EndsWith('.facebook.com'))
+              } catch { return $false }
+            })
+            if($matches.Count -gt 0){ $fb=$matches[0]; break }
+          }
+          if($null -eq $fb){ Write-Output 'FACEBOOK_TARGET_FOUND=0'; exit 92 }
+          Write-Output 'FACEBOOK_TARGET_FOUND=1'
+
+          $readyExpr=@'
+          (()=>({
+            ready:String(document.readyState||''),
+            facebook:(()=>{const h=String(location.hostname||'').toLowerCase();return h==='facebook.com'||h.endsWith('.facebook.com')})(),
+            login:Boolean(document.querySelector('form[action*="login"],input[name="email"],input[name="pass"]')),
+            checkpoint:String(location.pathname||'').toLowerCase().includes('/checkpoint')
+          }))()
+          '@
+          $ready=$null
+          for($i=0;$i -lt 30;$i++){
+            $ready=Invoke-CdpEval ([string]$fb.webSocketDebuggerUrl) $readyExpr 8
+            if($ready.facebook -and $ready.ready -eq 'complete'){break}
+            Start-Sleep -Milliseconds 300
+          }
+          Write-Output ('FB_READY_COMPLETE='+$(if($ready.ready -eq 'complete'){'1'}else{'0'}))
+          Write-Output ('FB_LOGIN_FORM='+$(if($ready.login){'1'}else{'0'}))
+          Write-Output ('FB_CHECKPOINT='+$(if($ready.checkpoint){'1'}else{'0'}))
+          if(!$ready.facebook -or $ready.login -or $ready.checkpoint){exit 93}
+
+          $abExpr=@'
+          (async()=>{
+            const DOC_ID='27465012859856795';
+            const FRIENDLY='ProfileCometTimelineFeedRefetchQuery';
+            const req=name=>{try{return typeof window.require==='function'?window.require(name):null}catch(_){return null}};
+            const dtsg=String(req('DTSGInitialData')?.token||'');
+            const lsd=String(req('LSD')?.token||'');
+            const userId=String(req('CurrentUserInitialData')?.USER_ID||'');
+            const requireAvailable=typeof window.require==='function';
+
+            const html=document.documentElement?.innerHTML||'';
+            const metaApp=document.querySelector('meta[property="al:ios:url"],meta[property="al:android:url"]')?.content||'';
+            let sourceId='';
+            try{sourceId=(new URL(location.href)).searchParams.get('id')||''}catch(_){}
+            const patterns=[
+              /fb:\/\/(?:profile|page)\/(\d{5,})/i,
+              /["']profile_id["']\s*[:=]\s*["']?(\d{5,})/i,
+              /["']pageID["']\s*:\s*["'](\d{5,})["']/i,
+              /profile_id=(\d{5,})/i
+            ];
+            if(!sourceId){
+              for(const p of patterns){const m=String(metaApp).match(p)||html.match(p);if(m?.[1]){sourceId=m[1];break}}
+            }
+            const sourceResolved=/^\d{5,}$/.test(sourceId);
+
+            const variables={
+              afterTime:null,beforeTime:null,count:10,cursor:null,
+              feedLocation:'TIMELINE',feedbackSource:0,focusCommentID:null,
+              memorializedSplitTimeFilter:null,omitPinnedPost:true,
+              postedBy:{group:'OWNER'},privacy:null,
+              privacySelectorRenderLocation:'COMET_STREAM',referringStoryRenderLocation:null,
+              renderLocation:'timeline',scale:1,stream_count:1,taggedInOnly:null,
+              trackingCode:null,useDefaultActor:false,id:sourceId,
+              __relay_internal__pv__IsWorkUserrelayprovider:false,
+              __relay_internal__pv__CometUFICommentActionLinksRewriteEnabledrelayprovider:true,
+              __relay_internal__pv__CometUFISingleLineUFIrelayprovider:true
+            };
+
+            const run=async(enriched)=>{
+              if(!sourceResolved)return{skipped:true,reason:'source'};
+              if(enriched && !(dtsg&&lsd&&userId))return{skipped:true,reason:'tokens'};
+              const body=new URLSearchParams();
+              if(enriched){
+                body.set('av',userId);
+                body.set('__user',userId);
+                body.set('__a','1');
+                body.set('fb_api_caller_class','RelayModern');
+              }
+              body.set('fb_api_req_friendly_name',FRIENDLY);
+              body.set('variables',JSON.stringify(variables));
+              body.set('doc_id',DOC_ID);
+              if(enriched){
+                body.set('fb_dtsg',dtsg);
+                body.set('jazoest','2'+[...dtsg].map(c=>c.charCodeAt(0)).join(''));
+                body.set('lsd',lsd);
+              }
+              const headers={'Content-Type':'application/x-www-form-urlencoded','X-FB-Friendly-Name':FRIENDLY};
+              if(enriched)headers['X-FB-LSD']=lsd;
+              const controller=new AbortController();
+              const timer=setTimeout(()=>controller.abort(),8000);
+              const start=performance.now();
+              try{
+                const response=await fetch('/api/graphql/',{method:'POST',credentials:'include',headers,body:body.toString(),signal:controller.signal});
+                const headersMs=Math.round(performance.now()-start);
+                const ct=String(response.headers.get('content-type')||'').toLowerCase();
+                const ctClass=ct.includes('json')?'json':(ct.includes('text')?'text':(ct.includes('multipart')?'multipart':'other'));
+                let firstChunk=false,firstDone=false,chunkBytes=0,chunkTimedOut=false;
+                if(response.body?.getReader){
+                  const reader=response.body.getReader();
+                  const read=await Promise.race([reader.read(),new Promise(resolve=>setTimeout(()=>resolve(null),2500))]);
+                  if(read){firstChunk=true;firstDone=Boolean(read.done);chunkBytes=read.value?.byteLength||0}else{chunkTimedOut=true}
+                  try{await reader.cancel()}catch(_){}
+                }
+                clearTimeout(timer);
+                return {skipped:false,resolved:true,status:response.status,headersMs,ctClass,firstChunk,firstDone,chunkBytes,chunkTimedOut};
+              }catch(e){
+                clearTimeout(timer);
+                return {skipped:false,resolved:false,errorName:String(e?.name||'Error'),elapsedMs:Math.round(performance.now()-start)};
+              }
+            };
+
+            const minimal=await run(false);
+            const enriched=await run(true);
+            return {
+              requireAvailable,
+              dtsgAvailable:Boolean(dtsg),
+              lsdAvailable:Boolean(lsd),
+              userAvailable:Boolean(userId),
+              sourceResolved,
+              minimal,
+              enriched
+            };
+          })()
+          '@
+          $ab=Invoke-CdpEval ([string]$fb.webSocketDebuggerUrl) $abExpr 30
+          Write-Output ('WINDOW_REQUIRE_AVAILABLE='+$(if($ab.requireAvailable){'1'}else{'0'}))
+          Write-Output ('DTSG_AVAILABLE='+$(if($ab.dtsgAvailable){'1'}else{'0'}))
+          Write-Output ('LSD_AVAILABLE='+$(if($ab.lsdAvailable){'1'}else{'0'}))
+          Write-Output ('CURRENT_USER_AVAILABLE='+$(if($ab.userAvailable){'1'}else{'0'}))
+          Write-Output ('SOURCE_ID_RESOLVED='+$(if($ab.sourceResolved){'1'}else{'0'}))
+
+          function Print-Result([string]$prefix,$x){
+            Write-Output ($prefix+'_SKIPPED='+$(if($x.skipped){'1'}else{'0'}))
+            if($x.skipped){Write-Output ($prefix+'_SKIP_REASON='+[string]$x.reason);return}
+            Write-Output ($prefix+'_FETCH_RESOLVED='+$(if($x.resolved){'1'}else{'0'}))
+            if($x.resolved){
+              Write-Output ($prefix+'_HTTP_STATUS='+[string]$x.status)
+              Write-Output ($prefix+'_HEADERS_MS='+[string]$x.headersMs)
+              Write-Output ($prefix+'_CONTENT_TYPE_CLASS='+[string]$x.ctClass)
+              Write-Output ($prefix+'_FIRST_CHUNK='+$(if($x.firstChunk){'1'}else{'0'}))
+              Write-Output ($prefix+'_FIRST_DONE='+$(if($x.firstDone){'1'}else{'0'}))
+              Write-Output ($prefix+'_FIRST_CHUNK_BYTES='+[string]$x.chunkBytes)
+              Write-Output ($prefix+'_CHUNK_TIMEOUT='+$(if($x.chunkTimedOut){'1'}else{'0'}))
+            }else{
+              Write-Output ($prefix+'_ERROR_NAME='+[string]$x.errorName)
+              Write-Output ($prefix+'_ELAPSED_MS='+[string]$x.elapsedMs)
+            }
+          }
+          Print-Result 'MINIMAL' $ab.minimal
+          Print-Result 'ENRICHED' $ab.enriched
+          Write-Output 'GRAPHQL_REQUEST_AB_PROBE=PASS'
+          PS
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
+
+      - name: Preserve session and capture safe collector trace
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          echo '=== SAFE COLLECTOR TRACE ==='
+          $ADB -s "$SERIAL" logcat -b all -d -v threadtime 2>/dev/null | tr -d '\r' | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' | tail -n 120 || true
+          marker="$($ADB -s "$SERIAL" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          if printf '%s' "$marker" | grep -q facebook_connected_at; then echo FACEBOOK_SESSION_METADATA_FINAL=1; else echo FACEBOOK_SESSION_METADATA_FINAL=0; fi
+          $ADB -s "$SERIAL" forward --remove tcp:9223 >/dev/null 2>&1 || true
+          rm -f "/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-graphql-ab.ps1" 2>/dev/null || true
+          echo GRAPHQL_REQUEST_AB_PROBE_COMPLETE=1
