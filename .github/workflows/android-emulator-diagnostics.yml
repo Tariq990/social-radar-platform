@@ -1,0 +1,49 @@
+name: Android Emulator Diagnostics
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-emulator-diagnostics.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 4
+    steps:
+      - name: Inspect persistent emulator safely
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          test -n "$win_user"
+
+          sdk_wsl="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk"
+          sdk_win="C:\\Users\\${win_user}\\AppData\\Local\\MRSCRAP\\AndroidSdk"
+          adb_wsl="${sdk_wsl}/platform-tools/adb.exe"
+          emulator_wsl="${sdk_wsl}/emulator/emulator.exe"
+
+          test -s "$adb_wsl"
+          test -s "$emulator_wsl"
+
+          echo DIAG_BEGIN=1
+          "$adb_wsl" version 2>&1 | tr -d '\r' | sed -E 's/[0-9]{5,}/[number]/g' | sed 's/^/ADB_VERSION=/' || true
+          "$adb_wsl" devices -l 2>&1 | tr -d '\r' | sed -E 's/[0-9]{5,}/[number]/g' | sed 's/^/ADB_DEVICE=/' || true
+          "$emulator_wsl" -accel-check 2>&1 | tr -d '\r' | sed 's/^/ACCEL_CHECK=/' || true
+
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe \
+            -NoLogo -NoProfile -NonInteractive -Command \
+            "\$sdk='${sdk_win}'; \$user=[Environment]::GetFolderPath('UserProfile'); \$log=Join-Path \$env:TEMP 'mrscrap-emulator-startup.log'; \$procs=@(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { ([string]\$_.ExecutablePath) -like (\$sdk + '\\emulator\\*') -and ((\$_.Name -eq 'emulator.exe') -or (\$_.Name -like 'qemu-system-x86_64*')) }); Write-Output ('EMULATOR_PROCESS_COUNT=' + \$procs.Count); foreach (\$p in \$procs) { \$cmd=[string]\$p.CommandLine; \$cmd=\$cmd -replace [regex]::Escape(\$user),'[user]'; \$cmd=\$cmd -replace [regex]::Escape(\$sdk),'[sdk]'; \$cmd=\$cmd -replace '\\b[0-9]{5,}\\b','[number]'; Write-Output ('EMULATOR_PROCESS=' + \$p.Name + ' CMD=' + \$cmd) }; if (Test-Path \$log) { Write-Output 'STARTUP_LOG_PRESENT=1'; Get-Content \$log -Tail 80 -ErrorAction SilentlyContinue | ForEach-Object { \$s=[string]\$_; \$s=\$s -replace [regex]::Escape(\$user),'[user]'; \$s=\$s -replace [regex]::Escape(\$sdk),'[sdk]'; \$s=\$s -replace '\\b[0-9]{5,}\\b','[number]'; Write-Output ('EMULATOR_LOG=' + \$s) } } else { Write-Output 'STARTUP_LOG_PRESENT=0' }" | tr -d '\r'
+
+          avd_name="$($emulator_wsl -list-avds 2>/dev/null | tr -d '\r' | sed '/^[[:space:]]*$/d' | head -n1 || true)"
+          if [ -n "$avd_name" ]; then
+            cfg="/mnt/c/Users/${win_user}/.android/avd/${avd_name}.avd/config.ini"
+            if [ -f "$cfg" ]; then
+              grep -E '^(image\.sysdir\.1|target|abi\.type|hw\.cpu\.arch|tag\.id|hw\.ramSize|hw\.gpu\.(enabled|mode))=' "$cfg" | tr -d '\r' | sed 's/^/AVD_CONFIG=/' || true
+            fi
+          fi
+          echo DIAG_END=1
