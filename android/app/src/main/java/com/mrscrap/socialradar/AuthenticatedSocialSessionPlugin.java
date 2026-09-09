@@ -257,7 +257,7 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
 
         Log.i(FLOW_TAG, "event=collect_source_enter platform=" + platform +
             " foreground=" + (getActivity() != null));
-        AuthenticatedWebCollector.collect(foregroundContext(), url, limit, new AuthenticatedWebCollector.Callback() {
+        FacebookGraphqlWebViewCollector.collect(foregroundContext(), url, limit, new AuthenticatedWebCollector.Callback() {
             @Override
             public void onSuccess(JSONObject result) {
                 try {

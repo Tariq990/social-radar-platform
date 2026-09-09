@@ -30,6 +30,15 @@ test('foreground Meta collector stays fully renderable and starts DOM polling be
   const plugin = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSocialSessionPlugin.java');
   assert.match(plugin, /MRSCRAP_FLOW/);
   assert.match(plugin, /event=collect_source_enter/);
+  assert.match(plugin, /FacebookGraphqlWebViewCollector\.collect/);
+
+  const graphqlCollector = read('android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java');
+  assert.match(graphqlCollector, /ProfileCometTimelineFeedRefetchQuery/);
+  assert.match(graphqlCollector, /27465012859856795/);
+  assert.match(graphqlCollector, /\/api\/graphql\//);
+  assert.match(graphqlCollector, /timeline_list_feed_units/);
+  assert.match(graphqlCollector, /credentials:'include'/);
+  assert.doesNotMatch(graphqlCollector, /getCookie\(/);
 });
 
 test('native startup paints before remote fonts or auth network complete', () => {

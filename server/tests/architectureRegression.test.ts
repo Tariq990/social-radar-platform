@@ -253,7 +253,7 @@ test('foreground Smart Grab uses an Activity-attached Meta WebView while backgro
   assert.match(host, /host\.addView\(webView, webParams\)/);
   assert.match(host, /webView\.onResume\(\)/);
   assert.match(host, /context instanceof Activity/);
-  assert.match(plugin, /AuthenticatedWebCollector\.collect\(foregroundContext\(\)/);
+  assert.match(plugin, /FacebookGraphqlWebViewCollector\.collect\(foregroundContext\(\)/);
   assert.match(plugin, /AuthenticatedPostDetailCollector\.collect\([\s\S]*foregroundContext\(\)/);
   assert.match(collector, /ForegroundWebViewHost\.contextFor\(context\)/);
   assert.match(collector, /ForegroundWebViewHost\.attachIfPossible/);
