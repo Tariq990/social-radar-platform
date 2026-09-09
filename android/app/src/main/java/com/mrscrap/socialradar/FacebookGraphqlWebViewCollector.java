@@ -63,6 +63,13 @@ final class FacebookGraphqlWebViewCollector {
             settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
             settings.setLoadsImagesAutomatically(true);
             settings.setOffscreenPreRaster(true);
+            // Facebook aborted this collector surface with Android WebView's default identity on the
+            // physical phone. The same authenticated WebView navigates successfully as a desktop
+            // Chromium client; keep this scoped to the Facebook collector only.
+            settings.setUserAgentString(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            );
 
             int viewportWidth = Math.max(360, context.getResources().getDisplayMetrics().widthPixels);
             int viewportHeight = Math.max(740, context.getResources().getDisplayMetrics().heightPixels);
@@ -393,6 +400,8 @@ final class FacebookGraphqlWebViewCollector {
                 return {posts, hasNext, endCursor, nodes, queryError};
               };
 
+              // Keep the timeline variables byte-for-byte equivalent in meaning to
+              // facebook-graphql-scraper/scrapers/facebook_client/graphql.py::build_variables.
               const variablesFor = (cursor, count) => ({
                 afterTime:null, beforeTime:null, count, cursor,
                 feedLocation:'TIMELINE', feedbackSource:0, focusCommentID:null,
@@ -401,9 +410,33 @@ final class FacebookGraphqlWebViewCollector {
                 privacySelectorRenderLocation:'COMET_STREAM', referringStoryRenderLocation:null,
                 renderLocation:'timeline', scale:1, stream_count:1, taggedInOnly:null,
                 trackingCode:null, useDefaultActor:false, id:sourceId,
-                __relay_internal__pv__IsWorkUserrelayprovider:false,
+                __relay_internal__pv__GHLShouldChangeAdIdFieldNamerelayprovider:false,
+                __relay_internal__pv__GHLShouldChangeSponsoredDataFieldNamerelayprovider:false,
+                __relay_internal__pv__CometFeedStory_enable_reactor_facepilerelayprovider:false,
+                __relay_internal__pv__CometFeedStory_enable_social_bubblesrelayprovider:false,
+                __relay_internal__pv__CometFeedStory_enable_post_permalink_white_space_clickrelayprovider:false,
                 __relay_internal__pv__CometUFICommentActionLinksRewriteEnabledrelayprovider:true,
-                __relay_internal__pv__CometUFISingleLineUFIrelayprovider:true
+                __relay_internal__pv__CometUFICommentAvatarStickerAnimatedImagerelayprovider:false,
+                __relay_internal__pv__IsWorkUserrelayprovider:false,
+                __relay_internal__pv__TestPilotShouldIncludeDemoAdUseCaserelayprovider:false,
+                __relay_internal__pv__FBReels_deprecate_short_form_video_context_gkrelayprovider:true,
+                __relay_internal__pv__FBReels_enable_view_dubbed_audio_type_gkrelayprovider:true,
+                __relay_internal__pv__CometFeedShareMedia_shouldPrefetchShareImagerelayprovider:false,
+                __relay_internal__pv__CometImmersivePhotoCanUserDisable3DMotionrelayprovider:false,
+                __relay_internal__pv__WorkCometIsEmployeeGKProviderrelayprovider:false,
+                __relay_internal__pv__IsMergQAPollsrelayprovider:false,
+                __relay_internal__pv__FBReelsMediaFooter_comet_enable_reels_ads_gkrelayprovider:true,
+                __relay_internal__pv__CometUFIReactionsEnableShortNamerelayprovider:false,
+                __relay_internal__pv__CometUFICommentAutoTranslationTyperelayprovider:'AUTO_TRANSLATE',
+                __relay_internal__pv__CometUFIShareActionMigrationrelayprovider:true,
+                __relay_internal__pv__CometUFISingleLineUFIrelayprovider:true,
+                __relay_internal__pv__relay_provider_comet_ufi_ssr_seo_deferrelayprovider:true,
+                __relay_internal__pv__CometUFI_dedicated_comment_routable_dialog_gkrelayprovider:true,
+                __relay_internal__pv__ReelsIFUCard_reelsIFULikeCountrelayprovider:false,
+                __relay_internal__pv__FBReelsIFUTileContent_reelsIFUPlayOnHoverrelayprovider:true,
+                __relay_internal__pv__GroupsCometGYSJFeedItemHeightrelayprovider:206,
+                __relay_internal__pv__ShouldEnableBakedInTextStoriesrelayprovider:false,
+                __relay_internal__pv__StoriesShouldIncludeFbNotesrelayprovider:true
               });
 
               window[KEY] = {status:'pending', stage:'request'};
