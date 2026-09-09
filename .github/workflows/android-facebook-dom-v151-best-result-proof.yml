@@ -1,0 +1,229 @@
+name: Android Facebook DOM v151 Resilient Collection Proof
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-facebook-dom-v151-best-result-proof.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  prove:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 30
+    env:
+      ANDROID_VERSION_CODE: '151'
+      ANDROID_VERSION_NAME: '0.1.151-emulator-test'
+      PKG: com.mrscrap.socialradar
+    steps:
+      - name: Checkout exact test lane preserving emulator data
+        uses: actions/checkout@v4
+        with:
+          ref: test/android-headless-emulator-20260909
+          fetch-depth: 1
+          clean: false
+
+      - name: Apply workspace-only resilient DOM experiment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedWebCollector.java')
+          s=p.read_text()
+          replacements={
+            'private static final long PAGE_STARTED_EXTRACTION_DELAY_MS = 900;':'private static final long PAGE_STARTED_EXTRACTION_DELAY_MS = 3_000;',
+            'private static final long EVALUATION_WATCHDOG_MS = 2_500;':'private static final long EVALUATION_WATCHDOG_MS = 10_000;',
+            'private static final int SURFACE_FALLBACK_ATTEMPT = 4;':'private static final int SURFACE_FALLBACK_ATTEMPT = 12;',
+            'private static final int MAX_EXTRACTION_ATTEMPTS = 12;':'private static final int MAX_EXTRACTION_ATTEMPTS = 20;'
+          }
+          for old,new in replacements.items():
+              assert s.count(old)==1,(old,s.count(old)); s=s.replace(old,new)
+          anchor='            settings.setOffscreenPreRaster(true);'
+          assert s.count(anchor)==1
+          s=s.replace(anchor, anchor+'\n            settings.setUserAgentString("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36");\n            Log.i(TAG, "event=user_agent mode=desktop");')
+          flags='            boolean[] triedBasicFallback = new boolean[] { false };'
+          assert s.count(flags)==1
+          s=s.replace(flags,flags+'\n            JSONObject[] bestResult = new JSONObject[] { null };\n            int[] bestPostCount = new int[] { 0 };')
+          old='''                Log.w(TAG, "event=global_timeout attempts=" + attempts[0] +
+                    " progress=" + webView.getProgress() + " attached=" + webView.isAttachedToWindow());
+                finishError(main, null, webView, finished, callback,
+                    "COLLECTOR_TIMEOUT|attempts=" + attempts[0] +
+                    "|progress=" + webView.getProgress() +
+                    "|attached=" + webView.isAttachedToWindow());'''
+          new='''                Log.w(TAG, "event=global_timeout attempts=" + attempts[0] +
+                    " progress=" + webView.getProgress() + " attached=" + webView.isAttachedToWindow());
+                if (bestResult[0] != null && bestPostCount[0] > 0) {
+                    Log.i(TAG, "event=best_result_timeout posts=" + bestPostCount[0]);
+                    finishSuccess(main, null, webView, finished, callback, bestResult[0]);
+                } else {
+                    finishError(main, null, webView, finished, callback,
+                        "COLLECTOR_TIMEOUT|attempts=" + attempts[0] +
+                        "|progress=" + webView.getProgress() +
+                        "|attached=" + webView.isAttachedToWindow());
+                }'''
+          assert s.count(old)==1,s.count(old); s=s.replace(old,new)
+          old='''                    if (attempts[0] >= SURFACE_FALLBACK_ATTEMPT) {
+                        if (!triedMobileFallback[0] && mobileUrl != null && !mobileUrl.equals(desktopUrl)) {'''
+          new='''                    if (bestResult[0] != null && bestPostCount[0] > 0) {
+                        if (attempts[0] >= MAX_EXTRACTION_ATTEMPTS) {
+                            Log.i(TAG, "event=best_result_watchdog posts=" + bestPostCount[0]);
+                            finishSuccess(main, timeoutHolder[0], webView, finished, callback, bestResult[0]);
+                        } else {
+                            main.postDelayed(extractionRunner[0], RETRY_DELAY_MS);
+                        }
+                        return;
+                    }
+
+                    if (attempts[0] >= SURFACE_FALLBACK_ATTEMPT) {
+                        if (!triedMobileFallback[0] && mobileUrl != null && !mobileUrl.equals(desktopUrl)) {'''
+          assert s.count(old)==1,s.count(old); s=s.replace(old,new,1)
+          marker='''                        boolean reliableSource = errorCode.isBlank() && source != null &&
+                            isAllowedSocialUrl(sourceUrl) && !isBlank(displayName) && !isBlank(externalId);'''
+          repl=marker+'''\n                        if (reliableSource && postCount > bestPostCount[0]) {
+                            bestPostCount[0] = postCount;
+                            bestResult[0] = result;
+                            Log.i(TAG, "event=best_result posts=" + postCount);
+                        }'''
+          assert s.count(marker)==1,s.count(marker); s=s.replace(marker,repl)
+          p.write_text(s)
+          for token in ['event=user_agent mode=desktop','bestPostCount','event=best_result','MAX_EXTRACTION_ATTEMPTS = 20','SURFACE_FALLBACK_ATTEMPT = 12']:
+              assert token in s,token
+          print('V151_WORKSPACE_PATCH=PASS')
+          PY
+          git diff --check
+          git diff -- android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedWebCollector.java | sed -n '1,250p'
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Configure Android SDK and Gradle
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/.android/sdk}}"; sdk="$(realpath "$sdk")"
+          test -d "$sdk/platforms/android-36"; test -d "$sdk/build-tools/36.0.0"
+          echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"; echo "ANDROID_SDK_ROOT=$sdk" >> "$GITHUB_ENV"
+          printf 'sdk.dir=%s\n' "$sdk" > android/local.properties
+          gradle="$HOME/.local/share/mrscrap-gradle/gradle-8.13/bin/gradle"; test -x "$gradle"
+          echo "GRADLE_BIN=$gradle" >> "$GITHUB_ENV"
+
+      - name: Build v151
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$GRADLE_BIN" -p android :app:assembleDebug --stacktrace
+          apk="$GITHUB_WORKSPACE/android/app/build/outputs/apk/debug/app-debug.apk"; test -s "$apk"
+          echo "APK_SIZE=$(stat -c '%s' "$apk")"
+          echo V151_BUILD=PASS
+
+      - name: Resolve emulator and verify preserved session
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"; test -s "$adb"
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1;exit}')"; test -n "$serial"
+          test "$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1)" = 1
+          marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          printf '%s' "$marker" | grep -q facebook_connected_at
+          echo FACEBOOK_SESSION_METADATA_BEFORE_INSTALL=1
+          echo "ADB=$adb" >> "$GITHUB_ENV"; echo "SERIAL=$serial" >> "$GITHUB_ENV"; echo "WIN_USER=$win_user" >> "$GITHUB_ENV"
+
+      - name: Install v151 without wiping data and launch
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="$GITHUB_WORKSPACE/android/app/build/outputs/apk/debug/app-debug.apk"
+          tmp="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/MR-SCRAP-emulator-test-151.apk"; cp "$apk" "$tmp"
+          out="$($ADB -s "$SERIAL" install -r "$(wslpath -w "$tmp")" 2>&1 | tr -d '\r')"; printf '%s\n' "$out"; printf '%s' "$out" | grep -q Success
+          version="$($ADB -s "$SERIAL" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"
+          echo "INSTALLED_VERSION_CODE=$version"; test "$version" = 151
+          marker="$($ADB -s "$SERIAL" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"; printf '%s' "$marker" | grep -q facebook_connected_at
+          echo FACEBOOK_SESSION_METADATA_AFTER_INSTALL=1
+          $ADB -s "$SERIAL" shell am force-stop "$PKG" >/dev/null 2>&1 || true
+          $ADB -s "$SERIAL" shell am start -W -n "$PKG/.MainActivity" >/dev/null
+          sleep 9
+          pid="$($ADB -s "$SERIAL" shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"; test -n "$pid"
+          echo "APP_PID=$pid" >> "$GITHUB_ENV"
+
+      - name: Trigger real latest-10 Grab
+        shell: bash
+        run: |
+          set -euo pipefail
+          socket="$($ADB -s "$SERIAL" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | grep -E "${APP_PID}$|_${APP_PID}($|_)" | head -n1 || true)"
+          [ -n "$socket" ] || socket="$($ADB -s "$SERIAL" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | head -n1 || true)"; test -n "$socket"
+          $ADB -s "$SERIAL" forward --remove tcp:9223 >/dev/null 2>&1 || true
+          $ADB -s "$SERIAL" forward tcp:9223 "localabstract:$socket" >/dev/null
+          ps1="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-v151-grab.ps1"
+          cat > "$ps1" <<'PS'
+          $ErrorActionPreference='Stop'
+          function Targets { for($i=0;$i -lt 30;$i++){ try{$t=@(Invoke-RestMethod -Uri 'http://127.0.0.1:9223/json/list' -TimeoutSec 2);if($t.Count -gt 0){return $t}}catch{}; Start-Sleep -Milliseconds 250 }; throw 'targets unavailable' }
+          function AppTarget { $a=@(Targets|Where-Object{$_.type -eq 'page' -and [string]$_.url -like 'https://localhost*'}|Select-Object -First 1); if($a.Count -eq 0){throw 'app target missing'}; $a[0] }
+          function Eval([string]$raw,[string]$expr,[int]$seconds=10){ $u=[Uri]$raw;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($seconds));$ws.ConnectAsync([Uri]('ws://127.0.0.1:9223'+$u.PathAndQuery),$cts.Token).GetAwaiter().GetResult()|Out-Null;$p=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 8;$b=[Text.Encoding]::UTF8.GetBytes($p);$ws.SendAsync([ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null;$buf=New-Object byte[] 131072;$sb=[Text.StringBuilder]::new();while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id -ne 1){continue};if($m.result.exceptionDetails){throw 'runtime eval exception'};$v=$m.result.result.value;try{$ws.Abort()}catch{};return $v} }
+          $app=AppTarget
+          $null=Eval ([string]$app.webSocketDebuggerUrl) "(()=>{window.dispatchEvent(new CustomEvent('mrscrap:navigate',{detail:{screen:'radar'}}));return true})()" 8
+          $find=@'
+          (()=>{const n=s=>String(s||'').replace(/\s+/g,' ').trim();const b=[...document.querySelectorAll('button')].find(x=>{const t=n(x.innerText||x.textContent);return t.includes('\u0627\u062c\u0644\u0628 \u0622\u062e\u0631 10 \u0648\u062d\u0644\u0644\u0647\u0627')||/Grab latest 10 and analyze/i.test(t)});return{found:Boolean(b),enabled:Boolean(b&&!b.disabled)}})()
+          '@
+          $s=$null
+          for($i=0;$i -lt 80;$i++){Start-Sleep -Milliseconds 350;$app=AppTarget;$s=Eval ([string]$app.webSocketDebuggerUrl) $find 8;if($s.found -and $s.enabled){break}}
+          Write-Output ('RADAR_GRAB_BUTTON_FOUND='+$(if($s.found){'1'}else{'0'}));Write-Output ('RADAR_GRAB_BUTTON_ENABLED='+$(if($s.enabled){'1'}else{'0'}));if(!$s.found -or !$s.enabled){exit 151}
+          $click=@'
+          (()=>{const n=s=>String(s||'').replace(/\s+/g,' ').trim();const b=[...document.querySelectorAll('button')].find(x=>{const t=n(x.innerText||x.textContent);return t.includes('\u0627\u062c\u0644\u0628 \u0622\u062e\u0631 10 \u0648\u062d\u0644\u0644\u0647\u0627')||/Grab latest 10 and analyze/i.test(t)});if(!b||b.disabled)return false;b.click();return true})()
+          '@
+          $clicked=Eval ([string]$app.webSocketDebuggerUrl) $click 8
+          Write-Output ('REAL_GRAB_CLICKED='+$(if($clicked){'1'}else{'0'}));if(!$clicked){exit 152}
+          PS
+          $ADB -s "$SERIAL" logcat -c >/dev/null 2>&1 || true
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
+
+      - name: Prove actual collected count
+        shell: bash
+        run: |
+          set -euo pipefail
+          success=''; failure=''
+          for i in $(seq 1 65); do
+            events="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' || true)"
+            success="$(printf '%s\n' "$events" | grep -E 'event=collect_source_success platform=facebook posts=[0-9]+' | tail -n1 || true)"
+            failure="$(printf '%s\n' "$events" | grep -E 'event=collect_source_error platform=facebook code=' | tail -n1 || true)"
+            [ -n "$success" ] || [ -n "$failure" ] || { sleep 1; continue; }
+            break
+          done
+          echo '=== SAFE V151 TRACE ==='
+          $ADB -s "$SERIAL" logcat -b all -d -v threadtime 2>/dev/null | tr -d '\r' | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' | tail -n 380 || true
+          best="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | sed -n 's/.*event=best_result posts=\([0-9][0-9]*\).*/\1/p' | sort -n | tail -n1)"
+          echo "MAX_BEST_RESULT_POSTS=${best:-0}"
+          if [ -n "$failure" ]; then code="$(printf '%s' "$failure" | sed -n 's/.*code=\([^ ]*\).*/\1/p')"; echo "FACEBOOK_COLLECTOR_FAILURE_CODE=${code:-unknown}"; exit 153; fi
+          test -n "$success"
+          posts="$(printf '%s' "$success" | sed -n 's/.*posts=\([0-9][0-9]*\).*/\1/p')"
+          echo REQUESTED_POSTS=10
+          echo "FACEBOOK_POSTS_COLLECTED=$posts"
+          test -n "$posts"; test "$posts" -gt 0
+          if [ "$posts" -ge 10 ]; then echo FACEBOOK_LATEST_10_GATE=PASS; else echo FACEBOOK_PARTIAL_COLLECTION_ONLY=1; exit 154; fi
+
+      - name: Prove Facebook session survives restart
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${ADB:-}"; test -n "${SERIAL:-}"
+          $ADB -s "$SERIAL" shell am force-stop "$PKG" >/dev/null 2>&1 || true
+          $ADB -s "$SERIAL" shell am start -W -n "$PKG/.MainActivity" >/dev/null
+          sleep 6
+          marker="$($ADB -s "$SERIAL" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          printf '%s' "$marker" | grep -q facebook_connected_at
+          echo FACEBOOK_SESSION_METADATA_AFTER_APP_RESTART=1
+          test -n "$($ADB -s "$SERIAL" shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"
+          $ADB -s "$SERIAL" forward --remove tcp:9223 >/dev/null 2>&1 || true
+          rm -f "/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-v151-grab.ps1" 2>/dev/null || true
+          echo FACEBOOK_SESSION_RESTART_GATE=PASS
