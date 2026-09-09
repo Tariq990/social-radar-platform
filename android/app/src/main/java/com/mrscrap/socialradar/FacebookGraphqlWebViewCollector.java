@@ -77,12 +77,13 @@ final class FacebookGraphqlWebViewCollector {
             cookies.setAcceptCookie(true);
             cookies.setAcceptThirdPartyCookies(webView, true);
 
+            final String[] lastStage = {"page_load"};
             final Runnable[] timeout = new Runnable[1];
             timeout[0] = () -> {
                 Log.w(TAG, "event=graphql_timeout attempts=" + attempts[0] +
                     " progress=" + webView.getProgress());
                 finishError(main, null, webView, finished, callback,
-                    "GRAPHQL_TIMEOUT|attempts=" + attempts[0]);
+                    "GRAPHQL_TIMEOUT_" + lastStage[0].toUpperCase(java.util.Locale.ROOT) + "|attempts=" + attempts[0]);
             };
             main.postDelayed(timeout[0], TIMEOUT_MS);
 
@@ -117,6 +118,13 @@ final class FacebookGraphqlWebViewCollector {
                             return;
                         }
                         if (result.optBoolean("pending", false)) {
+                            JSONObject pendingDiagnostics = result.optJSONObject("diagnostics");
+                            String stage = pendingDiagnostics == null ? "unknown" : pendingDiagnostics.optString("waitingFor", "unknown");
+                            if (!java.util.Set.of("surface", "source_id", "request", "response_body", "unknown").contains(stage)) stage = "unknown";
+                            if (!stage.equals(lastStage[0])) {
+                                lastStage[0] = stage;
+                                Log.i(TAG, "event=graphql_stage stage=" + stage);
+                            }
                             main.postDelayed(poll[0], POLL_MS);
                             return;
                         }
@@ -134,7 +142,8 @@ final class FacebookGraphqlWebViewCollector {
                         }
                         finishSuccess(main, timeout[0], webView, finished, callback, result);
                     } catch (Exception parseError) {
-                        main.postDelayed(poll[0], POLL_MS);
+                        Log.w(TAG, "event=graphql_error code=GRAPHQL_SCRIPT_RESULT_INVALID");
+                        finishError(main, timeout[0], webView, finished, callback, "GRAPHQL_SCRIPT_RESULT_INVALID");
                     }
                 });
             };
@@ -240,13 +249,13 @@ final class FacebookGraphqlWebViewCollector {
               if (path.includes('/checkpoint')) return JSON.stringify({error:'SESSION_CHECKPOINT'});
               if (path.includes('/login') || loginForm) return JSON.stringify({error:'SESSION_REQUIRED'});
               if (!(host === 'facebook.com' || host.endsWith('.facebook.com'))) {
-                return JSON.stringify({pending:true, diagnostics:{collector:'graphql', surface:host}});
+                return JSON.stringify({pending:true, diagnostics:{collector:'graphql', waitingFor:'surface'}});
               }
 
               const prior = window[KEY];
               if (prior?.status === 'done') return JSON.stringify(prior.result);
               if (prior?.status === 'error') return JSON.stringify({error: prior.code || 'GRAPHQL_FETCH_FAILED'});
-              if (prior?.status === 'pending') return JSON.stringify({pending:true, diagnostics:{collector:'graphql', surface:host}});
+              if (prior?.status === 'pending') return JSON.stringify({pending:true, diagnostics:{collector:'graphql', waitingFor:prior.stage || 'request'}});
 
               const abs = (raw) => { try { return new URL(raw, location.href).href; } catch (_) { return ''; } };
               const requested = abs(REQUESTED);
@@ -259,23 +268,36 @@ final class FacebookGraphqlWebViewCollector {
 
               const metaApp = document.querySelector('meta[property="al:ios:url"], meta[property="al:android:url"]')?.content || '';
               const html = document.documentElement?.innerHTML || '';
-              const idPatterns = [
-                /fb:\/\/(?:profile|page)\/(\d{5,})/i,
-                /["']profile_id["']\s*[:=]\s*["']?(\d{5,})/i,
-                /["']pageID["']\s*:\s*["'](\d{5,})["']/i,
-                /profile_id=(\d{5,})/i
-              ];
+              const longestDigitRun = (value) => {
+                let best = '', current = '';
+                for (const ch of String(value || '')) {
+                  if (ch >= '0' && ch <= '9') {
+                    current += ch;
+                    if (current.length > best.length) best = current;
+                  } else {
+                    current = '';
+                  }
+                }
+                return best.length >= 5 ? best : '';
+              };
               if (!sourceId) {
-                for (const pattern of idPatterns) {
-                  const match = String(metaApp).match(pattern) || html.match(pattern);
-                  if (match?.[1]) { sourceId = match[1]; break; }
+                const candidates = [String(metaApp), html];
+                const markers = ['fb://profile/', 'fb://page/', 'profile_id', 'pageID'];
+                outer: for (const candidate of candidates) {
+                  for (const marker of markers) {
+                    const markerIndex = candidate.indexOf(marker);
+                    if (markerIndex < 0) continue;
+                    const digits = longestDigitRun(candidate.slice(markerIndex + marker.length, markerIndex + marker.length + 96));
+                    if (digits) { sourceId = digits; break outer; }
+                  }
                 }
               }
-              if (!/^\d{5,}$/.test(sourceId)) {
+              const numericSourceId = sourceId.length >= 5 && [...sourceId].every(ch => ch >= '0' && ch <= '9');
+              if (!numericSourceId) {
                 return JSON.stringify({pending:true, diagnostics:{collector:'graphql', surface:host, waitingFor:'source_id'}});
               }
 
-              const cleanTitle = (raw) => String(raw || '').replace(/\s*[|·-]\s*Facebook\s*$/i, '').trim();
+              const cleanTitle = (raw) => String(raw || '').replace(/\\s*[|·-]\\s*Facebook\\s*$/i, '').trim();
               const title = cleanTitle(
                 document.querySelector('meta[property="og:title"]')?.content ||
                 document.querySelector('h1')?.innerText || document.title
@@ -351,7 +373,7 @@ final class FacebookGraphqlWebViewCollector {
                   if (!post || seen.has(post.externalPostId)) return;
                   seen.add(post.externalPostId); posts.push(post);
                 };
-                for (const line of String(text || '').split('\n')) {
+                for (const line of String(text || '').split('\\n')) {
                   if (!line.trim()) continue;
                   let payload;
                   try { payload = JSON.parse(line); } catch (_) { continue; }
@@ -384,7 +406,7 @@ final class FacebookGraphqlWebViewCollector {
                 __relay_internal__pv__CometUFISingleLineUFIrelayprovider:true
               });
 
-              window[KEY] = {status:'pending'};
+              window[KEY] = {status:'pending', stage:'request'};
               (async () => {
                 const posts = [], seen = new Set();
                 let cursor = null, pages = 0, nodes = 0;
@@ -393,12 +415,14 @@ final class FacebookGraphqlWebViewCollector {
                   body.set('doc_id', DOC_ID);
                   body.set('fb_api_req_friendly_name', FRIENDLY);
                   body.set('variables', JSON.stringify(variablesFor(cursor, Math.min(10, Math.max(1, LIMIT - posts.length)))));
+                  window[KEY].stage = 'request';
                   const response = await fetch('/api/graphql/', {
                     method:'POST', credentials:'include',
                     headers:{'Content-Type':'application/x-www-form-urlencoded','X-FB-Friendly-Name':FRIENDLY},
                     body:body.toString()
                   });
                   if (!response.ok) throw new Error('GRAPHQL_HTTP_' + response.status);
+                  window[KEY].stage = 'response_body';
                   const parsed = parsePayload(await response.text());
                   pages++; nodes += parsed.nodes;
                   if (parsed.queryError && parsed.posts.length === 0) throw new Error('GRAPHQL_QUERY_ERROR');
@@ -424,7 +448,7 @@ final class FacebookGraphqlWebViewCollector {
                 window[KEY] = {status:'error', code};
               });
 
-              return JSON.stringify({pending:true, diagnostics:{collector:'graphql', surface:host, started:true}});
+              return JSON.stringify({pending:true, diagnostics:{collector:'graphql', waitingFor:'request', started:true}});
             })()
             """
             .replace("__LIMIT__", Integer.toString(limit))
