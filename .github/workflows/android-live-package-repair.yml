@@ -10,11 +10,11 @@ permissions:
   contents: read
 
 jobs:
-  diagnose-gfxstream:
+  prove-android-ui:
     runs-on: [self-hosted, Linux]
     timeout-minutes: 8
     steps:
-      - name: Trace effective graphics state and prove UI stability
+      - name: Disable effective GLDMA path and prove UI stability
         shell: bash
         run: |
           set -u
@@ -22,55 +22,37 @@ jobs:
           sdk="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk"
           sdk_win="C:\\Users\\${win_user}\\AppData\\Local\\MRSCRAP\\AndroidSdk"
           adb="${sdk}/platform-tools/adb.exe"
-          emu="${sdk}/emulator/emulator.exe"
-          avd="/mnt/c/Users/${win_user}/.android/avd/test_avd.avd"
           features="/mnt/c/Users/${win_user}/.android/advancedFeatures.ini"
           temp="/mnt/c/Users/${win_user}/AppData/Local/Temp/MRSCRAP"
           apk="/home/tarik/actions-runnerr/_work/SCRAP-APP/SCRAP-APP/android/app/build/outputs/apk/debug/app-debug.apk"
           pkg="com.mrscrap.socialradar"
           activity="com.mrscrap.socialradar.MainActivity"
+          hostout="${temp}/gldma-proof-host.out.log"
+          hosterr="${temp}/gldma-proof-host.err.log"
           mkdir -p "$temp"
 
-          echo '=== LOCAL SYSTEM IMAGES ==='
-          find "${sdk}/system-images" -maxdepth 4 -type f \( -name system.img -o -name package.xml \) -printf '%p\n' 2>/dev/null | sort || true
-          echo '=== AVD GRAPHICS CONFIG ==='
-          grep -E -i '^(hw\.gpu|hw\.ramSize|image\.sysdir|tag\.|target|PlayStore|disk\.dataPartition)' "${avd}/config.ini" 2>/dev/null || true
-          echo '=== ADVANCED FEATURES ==='
-          grep -E -i '^(GLESDynamicVersion|GLDirectMem|HasSharedSlotsHostMemoryAllocator)\s*=' "$features" 2>/dev/null || true
-          echo '=== EMULATOR VERSION ==='
-          "$emu" -version 2>&1 | tr -d '\r' | head -n 8 || true
-
-          echo '=== EFFECTIVE FEATURE LIST ==='
-          feature_ps1="${temp}/gfx-feature-list.ps1"
-          feature_log="${temp}/gfx-feature-list.log"
-          cat > "$feature_ps1" <<POWERSHELL
-          \$ErrorActionPreference='Stop'
-          \$exe='${sdk_win}\\emulator\\emulator.exe'
-          \$log='C:\\Users\\${win_user}\\AppData\\Local\\Temp\\MRSCRAP\\gfx-feature-list.log'
-          Remove-Item -Force \$log -ErrorAction SilentlyContinue
-          \$cmd='cmd.exe /d /s /c ""' + \$exe + '" -feature-list >"' + \$log + '" 2>&1"'
-          \$r=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=\$cmd}
-          Write-Output ("FEATURE_LIST_LAUNCH_RETURN={0} PID={1}" -f \$r.ReturnValue,\$r.ProcessId)
-          if (\$r.ReturnValue -ne 0) { exit 2 }
-          \$deadline=(Get-Date).AddSeconds(15)
-          while ((Get-Date) -lt \$deadline) {
-            if (-not (Get-Process -Id \$r.ProcessId -ErrorAction SilentlyContinue)) { break }
-            Start-Sleep -Milliseconds 500
-          }
-          if (Get-Process -Id \$r.ProcessId -ErrorAction SilentlyContinue) {
-            Stop-Process -Id \$r.ProcessId -Force -ErrorAction SilentlyContinue
-            Write-Output 'FEATURE_LIST_TIMEOUT=1'
-          } else {
-            Write-Output 'FEATURE_LIST_TIMEOUT=0'
-          }
-          POWERSHELL
-          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(wslpath -w "$feature_ps1")" | tr -d '\r'
-          tr -d '\r' < "$feature_log" 2>/dev/null | grep -E -i 'GLDirectMem|HasSharedSlotsHostMemoryAllocator|GLESDynamicVersion|ReadColor|DMA' || true
+          echo '=== TARGETED FEATURE MUTATION ==='
+          backup="${features}.mrscrap-pre-gldma-fix"
+          if [ -f "$features" ] && [ ! -f "$backup" ]; then
+            cp "$features" "$backup"
+            echo "GLDMA_BACKUP_CREATED=$backup"
+          fi
+          feature_tmp="${features}.mrscrap-tmp"
+          if [ -f "$features" ]; then
+            grep -Eiv '^[[:space:]]*GLDMA[[:space:]]*=' "$features" > "$feature_tmp" || true
+          else
+            : > "$feature_tmp"
+          fi
+          printf '\nGLDMA = off\n' >> "$feature_tmp"
+          cat "$feature_tmp" > "$features"
+          rm -f "$feature_tmp"
+          grep -E -i '^(GLDMA|GLDMA2|GLDirectMem|GLESDynamicVersion|HasSharedSlotsHostMemoryAllocator)[[:space:]]*=' "$features" || true
+          gldma_lines="$(grep -Eic '^[[:space:]]*GLDMA[[:space:]]*=[[:space:]]*off[[:space:]]*$' "$features" || true)"
+          echo "GLDMA_OVERRIDE_LINES=$gldma_lines"
+          [ "$gldma_lines" = '1' ] || exit 2
 
           "$adb" kill-server >/dev/null 2>&1 || true
-          ps1="${temp}/gfx-trace-start.ps1"
-          hostout="${temp}/gfx-trace-host.out.log"
-          hosterr="${temp}/gfx-trace-host.err.log"
+          ps1="${temp}/gldma-proof-start.ps1"
           cat > "$ps1" <<POWERSHELL
           \$ErrorActionPreference='Stop'
           \$sdk='${sdk_win}'
@@ -80,8 +62,8 @@ jobs:
             (\$_.Name -in @('emulator.exe','qemu-system-x86_64.exe','qemu-system-x86_64-headless.exe'))
           }) | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }
           Start-Sleep -Seconds 3
-          \$out='C:\\Users\\${win_user}\\AppData\\Local\\Temp\\MRSCRAP\\gfx-trace-host.out.log'
-          \$err='C:\\Users\\${win_user}\\AppData\\Local\\Temp\\MRSCRAP\\gfx-trace-host.err.log'
+          \$out='C:\\Users\\${win_user}\\AppData\\Local\\Temp\\MRSCRAP\\gldma-proof-host.out.log'
+          \$err='C:\\Users\\${win_user}\\AppData\\Local\\Temp\\MRSCRAP\\gldma-proof-host.err.log'
           Remove-Item -Force \$out,\$err -ErrorAction SilentlyContinue
           \$exe=Join-Path \$sdk 'emulator\\emulator.exe'
           \$args='@test_avd -sysdir ${sdk_win}\\system-images\\android-36\\google_apis\\x86_64 -no-audio -no-boot-anim -no-snapshot -gpu swangle_indirect -no-window -verbose'
@@ -105,10 +87,10 @@ jobs:
             tail -n 250 "$hosterr" 2>/dev/null || true
             exit 10
           fi
-
           echo "SERIAL=$serial"
+
           boot=''
-          for i in $(seq 1 15); do
+          for i in $(seq 1 18); do
             boot="$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1 || true)"
             [ "$boot" = '1' ] && break
             sleep 5
@@ -116,14 +98,22 @@ jobs:
           echo "BOOT_AFTER_WAIT=$boot"
           [ "$boot" = '1' ] || exit 11
 
+          echo '=== EFFECTIVE HOST GFXSTREAM FEATURES ==='
+          grep -E -i "Feature '(GLDMA|GLDirectMem|GLESDynamicVersion|HasSharedSlotsHostMemoryAllocator)'|gfxstreamFeature:(GlDma|GlDma2|GlDirectMem|GlesDynamicVersion|HasSharedSlotsHostMemoryAllocator|HostComposition)" "$hostout" "$hosterr" 2>/dev/null | tail -n 120 || true
+          if ! grep -E -q 'gfxstreamFeature:GlDma[[:space:]]*=[[:space:]]*0' "$hostout" "$hosterr" 2>/dev/null; then
+            echo EFFECTIVE_GLDMA_OFF=0
+            exit 13
+          fi
+          echo EFFECTIVE_GLDMA_OFF=1
+
           ss0="$($adb -s "$serial" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
           sf0="$($adb -s "$serial" shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true)"
           echo "CORE_BASELINE_SS=$ss0"
           echo "CORE_BASELINE_SF=$sf0"
-          [ -n "$ss0" ] && [ -n "$sf0" ] || exit 12
+          [ -n "$ss0" ] && [ -n "$sf0" ] || exit 14
 
           "$adb" -s "$serial" logcat -c >/dev/null 2>&1 || true
-          echo '=== SETTINGS CONTROL START ==='
+          echo '=== SETTINGS CONTROL ==='
           "$adb" -s "$serial" shell am start -W -a android.settings.SETTINGS 2>&1 | tr -d '\r' || true
           settings_stable=1
           for i in $(seq 1 12); do
@@ -139,7 +129,7 @@ jobs:
           done
           settings_log="$($adb -s "$serial" logcat -d -v threadtime 2>/dev/null | tr -d '\r' || true)"
           settings_asserts="$(printf '%s\n' "$settings_log" | grep -c 'hasReadColorBufferDma' || true)"
-          printf '%s\n' "$settings_log" | grep -E -i 'ANDROID_EMU_read_color_buffer_dma|HostConnection|HostComposition|GoldfishMapper|mapper\.ranchu|RegionSampling|hasReadColorBufferDma|SurfaceFlinger.*(fatal|abort|crash)' | tail -n 500 || true
+          printf '%s\n' "$settings_log" | grep -E -i 'ANDROID_EMU_read_color_buffer_dma|GoldfishMapper|mapper\.ranchu|RegionSampling|hasReadColorBufferDma|SurfaceFlinger.*(fatal|abort|crash)' | tail -n 500 || true
           echo "SETTINGS_ASSERT_COUNT=$settings_asserts"
           echo "SETTINGS_STABLE=$settings_stable"
           if [ "$settings_stable" != '1' ] || [ "$settings_asserts" != '0' ]; then
@@ -148,7 +138,7 @@ jobs:
           fi
           echo SETTINGS_STABILITY_GATE=PASS
 
-          echo '=== APK PRESENCE ==='
+          echo '=== APK ==='
           if [ ! -s "$apk" ]; then
             echo APK_PRESENT=0
             exit 30
@@ -195,9 +185,7 @@ jobs:
           fi
           echo APP_STABILITY_GATE=PASS
 
-          echo '=== HOST EMULATOR DMA / FEATURE LINES ==='
-          cat "$hostout" "$hosterr" 2>/dev/null | grep -E -i 'GLDirectMem|HasSharedSlotsHostMemoryAllocator|GLESDynamicVersion|read_color_buffer_dma|ReadColor|DMA|gfxstream|swangle' | tail -n 700 || true
-          echo '=== FINAL CORE STATE ==='
+          echo '=== FINAL ==='
           echo "BOOT=$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1 || true)"
           echo "SS=$($adb -s "$serial" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
           echo "SF=$($adb -s "$serial" shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true)"
