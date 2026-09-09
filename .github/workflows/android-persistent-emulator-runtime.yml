@@ -193,13 +193,15 @@ jobs:
           }
           POWERSHELL
 
+            "$adb_wsl" kill-server >/dev/null 2>&1 || true
+            "$adb_wsl" start-server >/dev/null 2>&1 || true
+            echo ADB_SERVER_PRIMED=1
+
             ps1_win="$(wslpath -w "$ps1")"
             /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe \
               -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
               -File "$ps1_win" | tr -d '\r'
 
-            "$adb_wsl" kill-server >/dev/null 2>&1 || true
-            "$adb_wsl" start-server >/dev/null 2>&1 || true
             serial=''
             for i in $(seq 1 24); do
               serial="$($adb_wsl devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
@@ -207,6 +209,7 @@ jobs:
               if (( i % 6 == 0 )); then
                 states="$($adb_wsl devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ {c[$2]++} END {for (s in c) printf "%s=%d ",s,c[s]}')"
                 echo "ADB_WAIT_SECONDS=$((i * 5)) EMULATOR_STATES=${states:-none}"
+                "$adb_wsl" reconnect offline >/dev/null 2>&1 || true
               fi
               sleep 5
             done
