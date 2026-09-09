@@ -1,0 +1,152 @@
+name: Android Smart Grab Historical No-Alerts Proof
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-smart-grab-no-alerts-proof.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  prove:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 12
+    env:
+      PKG: com.mrscrap.socialradar
+      EXPECTED_VERSION_CODE: '154'
+      BACKEND: https://mr-scrap-api-live.onrender.com
+    steps:
+      - name: Checkout exact test lane preserving emulator data
+        uses: actions/checkout@v4
+        with:
+          ref: test/android-headless-emulator-20260909
+          fetch-depth: 1
+          clean: false
+
+      - name: Fail closed on committed Smart Grab separation contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          panel='src/components/SmartGrabPanel.tsx'
+          explore='src/services/explore.ts'
+          test -s "$panel"; test -s "$explore"
+          grep -q 'apiExploreDevicePosts' "$panel"
+          grep -q 'This does not create historical watch alerts' "$panel"
+          grep -q "apiUrl('/api/device/explore')" "$explore"
+          if grep -q 'apiIngestDevicePosts' "$panel"; then
+            echo SMART_GRAB_INGEST_IMPORT_PRESENT=1
+            exit 220
+          fi
+          if grep -q '/api/device/ingest' "$explore"; then
+            echo EXPLORE_INGEST_ROUTE_PRESENT=1
+            exit 221
+          fi
+          echo SMART_GRAB_COMMITTED_SEPARATION_GATE=PASS
+
+      - name: Resolve existing v154 app and Facebook session
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"; test -s "$adb"
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1;exit}')"; test -n "$serial"
+          test "$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1)" = 1
+          version="$($adb -s "$serial" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"
+          echo "INSTALLED_VERSION_CODE=$version"; test "$version" = "$EXPECTED_VERSION_CODE"
+          marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          printf '%s' "$marker" | grep -q facebook_connected_at
+          echo FACEBOOK_SESSION_METADATA_PRESENT=1
+          $adb -s "$serial" shell am force-stop "$PKG" >/dev/null 2>&1 || true
+          $adb -s "$serial" shell am start -W -n "$PKG/.MainActivity" >/dev/null
+          sleep 8
+          pid="$($adb -s "$serial" shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"; test -n "$pid"
+          echo "ADB=$adb" >> "$GITHUB_ENV"; echo "SERIAL=$serial" >> "$GITHUB_ENV"; echo "WIN_USER=$win_user" >> "$GITHUB_ENV"; echo "APP_PID=$pid" >> "$GITHUB_ENV"
+          echo SMART_GRAB_RUNTIME_PREREQS=PASS
+
+      - name: Run real Smart Grab explore and prove alerts unchanged
+        shell: bash
+        run: |
+          set -euo pipefail
+          socket="$($ADB -s "$SERIAL" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | grep -E "${APP_PID}$|_${APP_PID}($|_)" | head -n1 || true)"
+          [ -n "$socket" ] || socket="$($ADB -s "$SERIAL" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | head -n1 || true)"; test -n "$socket"
+          $ADB -s "$SERIAL" forward --remove tcp:9224 >/dev/null 2>&1 || true
+          $ADB -s "$SERIAL" forward tcp:9224 "localabstract:$socket" >/dev/null
+          ps1="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-smart-grab-no-alerts.ps1"
+          cat > "$ps1" <<'PS'
+          $ErrorActionPreference='Stop'
+          function Targets { for($i=0;$i -lt 30;$i++){ try{$t=@(Invoke-RestMethod -Uri 'http://127.0.0.1:9224/json/list' -TimeoutSec 2);if($t.Count -gt 0){return $t}}catch{}; Start-Sleep -Milliseconds 250 }; throw 'targets unavailable' }
+          function AppTarget { $a=@(Targets|Where-Object{$_.type -eq 'page' -and [string]$_.url -like 'https://localhost*'}|Select-Object -First 1);if($a.Count -eq 0){throw 'app target missing'};$a[0] }
+          function Eval([string]$raw,[string]$expr,[int]$seconds=240){$u=[Uri]$raw;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($seconds));$ws.ConnectAsync([Uri]('ws://127.0.0.1:9224'+$u.PathAndQuery),$cts.Token).GetAwaiter().GetResult()|Out-Null;$p=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 8;$b=[Text.Encoding]::UTF8.GetBytes($p);$ws.SendAsync([ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null;$buf=New-Object byte[] 131072;$sb=[Text.StringBuilder]::new();while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id -ne 1){continue};if($m.result.exceptionDetails){throw 'runtime eval exception'};$v=$m.result.result.value;try{$ws.Abort()}catch{};return $v}}
+          $app=AppTarget
+          $backend=$env:BACKEND
+          $expr=@"
+          (async()=>{
+            const base=${backend@Q};
+            const safeJson=async(r)=>{try{return await r.json()}catch{return null}};
+            const getAlerts=async()=>{const r=await fetch(base+'/api/alerts',{credentials:'include'});const b=await safeJson(r);return{ok:r.ok,status:r.status,rows:Array.isArray(b)?b:[]}};
+            const before=await getAlerts();
+            if(!before.ok)return{stage:'alerts_before',status:before.status};
+            const beforeIds=before.rows.map(x=>String(x?.id||'')).filter(Boolean).sort();
+            const sr=await fetch(base+'/api/sources',{credentials:'include'});const sb=await safeJson(sr);
+            if(!sr.ok)return{stage:'sources',status:sr.status,before:beforeIds.length};
+            const source=(Array.isArray(sb)?sb:[]).find(s=>s&&s.platform==='facebook'&&!Boolean(s.is_paused??s.isPaused)&&(s.connector_type||s.connectorType||'device_session')==='device_session');
+            if(!source)return{stage:'source_missing',before:beforeIds.length};
+            const cap=globalThis.Capacitor?.Plugins?.AuthenticatedSocialSession;
+            if(!cap)return{stage:'plugin_missing',before:beforeIds.length};
+            const session=await cap.getLocalSession();
+            if(!session?.facebookConnected)return{stage:'facebook_session_missing',before:beforeIds.length};
+            let col;try{col=await cap.collectSource({sourceId:source.id,url:source.url,platform:'facebook',limit:5})}catch(e){return{stage:'collect',before:beforeIds.length,collect:false}};
+            const posts=Array.isArray(col?.posts)?col.posts.slice(0,5):[];
+            if(!posts.length)return{stage:'no_posts',before:beforeIds.length,collect:true,posts:0};
+            const auth=await cap.getBackendAuth();
+            if(!auth?.configured||typeof auth.token!=='string'||auth.token.length<24)return{stage:'device_auth',before:beforeIds.length,posts:posts.length};
+            const compactMedia=(media)=>{if(!Array.isArray(media))return[];for(const x of media){if(x&&(x.type==='image'||x.type==='video')&&typeof x.url==='string'&&/^https?:\/\//i.test(x.url)&&x.url.length<=1000)return[{type:x.type,url:x.url}]}return[]};
+            const payloadPost=(p)=>({externalPostId:p.externalPostId,originalUrl:p.originalUrl,authorName:p.authorName,text:String(p.text||'').slice(0,1700),media:compactMedia(p.media),comments:[],commentsTruncated:false,videoPresent:p.videoPresent===true,publishedAt:p.publishedAt,metadata:{collector:typeof p?.metadata?.collector==='string'?p.metadata.collector:undefined,feedIndex:typeof p?.metadata?.feedIndex==='number'?p.metadata.feedIndex:undefined,pinned:typeof p?.metadata?.pinned==='boolean'?p.metadata.pinned:undefined}});
+            const er=await fetch(base+'/api/device/explore',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json','X-MR-SCRAP-CLIENT':'android-device-session','Authorization':'Bearer '+auth.token},body:JSON.stringify({sources:[{sourceId:source.id,posts:posts.map(payloadPost)}],mode:'auto',prompt:'',categories:[],locale:'en'})});
+            const eb=await safeJson(er);
+            if(!er.ok)return{stage:'explore',status:er.status,before:beforeIds.length,posts:posts.length,explore:false};
+            await new Promise(r=>setTimeout(r,8000));
+            const after=await getAlerts();
+            if(!after.ok)return{stage:'alerts_after',status:after.status,before:beforeIds.length,posts:posts.length,explore:true};
+            const afterIds=after.rows.map(x=>String(x?.id||'')).filter(Boolean).sort();
+            const sameSet=beforeIds.length===afterIds.length&&beforeIds.every((v,i)=>v===afterIds[i]);
+            return{stage:'done',before:beforeIds.length,after:afterIds.length,sameSet,posts:posts.length,explore:true,postsAnalyzed:Number(eb?.postsAnalyzed||0),accepted:Number(eb?.accepted||0),duplicates:Number(eb?.duplicates||0),rejected:Number(eb?.rejected||0),items:Array.isArray(eb?.items)?eb.items.length:0};
+          })()
+          "@
+          $r=Eval ([string]$app.webSocketDebuggerUrl) $expr 240
+          Write-Output ('SMART_GRAB_STAGE='+[string]$r.stage)
+          Write-Output ('ALERTS_BEFORE='+[int]$r.before)
+          if($null-ne$r.posts){Write-Output ('SMART_GRAB_POSTS_COLLECTED='+[int]$r.posts)}
+          if($null-ne$r.status){Write-Output ('SMART_GRAB_HTTP_STATUS='+[int]$r.status)}
+          Write-Output ('SMART_GRAB_EXPLORE_OK='+$(if($r.explore){'1'}else{'0'}))
+          if([string]$r.stage -ne 'done'){exit 222}
+          Write-Output ('SMART_GRAB_POSTS_ANALYZED='+[int]$r.postsAnalyzed)
+          Write-Output ('SMART_GRAB_ACCEPTED='+[int]$r.accepted)
+          Write-Output ('SMART_GRAB_DUPLICATES='+[int]$r.duplicates)
+          Write-Output ('SMART_GRAB_REJECTED='+[int]$r.rejected)
+          Write-Output ('SMART_GRAB_RESULT_ITEMS='+[int]$r.items)
+          Write-Output ('ALERTS_AFTER='+[int]$r.after)
+          Write-Output ('ALERT_SET_UNCHANGED='+$(if($r.sameSet){'1'}else{'0'}))
+          if(!$r.explore -or !$r.sameSet -or [int]$r.postsAnalyzed -lt 1){exit 223}
+          Write-Output SMART_GRAB_HISTORICAL_NO_ALERTS_GATE=PASS
+          PS
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
+
+      - name: Preserve Facebook session and clean forwarding
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${ADB:-}" ] || [ -z "${SERIAL:-}" ]; then exit 0; fi
+          marker="$($ADB -s "$SERIAL" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          printf '%s' "$marker" | grep -q facebook_connected_at
+          echo FACEBOOK_SESSION_METADATA_AFTER_SMART_GRAB=1
+          $ADB -s "$SERIAL" forward --remove tcp:9224 >/dev/null 2>&1 || true
+          rm -f "/mnt/c/Users/${WIN_USER:-}/AppData/Local/Temp/mrscrap-smart-grab-no-alerts.ps1" 2>/dev/null || true
+          echo SMART_GRAB_SESSION_GATE=PASS
