@@ -23,13 +23,10 @@ jobs:
       - name: Checkout diagnostic branch
         uses: actions/checkout@v4
 
-      - name: Connect phone and prepare WebView debugger
+      - name: Connect phone and expose WebView debugger on Windows
         shell: bash
         run: |
           set -euo pipefail
-          NODE=/home/tarik/actions-runnerr/_work/_tool/node/22.23.2/x64/bin/node
-          test -x "$NODE"
-          "$NODE" -e "if(typeof WebSocket!=='function'||typeof fetch!=='function') process.exit(2); console.log('NODE_CDP_READY')"
           win_user="$(/mnt/c/Windows/System32/cmd.exe /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
           adb="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-platform-tools/platform-tools/adb.exe"
           test -x "$adb"
@@ -42,16 +39,16 @@ jobs:
             sleep 2
           done
           test -n "$serial"
+          echo "::add-mask::$serial"
           echo "AUTHORIZED_ANDROID_DEVICE_FOUND"
           echo "ADB=$adb" >> "$GITHUB_ENV"
           echo "SERIAL=$serial" >> "$GITHUB_ENV"
-          echo "NODE=$NODE" >> "$GITHUB_ENV"
+          echo "WIN_USER=$win_user" >> "$GITHUB_ENV"
           "$adb" -s "$serial" shell setprop log.tag.MRSCRAP_FLOW I || true
           "$adb" -s "$serial" shell setprop log.tag.MRSCRAP_COLLECTOR I || true
           "$adb" -s "$serial" shell am start -n com.mrscrap.socialradar/.MainActivity >/dev/null 2>&1 || true
           "$adb" -s "$serial" shell dumpsys package com.mrscrap.socialradar 2>/dev/null | tr -d '\r' | grep -E 'versionCode=|versionName=' | head -n4
-          pid=""
-          socket=""
+          pid=""; socket=""
           for attempt in $(seq 1 60); do
             pid="$($adb -s "$serial" shell pidof com.mrscrap.socialradar 2>/dev/null | tr -d '\r' | awk '{print $1}')"
             if [ -n "$pid" ]; then
@@ -60,125 +57,156 @@ jobs:
             fi
             sleep 1
           done
-          test -n "$pid"
           test -n "$socket"
-          echo "WEBVIEW_DEBUG_SOCKET_FOUND"
           "$adb" -s "$serial" forward --remove tcp:19222 >/dev/null 2>&1 || true
           "$adb" -s "$serial" forward tcp:19222 "localabstract:${socket}" >/dev/null
+          CURL=/mnt/c/Windows/System32/curl.exe
           for attempt in $(seq 1 30); do
-            if "$NODE" -e "fetch('http://127.0.0.1:19222/json').then(r=>{if(!r.ok)process.exit(2);return r.json()}).then(x=>{if(!Array.isArray(x)||!x.length)process.exit(3)})" >/dev/null 2>&1; then
-              echo "WEBVIEW_DEBUGGER_READY"
-              exit 0
-            fi
+            if "$CURL" -fsS http://127.0.0.1:19222/json -o NUL >/dev/null 2>&1; then break; fi
             sleep 1
           done
-          echo "WEBVIEW_DEBUGGER_HTTP_NOT_READY"
-          exit 1
+          "$CURL" -fsS http://127.0.0.1:19222/json -o NUL >/dev/null
+          CMD=/mnt/c/Windows/System32/cmd.exe
+          if "$CMD" /d /c "python -c \"import websocket; print('WINDOWS_CDP_READY')\"" 2>/dev/null | tr -d '\r' | grep -q WINDOWS_CDP_READY; then
+            echo "WINDOWS_PY_MODE=python" >> "$GITHUB_ENV"
+          elif "$CMD" /d /c "py -3 -c \"import websocket; print('WINDOWS_CDP_READY')\"" 2>/dev/null | tr -d '\r' | grep -q WINDOWS_CDP_READY; then
+            echo "WINDOWS_PY_MODE=py" >> "$GITHUB_ENV"
+          else
+            echo "WINDOWS_WEBSOCKET_CLIENT_UNAVAILABLE"
+            exit 1
+          fi
+          echo "WINDOWS_WEBVIEW_DEBUGGER_READY"
 
       - name: Monitor one real Smart Grab safely
         shell: bash
         run: |
           set -euo pipefail
-          "$NODE" <<'NODE'
-          const BASE='http://127.0.0.1:19222';
-          const UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
-          const EXPECTED_DOC='27465012859856795';
-          const EXPECTED_FRIENDLY='ProfileCometTimelineFeedRefetchQuery';
-          const REF_KEYS=new Set([
+          script="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-live-cdp.py"
+          cat > "$script" <<'PY'
+          import base64, json, re, socket, time, urllib.parse, urllib.request
+          import websocket
+
+          BASE='http://127.0.0.1:19222'
+          UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+          DOC='27465012859856795'
+          FRIENDLY='ProfileCometTimelineFeedRefetchQuery'
+          REF={
             'afterTime','beforeTime','count','cursor','feedLocation','feedbackSource','focusCommentID','memorializedSplitTimeFilter','omitPinnedPost','postedBy','privacy','privacySelectorRenderLocation','referringStoryRenderLocation','renderLocation','scale','stream_count','taggedInOnly','trackingCode','useDefaultActor','id',
             '__relay_internal__pv__GHLShouldChangeAdIdFieldNamerelayprovider','__relay_internal__pv__GHLShouldChangeSponsoredDataFieldNamerelayprovider','__relay_internal__pv__CometFeedStory_enable_reactor_facepilerelayprovider','__relay_internal__pv__CometFeedStory_enable_social_bubblesrelayprovider','__relay_internal__pv__CometFeedStory_enable_post_permalink_white_space_clickrelayprovider','__relay_internal__pv__CometUFICommentActionLinksRewriteEnabledrelayprovider','__relay_internal__pv__CometUFICommentAvatarStickerAnimatedImagerelayprovider','__relay_internal__pv__IsWorkUserrelayprovider','__relay_internal__pv__TestPilotShouldIncludeDemoAdUseCaserelayprovider','__relay_internal__pv__FBReels_deprecate_short_form_video_context_gkrelayprovider','__relay_internal__pv__FBReels_enable_view_dubbed_audio_type_gkrelayprovider','__relay_internal__pv__CometFeedShareMedia_shouldPrefetchShareImagerelayprovider','__relay_internal__pv__CometImmersivePhotoCanUserDisable3DMotionrelayprovider','__relay_internal__pv__WorkCometIsEmployeeGKProviderrelayprovider','__relay_internal__pv__IsMergQAPollsrelayprovider','__relay_internal__pv__FBReelsMediaFooter_comet_enable_reels_ads_gkrelayprovider','__relay_internal__pv__CometUFIReactionsEnableShortNamerelayprovider','__relay_internal__pv__CometUFICommentAutoTranslationTyperelayprovider','__relay_internal__pv__CometUFIShareActionMigrationrelayprovider','__relay_internal__pv__CometUFISingleLineUFIrelayprovider','__relay_internal__pv__relay_provider_comet_ufi_ssr_seo_deferrelayprovider','__relay_internal__pv__CometUFI_dedicated_comment_routable_dialog_gkrelayprovider','__relay_internal__pv__ReelsIFUCard_reelsIFULikeCountrelayprovider','__relay_internal__pv__FBReelsIFUTileContent_reelsIFUPlayOnHoverrelayprovider','__relay_internal__pv__GroupsCometGYSJFeedItemHeightrelayprovider','__relay_internal__pv__ShouldEnableBakedInTextStoriesrelayprovider','__relay_internal__pv__StoriesShouldIncludeFbNotesrelayprovider'
-          ]);
-          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-          async function targets(){ const r=await fetch(BASE+'/json'); if(!r.ok) throw new Error('TARGET_LIST_HTTP_'+r.status); return r.json(); }
-          class CDP{
-            constructor(url){ this.url=url; this.id=0; this.pending=new Map(); this.events=[]; }
-            async open(){
-              this.ws=new WebSocket(this.url);
-              await new Promise((resolve,reject)=>{ const timer=setTimeout(()=>reject(new Error('WS_OPEN_TIMEOUT')),3000); this.ws.addEventListener('open',()=>{clearTimeout(timer);resolve();},{once:true}); this.ws.addEventListener('error',()=>{clearTimeout(timer);reject(new Error('WS_OPEN_ERROR'));},{once:true}); });
-              this.ws.addEventListener('message',e=>{ let m; try{m=JSON.parse(String(e.data));}catch{return;} if(m.id&&this.pending.has(m.id)){const p=this.pending.get(m.id);this.pending.delete(m.id);p.resolve(m);}else if(m.method)this.events.push(m); });
-            }
-            send(method,params={},timeout=4000){
-              const id=++this.id;
-              return new Promise((resolve,reject)=>{ const timer=setTimeout(()=>{this.pending.delete(id);reject(new Error('CDP_TIMEOUT_'+method));},timeout); this.pending.set(id,{resolve:m=>{clearTimeout(timer);resolve(m);}}); this.ws.send(JSON.stringify({id,method,params})); });
-            }
-            close(){ try{this.ws?.close();}catch{} }
           }
-          const initial=await targets();
-          const mainTarget=initial.find(t=>String(t.url||'').startsWith('https://localhost'));
-          if(!mainTarget) throw new Error('MAIN_CAPACITOR_TARGET_NOT_FOUND');
-          const baseline=new Set(initial.filter(t=>t.type==='page').map(t=>t.id));
-          const main=new CDP(mainTarget.webSocketDebuggerUrl); await main.open(); await main.send('Runtime.enable');
-          const hook=`(()=>{const c=window.Capacitor;if(!c||typeof c.nativePromise!=='function')return 'NO_CAPACITOR';if(window.__mrsDiagWrap)return 'ALREADY_WRAPPED';const o=c.nativePromise.bind(c);c.nativePromise=function(p,m,a){if(p==='AuthenticatedSocialSession'&&m==='collectSource'&&a&&a.platform==='facebook'){window.__mrsDiagLast={url:String(a.url||''),limit:Number(a.limit||0)}}return o(p,m,a)};window.__mrsDiagWrap=true;return 'WRAPPED'})()`;
-          const hookResult=await main.send('Runtime.evaluate',{expression:hook,returnByValue:true});
-          console.log('CAPACITOR_COLLECT_HOOK='+String(hookResult.result?.result?.value||''));
-          console.log('READY_FOR_ONE_REAL_SMART_GRAB');
-
-          let collectorTarget=null; const waitEnd=Date.now()+210000;
-          while(Date.now()<waitEnd&&!collectorTarget){
-            for(const t of await targets()){ if(t.type==='page'&&!baseline.has(t.id)){ collectorTarget=t; break; } }
-            if(!collectorTarget) await sleep(120);
-          }
-          if(!collectorTarget) throw new Error('NO_NEW_COLLECTOR_WEBVIEW_SEEN');
-          console.log('COLLECTOR_WEBVIEW_SEEN=1');
-          const sourceEval=await main.send('Runtime.evaluate',{expression:`String(window.__mrsDiagLast?.url||'')`,returnByValue:true});
-          const source=String(sourceEval.result?.result?.value||'');
-          if(!/^https?:\/\//.test(source)) throw new Error('COLLECT_SOURCE_URL_NOT_CAPTURED');
-
-          const cdp=new CDP(collectorTarget.webSocketDebuggerUrl); await cdp.open();
-          await cdp.send('Runtime.enable'); await cdp.send('Network.enable'); await cdp.send('Page.enable');
-          await cdp.send('Network.setUserAgentOverride',{userAgent:UA});
-          await cdp.send('Page.navigate',{url:source});
-          console.log('DESKTOP_UA_APPLIED_AND_SOURCE_RENAVIGATED=1');
-
-          let gqlId=null, gqlStatus=null, contract=null, responseSummary=null; const docStatuses=[];
-          function parseContract(postData){
-            try{
-              const q=new URLSearchParams(postData||''); const vars=JSON.parse(q.get('variables')||'{}'); const keys=new Set(Object.keys(vars||{})); const missing=[...REF_KEYS].filter(k=>!keys.has(k)).sort(); const sid=String(vars?.id||'');
-              return {doc_id_match:q.get('doc_id')===EXPECTED_DOC,friendly_name_match:q.get('fb_api_req_friendly_name')===EXPECTED_FRIENDLY,variable_key_count:keys.size,missing_reference_count:missing.length,missing_reference_keys:missing,source_id_numeric:/^\d+$/.test(sid),source_id_length:sid.length,_id:sid};
-            }catch{return {parse_failed:true,_id:''};}
-          }
-          function parseBody(raw,sid){
-            const out={json_lines:0,graphql_error_count:0,graphql_error_codes:[],timeline_edges:0,post_nodes_with_post_id:0,direct_post_nodes:0,page_info_blocks:0,response_node_matches_requested_id:false}; const codes=new Set();
-            for(const line of String(raw||'').split(/\r?\n/)){
-              if(!line.trim()) continue; let p; try{p=JSON.parse(line);}catch{continue;} out.json_lines++;
-              if(Array.isArray(p?.errors)){out.graphql_error_count+=p.errors.length;for(const e of p.errors){if(e&&e.code!=null)codes.add(String(e.code).slice(0,32));}}
-              const d=p?.data;if(!d||typeof d!=='object')continue;if(d.page_info&&typeof d.page_info==='object')out.page_info_blocks++;
-              const n=d.node;if(!n||typeof n!=='object')continue;if(sid&&String(n.id||'')===sid)out.response_node_matches_requested_id=true;if(n.post_id){out.direct_post_nodes++;out.post_nodes_with_post_id++;}
-              const feed=n.timeline_list_feed_units;if(feed&&typeof feed==='object'){if(feed.page_info&&typeof feed.page_info==='object')out.page_info_blocks++;if(Array.isArray(feed.edges)){out.timeline_edges+=feed.edges.length;for(const e of feed.edges){if(e?.node?.post_id)out.post_nodes_with_post_id++;}}}
-            }
-            out.graphql_error_codes=[...codes].sort(); return out;
-          }
-          const end=Date.now()+45000;
-          while(Date.now()<end){
-            const batch=cdp.events.splice(0);
-            for(const m of batch){
-              const p=m.params||{};
-              if(m.method==='Network.requestWillBeSent'){
-                const req=p.request||{}; let u; try{u=new URL(String(req.url||''));}catch{continue;}
-                if(u.hostname.endsWith('facebook.com')&&u.pathname==='/api/graphql/'){
-                  gqlId=p.requestId; let post=req.postData||'';
-                  if(!post&&gqlId){try{const rr=await cdp.send('Network.getRequestPostData',{requestId:gqlId},2500);post=rr.result?.postData||'';}catch{}}
-                  contract=parseContract(post); console.log('GRAPHQL_REQUEST_SEEN=1');
-                }
-              }else if(m.method==='Network.responseReceived'){
-                const resp=p.response||{}; let u; try{u=new URL(String(resp.url||''));}catch{continue;}
-                if(u.hostname.endsWith('facebook.com')&&p.type==='Document')docStatuses.push(Number(resp.status||0));
-                if(gqlId&&p.requestId===gqlId)gqlStatus=Number(resp.status||0);
-              }else if(m.method==='Network.loadingFinished'&&gqlId&&p.requestId===gqlId){
-                try{const rr=await cdp.send('Network.getResponseBody',{requestId:gqlId},3000);let body=rr.result?.body||'';if(rr.result?.base64Encoded)body=Buffer.from(body,'base64').toString('utf8');responseSummary=parseBody(body,contract?._id||'');}catch{responseSummary={body_unavailable:true};}
-                break;
-              }
-            }
-            if(responseSummary)break;
-            await sleep(30);
-          }
-          const safeContract=contract?Object.fromEntries(Object.entries(contract).filter(([k])=>!k.startsWith('_'))):{request_seen:false};
-          console.log('GRAPHQL_CONTRACT='+JSON.stringify(safeContract));
-          console.log('FACEBOOK_DOCUMENT_STATUSES='+JSON.stringify(docStatuses.slice(-8)));
-          console.log('GRAPHQL_HTTP_STATUS='+(gqlStatus??'NONE'));
-          console.log('GRAPHQL_RESPONSE_SUMMARY='+JSON.stringify(responseSummary||{not_captured:true}));
-          cdp.close(); main.close();
-          NODE
+          def targets():
+            with urllib.request.urlopen(BASE+'/json',timeout=2) as r: return json.load(r)
+          seq=0
+          def command(ws,method,params=None,timeout=4,buffer=None):
+            global seq
+            seq+=1; ident=seq; ws.send(json.dumps({'id':ident,'method':method,'params':params or {}})); end=time.time()+timeout
+            while time.time()<end:
+              try: msg=json.loads(ws.recv())
+              except (socket.timeout,websocket.WebSocketTimeoutException): continue
+              if msg.get('id')==ident: return msg
+              if buffer is not None: buffer.append(msg)
+            raise TimeoutError(method)
+          all_targets=targets()
+          main=next((t for t in all_targets if str(t.get('url','')).startswith('https://localhost')),None)
+          if not main: raise SystemExit('MAIN_CAPACITOR_TARGET_NOT_FOUND')
+          baseline={t.get('id') for t in all_targets if t.get('type')=='page'}
+          main_ws=websocket.create_connection(main['webSocketDebuggerUrl'],timeout=1,suppress_origin=True); main_ws.settimeout(.35)
+          command(main_ws,'Runtime.enable')
+          hook="""(()=>{const c=window.Capacitor;if(!c||typeof c.nativePromise!=='function')return 'NO_CAPACITOR';if(window.__mrsDiagWrap)return 'ALREADY_WRAPPED';const o=c.nativePromise.bind(c);c.nativePromise=function(p,m,a){if(p==='AuthenticatedSocialSession'&&m==='collectSource'&&a&&a.platform==='facebook')window.__mrsDiagLast={url:String(a.url||''),limit:Number(a.limit||0)};return o(p,m,a)};window.__mrsDiagWrap=true;return 'WRAPPED'})()"""
+          result=command(main_ws,'Runtime.evaluate',{'expression':hook,'returnByValue':True})
+          print('CAPACITOR_COLLECT_HOOK='+str(result.get('result',{}).get('result',{}).get('value','')),flush=True)
+          print('READY_FOR_ONE_REAL_SMART_GRAB',flush=True)
+          collector=None; deadline=time.time()+210
+          while time.time()<deadline and collector is None:
+            try: current=targets()
+            except Exception: time.sleep(.15); continue
+            for t in current:
+              if t.get('type')=='page' and t.get('id') not in baseline: collector=t; break
+            if collector is None: time.sleep(.12)
+          if collector is None: raise SystemExit('NO_NEW_COLLECTOR_WEBVIEW_SEEN')
+          print('COLLECTOR_WEBVIEW_SEEN=1',flush=True)
+          r=command(main_ws,'Runtime.evaluate',{'expression':"String(window.__mrsDiagLast?.url||'')",'returnByValue':True})
+          source=str(r.get('result',{}).get('result',{}).get('value',''))
+          if not source.startswith('http'): raise SystemExit('COLLECT_SOURCE_URL_NOT_CAPTURED')
+          ws=websocket.create_connection(collector['webSocketDebuggerUrl'],timeout=1,suppress_origin=True); ws.settimeout(.2); buf=[]
+          for method,params in [('Runtime.enable',{}),('Network.enable',{}),('Page.enable',{}),('Network.setUserAgentOverride',{'userAgent':UA}),('Page.navigate',{'url':source})]: command(ws,method,params,buffer=buf)
+          print('DESKTOP_UA_APPLIED_AND_SOURCE_RENAVIGATED=1',flush=True)
+          reqid=None; status=None; contract=None; summary=None; docs=[]
+          def parse_contract(data):
+            try:
+              form=urllib.parse.parse_qs(data or '',keep_blank_values=True); variables=json.loads((form.get('variables') or ['{}'])[0]); keys=set(variables) if isinstance(variables,dict) else set(); sid=str(variables.get('id') or '') if isinstance(variables,dict) else ''; missing=sorted(REF-keys)
+              return {'doc_id_match':(form.get('doc_id') or [''])[0]==DOC,'friendly_name_match':(form.get('fb_api_req_friendly_name') or [''])[0]==FRIENDLY,'variable_key_count':len(keys),'missing_reference_count':len(missing),'missing_reference_keys':missing,'source_id_numeric':sid.isdigit(),'source_id_length':len(sid),'_id':sid}
+            except Exception: return {'parse_failed':True,'_id':''}
+          def parse_body(raw,sid):
+            out={'json_lines':0,'graphql_error_count':0,'graphql_error_codes':[],'timeline_edges':0,'post_nodes_with_post_id':0,'direct_post_nodes':0,'page_info_blocks':0,'response_node_matches_requested_id':False}; codes=set()
+            for line in str(raw or '').splitlines():
+              if not line.strip(): continue
+              try: p=json.loads(line)
+              except Exception: continue
+              out['json_lines']+=1
+              if isinstance(p,dict) and isinstance(p.get('errors'),list):
+                out['graphql_error_count']+=len(p['errors'])
+                for e in p['errors']:
+                  if isinstance(e,dict) and e.get('code') is not None: codes.add(str(e.get('code'))[:32])
+              d=p.get('data') if isinstance(p,dict) else None
+              if not isinstance(d,dict): continue
+              if isinstance(d.get('page_info'),dict): out['page_info_blocks']+=1
+              n=d.get('node')
+              if not isinstance(n,dict): continue
+              if sid and str(n.get('id') or '')==sid: out['response_node_matches_requested_id']=True
+              if n.get('post_id'): out['direct_post_nodes']+=1; out['post_nodes_with_post_id']+=1
+              feed=n.get('timeline_list_feed_units')
+              if isinstance(feed,dict):
+                if isinstance(feed.get('page_info'),dict): out['page_info_blocks']+=1
+                edges=feed.get('edges')
+                if isinstance(edges,list):
+                  out['timeline_edges']+=len(edges)
+                  out['post_nodes_with_post_id']+=sum(1 for e in edges if isinstance(e,dict) and isinstance(e.get('node'),dict) and e['node'].get('post_id'))
+            out['graphql_error_codes']=sorted(codes); return out
+          end=time.time()+45
+          while time.time()<end:
+            try: msg=buf.pop(0) if buf else json.loads(ws.recv())
+            except (socket.timeout,websocket.WebSocketTimeoutException): continue
+            except Exception: break
+            method=msg.get('method'); p=msg.get('params') or {}
+            if method=='Network.requestWillBeSent':
+              req=p.get('request') or {}
+              try: u=urllib.parse.urlparse(str(req.get('url') or ''))
+              except Exception: continue
+              if u.hostname and u.hostname.endswith('facebook.com') and u.path=='/api/graphql/':
+                reqid=p.get('requestId'); post=req.get('postData') or ''
+                if not post and reqid:
+                  try: post=command(ws,'Network.getRequestPostData',{'requestId':reqid},2.5,buf).get('result',{}).get('postData','')
+                  except Exception: pass
+                contract=parse_contract(post); print('GRAPHQL_REQUEST_SEEN=1',flush=True)
+            elif method=='Network.responseReceived':
+              resp=p.get('response') or {}; u=urllib.parse.urlparse(str(resp.get('url') or ''))
+              if u.hostname and u.hostname.endswith('facebook.com') and p.get('type')=='Document': docs.append(int(resp.get('status') or 0))
+              if reqid and p.get('requestId')==reqid: status=int(resp.get('status') or 0)
+            elif method=='Network.loadingFinished' and reqid and p.get('requestId')==reqid:
+              try:
+                rr=command(ws,'Network.getResponseBody',{'requestId':reqid},3,buf).get('result',{}); body=rr.get('body','')
+                if rr.get('base64Encoded'): body=base64.b64decode(body).decode('utf-8','replace')
+                summary=parse_body(body,(contract or {}).get('_id',''))
+              except Exception: summary={'body_unavailable':True}
+              break
+          safe={k:v for k,v in (contract or {}).items() if not k.startswith('_')}
+          print('GRAPHQL_CONTRACT='+json.dumps(safe if contract else {'request_seen':False},sort_keys=True,separators=(',',':')),flush=True)
+          print('FACEBOOK_DOCUMENT_STATUSES='+json.dumps(docs[-8:]),flush=True)
+          print('GRAPHQL_HTTP_STATUS='+str(status if status is not None else 'NONE'),flush=True)
+          print('GRAPHQL_RESPONSE_SUMMARY='+json.dumps(summary or {'not_captured':True},sort_keys=True,separators=(',',':')),flush=True)
+          try: ws.close()
+          except Exception: pass
+          try: main_ws.close()
+          except Exception: pass
+          PY
+          win_script="C:\\Users\\${WIN_USER}\\AppData\\Local\\Temp\\mrscrap-live-cdp.py"
+          CMD=/mnt/c/Windows/System32/cmd.exe
+          if [ "$WINDOWS_PY_MODE" = python ]; then
+            "$CMD" /d /c "python \"$win_script\""
+          else
+            "$CMD" /d /c "py -3 \"$win_script\""
+          fi
 
       - name: Capture safe native markers
         if: always()
