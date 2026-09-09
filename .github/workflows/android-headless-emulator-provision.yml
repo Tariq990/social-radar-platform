@@ -11,10 +11,10 @@ permissions:
 jobs:
   provision:
     runs-on: [self-hosted, Linux]
-    timeout-minutes: 75
+    timeout-minutes: 55
     steps:
-      - name: Install emulator and platform tools if missing
-        timeout-minutes: 15
+      - name: Verify emulator and platform tools
+        timeout-minutes: 5
         shell: bash
         run: |
           set -euo pipefail
@@ -22,47 +22,15 @@ jobs:
           win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
           test -n "$win_user"
 
-          android="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidCLI/android.exe"
           sdk_wsl="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk"
-          sdk_win="C:\\Users\\${win_user}\\AppData\\Local\\MRSCRAP\\AndroidSdk"
-          test -s "$android"
-          mkdir -p "$sdk_wsl"
+          test -s "${sdk_wsl}/emulator/emulator.exe"
+          test -s "${sdk_wsl}/platform-tools/adb.exe"
 
-          packages=()
-          test -s "${sdk_wsl}/emulator/emulator.exe" || packages+=(emulator)
-          test -s "${sdk_wsl}/platform-tools/adb.exe" || packages+=(platform-tools)
-
-          install_rc=0
-          if ((${#packages[@]})); then
-            echo "CORE_PACKAGES_MISSING=${#packages[@]}"
-            set +e
-            "$android" --no-metrics --sdk="$sdk_win" sdk install "${packages[@]}" 2>&1 |
-              tr -d '\r' |
-              sed -E 's/([0-9]{5,})/[number]/g'
-            pipe_rc=("${PIPESTATUS[@]}")
-            set -e
-            install_rc="${pipe_rc[0]}"
-            echo "CORE_INSTALL_RC=${install_rc}"
-          else
-            echo CORE_PACKAGES_REUSED=1
-          fi
-
-          if ! test -s "${sdk_wsl}/emulator/emulator.exe" || ! test -s "${sdk_wsl}/platform-tools/adb.exe"; then
-            echo CORE_PACKAGES_VERIFY=FAIL
-            if ((install_rc != 0)); then exit "$install_rc"; fi
-            exit 1
-          fi
-
+          echo CORE_PACKAGES_REUSED=1
           echo CORE_PACKAGES_READY=1
 
-      - name: Setup Java for official sdkmanager
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - name: Repair or install Android system image
-        timeout-minutes: 50
+      - name: Install Android 36 system image directly
+        timeout-minutes: 45
         shell: bash
         run: |
           set -euo pipefail
@@ -85,86 +53,48 @@ jobs:
 
           if image_complete_at "$image_dir"; then
             echo SYSTEM_IMAGE_REUSED=1
-            echo SYSTEM_IMAGE_COMPLETE=1
             echo SYSTEM_IMAGE_READY=1
             exit 0
           fi
 
-          echo SYSTEM_IMAGE_REPAIR_REQUIRED=1
-          for f in "${required[@]}"; do
-            if test -s "${image_dir}/${f}"; then
-              echo "SYSTEM_IMAGE_FILE_${f//[^A-Za-z0-9]/_}=1"
-            else
-              echo "SYSTEM_IMAGE_FILE_${f//[^A-Za-z0-9]/_}=0"
-            fi
-          done
+          echo SYSTEM_IMAGE_DIRECT_INSTALL_REQUIRED=1
 
-          tools_version="15859902"
-          tools_sha256="4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583"
-          tools_cache="$HOME/.cache/mrscrap-android-cmdline/${tools_version}"
-          tools_zip="$HOME/.cache/mrscrap-android-cmdline/commandlinetools-linux-${tools_version}.zip"
-          sdkmanager="${tools_cache}/cmdline-tools/bin/sdkmanager"
-          mkdir -p "$(dirname "$tools_zip")"
+          cache_dir="$HOME/.cache/mrscrap-android-system-image"
+          zip_file="${cache_dir}/x86_64-36_r07.zip"
+          extract_dir="${cache_dir}/extract-r07"
+          url="https://dl.google.com/android/repository/sys-img/google_apis/x86_64-36_r07.zip"
+          mkdir -p "$cache_dir"
 
-          if [ ! -x "$sdkmanager" ]; then
-            echo CMDLINE_TOOLS_DOWNLOAD_REQUIRED=1
-            rm -rf "$tools_cache"
-            rm -f "${tools_zip}.part"
-            curl --fail --location \
-              --connect-timeout 20 --max-time 600 \
-              --retry 4 --retry-delay 3 --retry-all-errors \
-              -o "${tools_zip}.part" \
-              "https://dl.google.com/android/repository/commandlinetools-linux-${tools_version}_latest.zip"
-            printf '%s  %s\n' "$tools_sha256" "${tools_zip}.part" | sha256sum -c -
-            mv "${tools_zip}.part" "$tools_zip"
-            mkdir -p "$tools_cache"
-            unzip -q "$tools_zip" -d "$tools_cache"
+          echo SYSTEM_IMAGE_DOWNLOAD_BEGIN=1
+          curl --fail --location --progress-bar \
+            --connect-timeout 20 \
+            --max-time 2400 \
+            --retry 5 --retry-delay 3 --retry-all-errors \
+            --continue-at - \
+            -o "$zip_file" \
+            "$url"
+          test -s "$zip_file"
+          echo SYSTEM_IMAGE_DOWNLOAD_COMPLETE=1
+          ls -lh "$zip_file" | awk '{print "SYSTEM_IMAGE_ZIP_SIZE=" $5}'
+
+          echo SYSTEM_IMAGE_ZIP_TEST_BEGIN=1
+          unzip -tq "$zip_file"
+          echo SYSTEM_IMAGE_ZIP_TEST_PASS=1
+
+          rm -rf "$extract_dir"
+          mkdir -p "$extract_dir"
+          echo SYSTEM_IMAGE_EXTRACT_BEGIN=1
+          unzip -q "$zip_file" -d "$extract_dir"
+          echo SYSTEM_IMAGE_EXTRACT_COMPLETE=1
+
+          stage_image=""
+          if image_complete_at "${extract_dir}/x86_64"; then
+            stage_image="${extract_dir}/x86_64"
+          elif image_complete_at "$extract_dir"; then
+            stage_image="$extract_dir"
           else
-            echo CMDLINE_TOOLS_REUSED=1
-          fi
-          test -x "$sdkmanager"
-          echo CMDLINE_TOOLS_READY=1
-
-          stage_sdk="$HOME/.local/share/mrscrap-android-system-image-stage"
-          stage_image="${stage_sdk}/system-images/android-36/google_apis/x86_64"
-          mkdir -p "$stage_sdk"
-
-          if ! image_complete_at "$stage_image"; then
-            echo SYSTEM_IMAGE_STAGE_DOWNLOAD_REQUIRED=1
-            rm -rf "$stage_image"
-
-            set +e
-            yes | "$sdkmanager" --sdk_root="$stage_sdk" --licenses >/tmp/mrscrap-sdk-licenses.log 2>&1
-            license_pipe=("${PIPESTATUS[@]}")
-            set -e
-            license_rc="${license_pipe[1]}"
-            echo "SDK_LICENSE_RC=${license_rc}"
-            if ((license_rc != 0)); then
-              tail -n 20 /tmp/mrscrap-sdk-licenses.log | tr -d '\r' | sed -E 's/([0-9]{5,})/[number]/g'
-              exit "$license_rc"
-            fi
-
-            set +e
-            timeout --signal=TERM 42m "$sdkmanager" \
-              --sdk_root="$stage_sdk" \
-              --install "system-images;android-36;google_apis;x86_64" 2>&1 |
-              tr -d '\r' |
-              sed -E 's/([0-9]{5,})/[number]/g'
-            install_pipe=("${PIPESTATUS[@]}")
-            set -e
-            install_rc="${install_pipe[0]}"
-            echo "SDKMANAGER_SYSTEM_IMAGE_RC=${install_rc}"
-            if ((install_rc != 0)); then exit "$install_rc"; fi
-          else
-            echo SYSTEM_IMAGE_STAGE_REUSED=1
-          fi
-
-          if ! image_complete_at "$stage_image"; then
-            echo SYSTEM_IMAGE_STAGE_VERIFY=FAIL
-            for f in "${required[@]}"; do
-              test -s "${stage_image}/${f}" && v=1 || v=0
-              echo "STAGE_VERIFY_${f//[^A-Za-z0-9]/_}=${v}"
-            done
+            echo SYSTEM_IMAGE_ARCHIVE_LAYOUT_INVALID=1
+            find "$extract_dir" -maxdepth 2 -type f -printf '%P\n' | head -n 40
             exit 1
           fi
           echo SYSTEM_IMAGE_STAGE_COMPLETE=1
@@ -178,19 +108,12 @@ jobs:
           mkdir -p "$(dirname "$image_tmp")"
           echo SYSTEM_IMAGE_COPY_BEGIN=1
           cp -a "$stage_image" "$image_tmp"
-          if ! image_complete_at "$image_tmp"; then
-            echo SYSTEM_IMAGE_COPY_VERIFY=FAIL
-            exit 1
-          fi
+          image_complete_at "$image_tmp"
           echo SYSTEM_IMAGE_COPY_COMPLETE=1
 
           rm -rf "$image_dir"
           mv "$image_tmp" "$image_dir"
-
-          if ! image_complete_at "$image_dir"; then
-            echo SYSTEM_IMAGE_VERIFY=FAIL
-            exit 1
-          fi
+          image_complete_at "$image_dir"
 
           echo SYSTEM_IMAGE_COMPLETE=1
           echo SYSTEM_IMAGE_READY=1
