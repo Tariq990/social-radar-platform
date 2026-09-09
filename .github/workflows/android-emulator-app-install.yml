@@ -109,7 +109,8 @@ jobs:
 
       - name: Compile debug APK
         shell: bash
-        run: "$GRADLE_BIN" -p android :app:assembleDebug --stacktrace
+        run: |
+          "$GRADLE_BIN" -p android :app:assembleDebug --stacktrace
 
       - name: Resolve running emulator
         shell: bash
