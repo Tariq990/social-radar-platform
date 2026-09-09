@@ -45,11 +45,13 @@ jobs:
 
           echo RUNTIME_SDK_READY=1
 
-          avds="$($emulator_wsl -list-avds 2>/dev/null | tr -d '\r' || true)"
-          if ! grep -Fxq 'medium_phone' <<<"$avds"; then
+          avds="$($emulator_wsl -list-avds 2>/dev/null | tr -d '\r' | sed '/^[[:space:]]*$/d' || true)"
+          avd_name="$(printf '%s\n' "$avds" | head -n1)"
+
+          if [ -z "$avd_name" ]; then
             echo AVD_CREATE_REQUIRED=1
             set +e
-            "$android_wsl" --no-metrics --sdk="$sdk_win" emulator create --profile=medium_phone 2>&1 |
+            "$android_wsl" --no-metrics --sdk="$sdk_win" emulator create medium_phone 2>&1 |
               tr -d '\r' |
               sed -E 's/([0-9]{5,})/[number]/g'
             create_rc=("${PIPESTATUS[@]}")
@@ -59,10 +61,10 @@ jobs:
             echo AVD_REUSED=1
           fi
 
-          avds="$($emulator_wsl -list-avds 2>/dev/null | tr -d '\r' || true)"
-          if ! grep -Fxq 'medium_phone' <<<"$avds"; then
+          avds="$($emulator_wsl -list-avds 2>/dev/null | tr -d '\r' | sed '/^[[:space:]]*$/d' || true)"
+          avd_name="$(printf '%s\n' "$avds" | head -n1)"
+          if [ -z "$avd_name" ]; then
             echo AVD_VERIFY=FAIL
-            echo AVAILABLE_AVD_COUNT="$(grep -cve '^$' <<<"$avds" || true)"
             exit 1
           fi
           echo AVD_READY=1
@@ -79,7 +81,7 @@ jobs:
           \$env:ANDROID_SDK_ROOT = '${sdk_win}'
           \$env:ANDROID_HOME = '${sdk_win}'
           \$emulator = '${sdk_win}\\emulator\\emulator.exe'
-          \$args = @('@medium_phone','-no-audio','-no-boot-anim','-gpu','auto')
+          \$args = @('@${avd_name}','-no-audio','-no-boot-anim','-gpu','auto')
           if ('${{ inputs.headless }}' -eq 'true') { \$args += '-no-window' }
           Start-Process -FilePath \$emulator -ArgumentList \$args -WindowStyle Normal
           Write-Output 'EMULATOR_PROCESS_STARTED=1'
