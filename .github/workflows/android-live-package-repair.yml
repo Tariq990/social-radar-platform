@@ -14,7 +14,7 @@ jobs:
     runs-on: [self-hosted, Linux]
     timeout-minutes: 8
     steps:
-      - name: Restore required DMA capability and prove Android UI
+      - name: Force required DMA prerequisites and prove Android UI
         shell: bash
         run: |
           set -u
@@ -22,7 +22,6 @@ jobs:
           sdk="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk"
           sdk_win="C:\\Users\\${win_user}\\AppData\\Local\\MRSCRAP\\AndroidSdk"
           adb="${sdk}/platform-tools/adb.exe"
-          emu="${sdk}/emulator/emulator.exe"
           features="/mnt/c/Users/${win_user}/.android/advancedFeatures.ini"
           temp="/mnt/c/Users/${win_user}/AppData/Local/Temp/MRSCRAP"
           hostout="${temp}/dma-required-host.out.log"
@@ -32,27 +31,28 @@ jobs:
           activity="com.mrscrap.socialradar.MainActivity"
           mkdir -p "$temp"
 
-          echo '=== RESTORE IMAGE-COMPATIBLE FEATURE DEFAULTS ==='
-          backup="${features}.mrscrap-pre-read-color-buffer-restore"
+          echo '=== FORCE ONLY READ-COLOR-BUFFER DMA PREREQUISITES ==='
+          backup="${features}.mrscrap-pre-force-dma-prereqs"
           if [ -f "$features" ] && [ ! -f "$backup" ]; then
             cp "$features" "$backup"
             echo "FEATURE_BACKUP_CREATED=$backup"
           fi
-          tmp="${features}.mrscrap-restore-tmp"
+          tmp="${features}.mrscrap-force-tmp"
           if [ -f "$features" ]; then
             grep -Eiv '^[[:space:]]*(GLDMA|GLDirectMem|HasSharedSlotsHostMemoryAllocator)[[:space:]]*=' "$features" > "$tmp" || true
           else
             : > "$tmp"
           fi
+          printf '\nGLDirectMem = on\nHasSharedSlotsHostMemoryAllocator = on\n' >> "$tmp"
           cat "$tmp" > "$features"
           rm -f "$tmp"
-          echo '--- user advancedFeatures.ini after restore ---'
+          echo '--- user advancedFeatures.ini ---'
           cat "$features" 2>/dev/null || true
-          if grep -Eiq '^[[:space:]]*(GLDMA|GLDirectMem|HasSharedSlotsHostMemoryAllocator)[[:space:]]*=' "$features"; then
-            echo STALE_DMA_OVERRIDE=1
-            exit 2
-          fi
-          echo STALE_DMA_OVERRIDE=0
+          direct_override="$(grep -Eic '^[[:space:]]*GLDirectMem[[:space:]]*=[[:space:]]*on[[:space:]]*$' "$features" || true)"
+          shared_override="$(grep -Eic '^[[:space:]]*HasSharedSlotsHostMemoryAllocator[[:space:]]*=[[:space:]]*on[[:space:]]*$' "$features" || true)"
+          gldma_override="$(grep -Eic '^[[:space:]]*GLDMA[[:space:]]*=' "$features" || true)"
+          echo "DIRECT_OVERRIDE_LINES=$direct_override SHARED_OVERRIDE_LINES=$shared_override GLDMA_OVERRIDE_LINES=$gldma_override"
+          [ "$direct_override" = '1' ] && [ "$shared_override" = '1' ] && [ "$gldma_override" = '0' ] || exit 2
 
           "$adb" kill-server >/dev/null 2>&1 || true
           ps1="${temp}/dma-required-start.ps1"
@@ -99,15 +99,15 @@ jobs:
             sleep 5
           done
           echo "BOOT_AFTER_WAIT=$boot"
-          [ "$boot" = '1' ] || exit 11
+          [ "$boot" = '1' ] || { tail -n 250 "$hostout" 2>/dev/null || true; tail -n 250 "$hosterr" 2>/dev/null || true; exit 11; }
 
           echo '=== EFFECTIVE HOST FEATURES ==='
           grep -E -i "Android emulator version|Feature '(GLDMA|GLDirectMem|GLESDynamicVersion|HasSharedSlotsHostMemoryAllocator)'|gfxstreamFeature:(GlDma|GlDma2|GlDirectMem|GlesDynamicVersion|HasSharedSlotsHostMemoryAllocator|HostComposition)" "$hostout" "$hosterr" 2>/dev/null | tail -n 180 || true
           direct="$(cat "$hostout" "$hosterr" 2>/dev/null | sed -nE 's/.*gfxstreamFeature:GlDirectMem[[:space:]]*=[[:space:]]*([01]).*/\1/p' | tail -n1)"
           shared="$(cat "$hostout" "$hosterr" 2>/dev/null | sed -nE 's/.*gfxstreamFeature:HasSharedSlotsHostMemoryAllocator[[:space:]]*=[[:space:]]*([01]).*/\1/p' | tail -n1)"
-          echo "EFFECTIVE_GL_DIRECT_MEM=${direct:-unknown}"
-          echo "EFFECTIVE_SHARED_SLOTS=${shared:-unknown}"
-          if [ "$direct" != '1' ] || [ "$shared" != '1' ]; then
+          gldma="$(cat "$hostout" "$hosterr" 2>/dev/null | sed -nE 's/.*gfxstreamFeature:GlDma[[:space:]]*=[[:space:]]*([01]).*/\1/p' | tail -n1)"
+          echo "EFFECTIVE_GL_DIRECT_MEM=${direct:-unknown} EFFECTIVE_SHARED_SLOTS=${shared:-unknown} EFFECTIVE_GLDMA=${gldma:-unknown}"
+          if [ "$direct" != '1' ] || [ "$shared" != '1' ] || [ "$gldma" != '1' ]; then
             echo READ_COLOR_BUFFER_DMA_PREREQUISITES=FAIL
             exit 13
           fi
@@ -121,7 +121,7 @@ jobs:
 
           echo '=== SETTINGS CONTROL 60S ==='
           "$adb" -s "$serial" shell am start -W -a android.settings.SETTINGS 2>&1 | tr -d '\r' || true
-          stable=1
+          settings_stable=1
           for i in $(seq 1 12); do
             sleep 5
             ss="$($adb -s "$serial" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
@@ -129,13 +129,13 @@ jobs:
             act="$($adb -s "$serial" shell service check activity 2>/dev/null | tr -d '\r' | tail -n1 || true)"
             psvc="$($adb -s "$serial" shell service check package 2>/dev/null | tr -d '\r' | tail -n1 || true)"
             echo "SETTINGS_SAMPLE_${i}=SS:${ss} SF:${sf} ACT:${act} PKG:${psvc}"
-            if [ "$ss" != "$ss0" ] || [ "$sf" != "$sf0" ] || ! printf '%s' "$act" | grep -q 'found' || ! printf '%s' "$psvc" | grep -q 'found'; then stable=0; fi
+            if [ "$ss" != "$ss0" ] || [ "$sf" != "$sf0" ] || ! printf '%s' "$act" | grep -q 'found' || ! printf '%s' "$psvc" | grep -q 'found'; then settings_stable=0; fi
           done
           slog="$($adb -s "$serial" logcat -b all -d -v threadtime 2>/dev/null | tr -d '\r' || true)"
-          asserts="$(printf '%s\n' "$slog" | grep -c 'hasReadColorBufferDma' || true)"
+          settings_asserts="$(printf '%s\n' "$slog" | grep -c 'hasReadColorBufferDma' || true)"
           printf '%s\n' "$slog" | grep -E -i 'mapper\.ranchu|GoldfishMapper|RegionSampling|hasReadColorBufferDma|SurfaceFlinger.*(fatal|abort|crash)' | tail -n 450 || true
-          echo "SETTINGS_ASSERT_COUNT=$asserts SETTINGS_STABLE=$stable"
-          if [ "$stable" != '1' ] || [ "$asserts" != '0' ]; then
+          echo "SETTINGS_ASSERT_COUNT=$settings_asserts SETTINGS_STABLE=$settings_stable"
+          if [ "$settings_stable" != '1' ] || [ "$settings_asserts" != '0' ]; then
             echo SETTINGS_STABILITY_GATE=FAIL
             exit 20
           fi
@@ -165,8 +165,10 @@ jobs:
             ss="$($adb -s "$serial" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
             sf="$($adb -s "$serial" shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true)"
             app_pid="$($adb -s "$serial" shell pidof "$pkg" 2>/dev/null | tr -d '\r' || true)"
-            echo "APP_SAMPLE_${i}=SS:${ss} SF:${sf} APP:${app_pid}"
-            if [ "$ss" != "$ss0" ] || [ "$sf" != "$sf0" ] || [ -z "$app_pid" ]; then app_stable=0; fi
+            act="$($adb -s "$serial" shell service check activity 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+            psvc="$($adb -s "$serial" shell service check package 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+            echo "APP_SAMPLE_${i}=SS:${ss} SF:${sf} APP:${app_pid} ACT:${act} PKG:${psvc}"
+            if [ "$ss" != "$ss0" ] || [ "$sf" != "$sf0" ] || [ -z "$app_pid" ] || ! printf '%s' "$act" | grep -q 'found' || ! printf '%s' "$psvc" | grep -q 'found'; then app_stable=0; fi
           done
           alog="$($adb -s "$serial" logcat -b all -d -v threadtime 2>/dev/null | tr -d '\r' || true)"
           app_asserts="$(printf '%s\n' "$alog" | grep -c 'hasReadColorBufferDma' || true)"
