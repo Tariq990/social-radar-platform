@@ -14,7 +14,7 @@ jobs:
     runs-on: [self-hosted, Linux]
     timeout-minutes: 10
     steps:
-      - name: Restart emulator with supported software renderer
+      - name: Restart emulator and require stable core services
         shell: bash
         run: |
           set -euo pipefail
@@ -72,32 +72,75 @@ jobs:
           done
           test -n "$serial" || { echo EMULATOR_DEVICE_FOUND=0; exit 10; }
 
+          echo "=== WAIT FOR STABLE CORE SERVICES ==="
+          stable_count=0
+          base_ss=''
+          base_sf=''
           boot=''
           activity=''
-          for i in $(seq 1 70); do
+          package=''
+          for i in $(seq 1 100); do
             boot="$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1 || true)"
             activity="$($adb -s "$serial" shell service check activity 2>/dev/null | tr -d '\r' | tail -n1 || true)"
-            if [ "$boot" = "1" ] && echo "$activity" | grep -q 'found'; then break; fi
+            package="$($adb -s "$serial" shell service check package 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+            ss="$($adb -s "$serial" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
+            sf="$($adb -s "$serial" shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true)"
+
+            if [ "$boot" = "1" ] && echo "$activity" | grep -q 'found' && echo "$package" | grep -q 'found' && [ -n "$ss" ] && [ -n "$sf" ]; then
+              if [ "$ss" = "$base_ss" ] && [ "$sf" = "$base_sf" ]; then
+                stable_count=$((stable_count+1))
+              else
+                base_ss="$ss"
+                base_sf="$sf"
+                stable_count=1
+              fi
+            else
+              stable_count=0
+              base_ss="$ss"
+              base_sf="$sf"
+            fi
+
+            if (( i % 5 == 0 )); then
+              echo "CORE_WAIT_$((i*3))S BOOT=${boot:-none} ACTIVITY='${activity:-none}' PACKAGE='${package:-none}' SS=${ss:-none} SF=${sf:-none} STABLE_COUNT=$stable_count"
+            fi
+            if [ "$stable_count" -ge 7 ]; then break; fi
             sleep 3
           done
+
           echo "BOOT_COMPLETED=$boot"
           echo "ACTIVITY_SERVICE=$activity"
-          test "$boot" = "1"
-          echo "$activity" | grep -q 'found'
-          sleep 12
+          echo "PACKAGE_SERVICE=$package"
+          echo "SYSTEM_SERVER_PID=$base_ss"
+          echo "SURFACEFLINGER_PID=$base_sf"
+          echo "CORE_STABLE_COUNT=$stable_count"
+
+          if [ "$stable_count" -lt 7 ]; then
+            echo CORE_SERVICES_STABLE=0
+            echo "=== CRASH BUFFER ==="
+            "$adb" -s "$serial" logcat -b crash -d -v threadtime 2>/dev/null | tr -d '\r' | tail -n 260 || true
+            echo "=== SYSTEM / GRAPHICS LOGS ==="
+            "$adb" -s "$serial" logcat -d -v threadtime 2>/dev/null | tr -d '\r' | grep -E -i 'surfaceflinger|system_server|PackageManager|ActivityManager|Watchdog|hasReadColorBufferDma|Fatal signal|SIGABRT|Abort message|FATAL' | tail -n 420 || true
+            exit 20
+          fi
 
           echo "ADB=$adb" >> "$GITHUB_ENV"
           echo "SERIAL=$serial" >> "$GITHUB_ENV"
           echo "WINUSER=$win_user" >> "$GITHUB_ENV"
-          echo SOFTWARE_RENDERER_BOOT_READY=1
+          echo "BASE_SS=$base_ss" >> "$GITHUB_ENV"
+          echo "BASE_SF=$base_sf" >> "$GITHUB_ENV"
+          echo CORE_SERVICES_STABLE=1
 
-      - name: Launch MR SCRAP and diagnose renderer stability
+      - name: Install if needed and launch MR SCRAP
         shell: bash
         run: |
           set -u
           pkg="com.mrscrap.socialradar"
           apk="$RUNNER_WORKSPACE/SCRAP-APP/android/app/build/outputs/apk/debug/app-debug.apk"
           win_tmp="/mnt/c/Users/${WINUSER}/AppData/Local/Temp/MRSCRAP/app-debug.apk"
+
+          pkg_service="$($ADB -s "$SERIAL" shell service check package 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+          echo "PACKAGE_SERVICE_PRE_INSTALL=$pkg_service"
+          echo "$pkg_service" | grep -q 'found' || exit 21
 
           if ! "$ADB" -s "$SERIAL" shell pm path "$pkg" >/dev/null 2>&1; then
             echo PACKAGE_INSTALL_REQUIRED=1
@@ -112,11 +155,6 @@ jobs:
 
           "$ADB" -s "$SERIAL" logcat -b crash -c >/dev/null 2>&1 || true
           "$ADB" -s "$SERIAL" logcat -c >/dev/null 2>&1 || true
-
-          sf0="$($ADB -s "$SERIAL" shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true)"
-          ss0="$($ADB -s "$SERIAL" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
-          echo "SURFACEFLINGER_PID_BEFORE=$sf0"
-          echo "SYSTEM_SERVER_PID_BEFORE=$ss0"
 
           echo "=== CONTROL SETTINGS ==="
           "$ADB" -s "$SERIAL" shell am start --user 0 -a android.settings.SETTINGS 2>&1 | tr -d '\r' || true
@@ -142,7 +180,7 @@ jobs:
             app="$($ADB -s "$SERIAL" shell pidof "$pkg" 2>/dev/null | tr -d '\r' || true)"
             [ -n "$app" ] && ever_app=1
             echo "STABILITY_$((i*5))S SF=${sf:-none} SS=${ss:-none} APP=${app:-none}"
-            if [ -z "$sf" ] || [ -z "$ss" ] || { [ -n "$sf0" ] && [ "$sf" != "$sf0" ]; } || { [ -n "$ss0" ] && [ "$ss" != "$ss0" ]; }; then
+            if [ -z "$sf" ] || [ -z "$ss" ] || [ "$sf" != "$BASE_SF" ] || [ "$ss" != "$BASE_SS" ]; then
               stable=0
               break
             fi
@@ -151,24 +189,22 @@ jobs:
           crash="$($ADB -s "$SERIAL" logcat -b crash -d -v threadtime 2>/dev/null | tr -d '\r' || true)"
           assertion_count="$(printf '%s\n' "$crash" | grep -c 'hasReadColorBufferDma' || true)"
           sf_crash_count="$(printf '%s\n' "$crash" | grep -c 'surfaceflinger' || true)"
-          echo "READ_COLOR_BUFFER_DMA_ASSERTIONS=$assertion_count"
-          echo "SURFACEFLINGER_CRASH_LINES=$sf_crash_count"
-
           sf_end="$($ADB -s "$SERIAL" shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true)"
           ss_end="$($ADB -s "$SERIAL" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
           app_end="$($ADB -s "$SERIAL" shell pidof "$pkg" 2>/dev/null | tr -d '\r' || true)"
+          echo "READ_COLOR_BUFFER_DMA_ASSERTIONS=$assertion_count"
+          echo "SURFACEFLINGER_CRASH_LINES=$sf_crash_count"
           echo "SURFACEFLINGER_PID_AFTER=$sf_end"
           echo "SYSTEM_SERVER_PID_AFTER=$ss_end"
           echo "APP_PID_AFTER=$app_end"
           echo "APP_WAS_SEEN=$ever_app"
 
           if [ "$assertion_count" -gt 0 ] || [ "$sf_crash_count" -gt 0 ]; then stable=0; fi
-
           if [ "$stable" -ne 1 ] || [ "$ever_app" -ne 1 ] || [ -z "$app_end" ]; then
             echo "=== CRASH BUFFER ==="
             printf '%s\n' "$crash" | tail -n 260 || true
-            echo "=== APP / SURFACE LOGS ==="
-            "$ADB" -s "$SERIAL" logcat -d -v threadtime 2>/dev/null | tr -d '\r' | grep -E -i 'surfaceflinger|RegionSampling|hasReadColorBufferDma|mrscrap|MainActivity|AndroidRuntime|FATAL EXCEPTION|Fatal signal|SIGABRT|cr_WebView|chromium' | tail -n 360 || true
+            echo "=== APP / SYSTEM LOGS ==="
+            "$ADB" -s "$SERIAL" logcat -d -v threadtime 2>/dev/null | tr -d '\r' | grep -E -i 'surfaceflinger|system_server|RegionSampling|hasReadColorBufferDma|mrscrap|MainActivity|AndroidRuntime|FATAL EXCEPTION|Fatal signal|SIGABRT|cr_WebView|chromium' | tail -n 420 || true
             echo SOFTWARE_RENDERER_ACCEPTANCE=FAIL
             exit 40
           fi
