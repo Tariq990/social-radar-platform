@@ -1,0 +1,126 @@
+name: Android Headless Emulator Preflight
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-headless-emulator-preflight.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 5
+    steps:
+      - name: Check WSL to Windows emulator prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          if [ -z "$win_user" ]; then
+            echo "WINDOWS_INTEROP=0"
+            exit 1
+          fi
+          echo "WINDOWS_INTEROP=1"
+
+          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-emulator-preflight.ps1"
+          cat > "$ps1" <<'POWERSHELL'
+          $ErrorActionPreference = 'Stop'
+
+          function Bool01($v) {
+            if ($v -eq $true) { return '1' }
+            return '0'
+          }
+
+          $os = Get-CimInstance Win32_OperatingSystem
+          $cs = Get-CimInstance Win32_ComputerSystem
+          $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+          $c = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+
+          $ramGb = [math]::Round($cs.TotalPhysicalMemory / 1GB, 1)
+          $freeGb = [math]::Round($c.FreeSpace / 1GB, 1)
+          $virt = Bool01 $cpu.VirtualizationFirmwareEnabled
+          $hypervisor = Bool01 $cs.HypervisorPresent
+
+          Write-Output "WINDOWS_VERSION=$($os.Version)"
+          Write-Output "WINDOWS_ARCH=$($os.OSArchitecture)"
+          Write-Output "CPU_LOGICAL=$($cpu.NumberOfLogicalProcessors)"
+          Write-Output "RAM_GB=$ramGb"
+          Write-Output "C_FREE_GB=$freeGb"
+          Write-Output "VIRTUALIZATION_FIRMWARE=$virt"
+          Write-Output "HYPERVISOR_PRESENT=$hypervisor"
+
+          foreach ($featureName in @('HypervisorPlatform','VirtualMachinePlatform','Microsoft-Hyper-V-All')) {
+            try {
+              $feature = Get-WindowsOptionalFeature -Online -FeatureName $featureName -ErrorAction Stop
+              Write-Output "$($featureName.ToUpper())=$($feature.State)"
+            } catch {
+              Write-Output "$($featureName.ToUpper())=UNKNOWN"
+            }
+          }
+
+          $localApp = [Environment]::GetFolderPath('LocalApplicationData')
+          $userProfile = [Environment]::GetFolderPath('UserProfile')
+          $sdkCandidates = @(
+            (Join-Path $localApp 'Android\Sdk'),
+            (Join-Path $userProfile 'AppData\Local\Android\Sdk')
+          ) | Select-Object -Unique
+
+          $emulator = $null
+          foreach ($sdk in $sdkCandidates) {
+            $candidate = Join-Path $sdk 'emulator\emulator.exe'
+            if (Test-Path $candidate) {
+              $emulator = $candidate
+              Write-Output 'ANDROID_SDK_PRESENT=1'
+              Write-Output 'EMULATOR_BINARY_PRESENT=1'
+              break
+            }
+          }
+
+          if (-not $emulator) {
+            Write-Output 'ANDROID_SDK_PRESENT=0'
+            Write-Output 'EMULATOR_BINARY_PRESENT=0'
+          } else {
+            try {
+              & $emulator -accel-check 2>&1 | ForEach-Object {
+                $line = $_.ToString()
+                if ($line -match 'WHPX|hypervisor|accel|installed|usable') {
+                  Write-Output ("ACCEL_CHECK=" + ($line -replace '[\r\n]+',' '))
+                }
+              }
+            } catch {
+              Write-Output 'ACCEL_CHECK=FAILED'
+            }
+          }
+
+          $androidCmd = Get-Command android.exe -ErrorAction SilentlyContinue
+          if ($androidCmd) {
+            Write-Output 'ANDROID_CLI_PRESENT=1'
+          } else {
+            Write-Output 'ANDROID_CLI_PRESENT=0'
+          }
+
+          $diskOk = $freeGb -ge 8
+          $ramOk = $ramGb -ge 8
+          $virtOk = ($virt -eq '1') -or ($hypervisor -eq '1')
+
+          Write-Output ("DISK_OK=" + (Bool01 $diskOk))
+          Write-Output ("RAM_OK=" + (Bool01 $ramOk))
+          Write-Output ("VIRT_OK=" + (Bool01 $virtOk))
+
+          if ($diskOk -and $virtOk) {
+            Write-Output 'HEADLESS_PROVISION_PREFLIGHT=PASS'
+            exit 0
+          }
+
+          Write-Output 'HEADLESS_PROVISION_PREFLIGHT=BLOCKED'
+          exit 2
+          POWERSHELL
+
+          ps1_win="$(wslpath -w "$ps1")"
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe \
+            -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+            -File "$ps1_win" | tr -d '\r'
