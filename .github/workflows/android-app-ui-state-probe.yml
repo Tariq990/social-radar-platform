@@ -1,0 +1,124 @@
+name: Android App UI State Probe
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-app-ui-state-probe.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 6
+    env:
+      PKG: com.mrscrap.socialradar
+    steps:
+      - name: Resolve installed app and preserve Facebook session
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1; exit}')"
+          test -s "$adb"; test -n "$serial"
+          version="$($adb -s "$serial" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"
+          echo "INSTALLED_VERSION_CODE=$version"
+          test "$version" = '144'
+          marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          printf '%s' "$marker" | grep -q facebook_connected_at
+          echo FACEBOOK_SESSION_METADATA=1
+          pid="$($adb -s "$serial" shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"
+          if [ -z "$pid" ]; then
+            $adb -s "$serial" shell am start -W -n "$PKG/.MainActivity" >/dev/null
+            sleep 4
+            pid="$($adb -s "$serial" shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"
+          fi
+          test -n "$pid"
+          socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | grep -E "${pid}$|_${pid}($|_)" | head -n1 || true)"
+          [ -n "$socket" ] || socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | head -n1 || true)"
+          test -n "$socket"
+          $adb -s "$serial" forward --remove tcp:9223 >/dev/null 2>&1 || true
+          $adb -s "$serial" forward tcp:9223 "localabstract:$socket" >/dev/null
+          echo "ADB=$adb" >> "$GITHUB_ENV"
+          echo "SERIAL=$serial" >> "$GITHUB_ENV"
+          echo "WIN_USER=$win_user" >> "$GITHUB_ENV"
+          echo APP_UI_PROBE_PREREQS=PASS
+
+      - name: Inspect Capacitor screen without reading stored values
+        shell: bash
+        run: |
+          set -euo pipefail
+          ps1="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-app-ui-state.ps1"
+          cat > "$ps1" <<'PS'
+          $ErrorActionPreference='Stop'
+          $targets=@(Invoke-RestMethod -Uri 'http://127.0.0.1:9223/json/list' -TimeoutSec 4)
+          $app=@($targets|Where-Object{$_.type -eq 'page' -and [string]$_.url -like 'https://localhost*'}|Select-Object -First 1)
+          if($app.Count -eq 0){throw 'app target missing'}
+          $u=[Uri][string]$app[0].webSocketDebuggerUrl
+          $wsUrl='ws://127.0.0.1:9223'+$u.PathAndQuery
+          $ws=[System.Net.WebSockets.ClientWebSocket]::new()
+          $cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds(12))
+          $ws.ConnectAsync([Uri]$wsUrl,$cts.Token).GetAwaiter().GetResult()|Out-Null
+          $expr=@'
+          (()=>{
+            const norm=s=>String(s||'').replace(/\s+/g,' ').trim();
+            const labels=[...document.querySelectorAll('button')].map(b=>norm(b.innerText||b.textContent)).filter(Boolean).slice(0,40);
+            const grab=labels.some(t=>t.includes('\u0627\u062c\u0644\u0628 \u0622\u062e\u0631 10 \u0648\u062d\u0644\u0644\u0647\u0627')||/Grab latest 10 and analyze/i.test(t));
+            const storageKeys=[];
+            try{for(let i=0;i<localStorage.length;i++)storageKeys.push('L:'+String(localStorage.key(i)||''))}catch(_){}
+            try{for(let i=0;i<sessionStorage.length;i++)storageKeys.push('S:'+String(sessionStorage.key(i)||''))}catch(_){}
+            return {
+              ready:String(document.readyState||''),
+              path:String(location.pathname||''),
+              hash:String(location.hash||''),
+              buttonCount:labels.length,
+              hasGrab:grab,
+              buttonLabels:labels,
+              storageKeys:storageKeys.slice(0,80),
+              bodyClass:String(document.body?.className||'').slice(0,160)
+            };
+          })()
+          '@
+          $payload=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true}}|ConvertTo-Json -Compress -Depth 8
+          $bytes=[Text.Encoding]::UTF8.GetBytes($payload)
+          $ws.SendAsync([ArraySegment[byte]]::new($bytes),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null
+          $buf=New-Object byte[] 131072
+          $sb=[Text.StringBuilder]::new()
+          while($true){
+            $r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult()
+            [void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count))
+            if(!$r.EndOfMessage){continue}
+            $m=$sb.ToString()|ConvertFrom-Json
+            if($m.id -ne 1){$sb.Clear()|Out-Null;continue}
+            $v=$m.result.result.value
+            Write-Output ('APP_READY_STATE='+[string]$v.ready)
+            Write-Output ('APP_PATH='+[string]$v.path)
+            Write-Output ('APP_HASH='+[string]$v.hash)
+            Write-Output ('APP_BUTTON_COUNT='+[string]$v.buttonCount)
+            Write-Output ('APP_HAS_GRAB_BUTTON='+$(if($v.hasGrab){'1'}else{'0'}))
+            Write-Output ('APP_BUTTON_LABELS='+(($v.buttonLabels|ForEach-Object{[string]$_}) -join ' || '))
+            Write-Output ('APP_STORAGE_KEYS='+(($v.storageKeys|ForEach-Object{[string]$_}) -join ' || '))
+            break
+          }
+          try{$ws.Abort()}catch{}
+          PS
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
+          echo APP_UI_STATE_PROBE=PASS
+
+      - name: Cleanup forwarding only
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          $ADB -s "$SERIAL" forward --remove tcp:9223 >/dev/null 2>&1 || true
+          rm -f "/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-app-ui-state.ps1" 2>/dev/null || true
+          marker="$($ADB -s "$SERIAL" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          if printf '%s' "$marker" | grep -q facebook_connected_at; then echo FACEBOOK_SESSION_METADATA_FINAL=1; else echo FACEBOOK_SESSION_METADATA_FINAL=0; fi
+          echo APP_UI_STATE_PROBE_COMPLETE=1
