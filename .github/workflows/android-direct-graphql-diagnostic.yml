@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Connect physical APK 140 WebView debugger
+      - name: Connect physical APK 141 WebView debugger
         shell: bash
         run: |
           set -euo pipefail
@@ -56,7 +56,7 @@ jobs:
           /mnt/c/Windows/System32/curl.exe -fsS http://127.0.0.1:19222/json -o NUL
           echo PHONE_AND_CDP_FORWARD_READY
 
-      - name: Inspect one native Facebook GraphQL request and response
+      - name: Inspect one untouched native Facebook GraphQL request and response
         shell: bash
         run: |
           set -euo pipefail
@@ -65,7 +65,6 @@ jobs:
           $ErrorActionPreference='Stop'
           $Base='http://127.0.0.1:19222'
           $Source='https://www.facebook.com/tarik.ziad.3914'
-          $DesktopUa='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36'
           $ExpectedDoc='27465012859856795'
           $ExpectedFriendly='ProfileCometTimelineFeedRefetchQuery'
           $script:NextId=0
@@ -119,7 +118,7 @@ jobs:
             foreach($t in (Targets)){
               if($t.type -eq 'page' -and -not $baseline.ContainsKey([string]$t.id)){$collector=$t;break}
             }
-            if(-not $collector){Start-Sleep -Milliseconds 75}
+            if(-not $collector){Start-Sleep -Milliseconds 40}
           }
           if(-not $collector){throw 'COLLECTOR_WEBVIEW_NOT_FOUND'}
           Write-Output COLLECTOR_WEBVIEW_FOUND=1
@@ -127,12 +126,9 @@ jobs:
           $q=[Collections.ArrayList]::new(); $w=Open-Ws ([string]$collector.webSocketDebuggerUrl)
           [void](Cmd $w 'Runtime.enable' @{} $q)
           [void](Cmd $w 'Network.enable' @{} $q)
-          [void](Cmd $w 'Page.enable' @{} $q)
-          [void](Cmd $w 'Network.setUserAgentOverride' @{userAgent=$DesktopUa} $q)
-          [void](Cmd $w 'Page.navigate' @{url=$Source} $q)
-          Write-Output DESKTOP_UA_AND_RENAVIGATION_APPLIED=1
+          Write-Output COLLECTOR_OBSERVED_WITHOUT_NAVIGATION=1
 
-          $req=$null; $http=$null; $contract=$null; $summary=$null; $docStatuses=@(); $sourceId=''
+          $req=$null; $http=$null; $contract=$null; $summary=$null; $sourceId=''
           while(-not $summary){
             if($q.Count -gt 0){$x=$q[0];$q.RemoveAt(0)} else {$x=(Recv $w|ConvertFrom-Json -Depth 80)}
             $p=$x.params
@@ -144,26 +140,31 @@ jobs:
                 $form=[Web.HttpUtility]::ParseQueryString($post)
                 $vars=$null; try{$vars=([string]$form['variables']|ConvertFrom-Json -Depth 80)}catch{}
                 $keys=@(); if($vars){$keys=@($vars.PSObject.Properties.Name);$sourceId=[string]$vars.id}
+                $h=$p.request.headers
                 $contract=[ordered]@{
                   doc_id_match=([string]$form['doc_id'] -eq $ExpectedDoc)
-                  friendly_name_match=([string]$form['fb_api_req_friendly_name'] -eq $ExpectedFriendly)
+                  friendly_name_body_present=([string]$form['fb_api_req_friendly_name'] -eq $ExpectedFriendly)
                   variable_key_count=$keys.Count
                   source_id_numeric=($sourceId -match '^\d+$')
                   source_id_length=$sourceId.Length
+                  header_accept_present=($null -ne $h.Accept)
+                  header_content_type_present=($null -ne $h.'Content-Type')
+                  header_origin_present=($null -ne $h.Origin)
+                  header_referer_present=($null -ne $h.Referer)
+                  header_sec_fetch_site_present=($null -ne $h.'Sec-Fetch-Site')
+                  header_x_fb_friendly_present=($null -ne $h.'X-FB-Friendly-Name')
                 }
                 Write-Output GRAPHQL_REQUEST_SEEN=1
               }
             } elseif($x.method -eq 'Network.responseReceived'){
-              $resp=$p.response; $u=$null; try{$u=[Uri][string]$resp.url}catch{}
-              if($u -and $u.Host.EndsWith('facebook.com') -and [string]$p.type -eq 'Document'){$docStatuses += [int]$resp.status}
-              if($req -and [string]$p.requestId -eq $req){$http=[int]$resp.status}
+              if($req -and [string]$p.requestId -eq $req){$http=[int]$p.response.status}
             } elseif($x.method -eq 'Network.loadingFinished' -and $req -and [string]$p.requestId -eq $req){
               $r=Cmd $w 'Network.getResponseBody' @{requestId=$req} $q
               $body=[string]$r.result.body
               if($r.result.base64Encoded){$body=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($body))}
-              $jsonLines=0;$errors=0;$codes=@{};$edges=0;$edgeNodes=0;$posts=0;$direct=0;$pageInfo=0;$dataBlocks=0;$nodeBlocks=0;$nodeIdMatch=$false;$dataKeys=@{};$nodeTypes=@{}
+              $jsonLines=0;$parseFailures=0;$errors=0;$codes=@{};$edges=0;$edgeNodes=0;$posts=0;$direct=0;$pageInfo=0;$dataBlocks=0;$nodeBlocks=0;$nodeIdMatch=$false;$dataKeys=@{};$nodeTypes=@{};$timelineBlocks=0
               foreach($line in ($body -split "`r?`n")){
-                if(-not $line.Trim()){continue}; $o=$null; try{$o=$line|ConvertFrom-Json -Depth 100}catch{continue}; $jsonLines++
+                if(-not $line.Trim()){continue}; $o=$null; try{$o=$line|ConvertFrom-Json -Depth 100}catch{$parseFailures++;continue}; $jsonLines++
                 if($o.errors){foreach($e in @($o.errors)){$errors++;if($null -ne $e.code){$codes[[string]$e.code]=$true}}}
                 $d=$o.data; if(-not $d){continue}; $dataBlocks++; foreach($k in $d.PSObject.Properties.Name){$dataKeys[$k]=$true}
                 if($d.page_info){$pageInfo++}; $n=$d.node; if(-not $n){continue}; $nodeBlocks++
@@ -171,11 +172,13 @@ jobs:
                 if($n.__typename){$nodeTypes[[string]$n.__typename]=$true}
                 if($n.post_id){$direct++;$posts++}
                 $f=$n.timeline_list_feed_units
-                if($f){if($f.page_info){$pageInfo++};if($f.edges){$ee=@($f.edges);$edges+=$ee.Count;foreach($e in $ee){if($e.node){$edgeNodes++};if($e.node.post_id){$posts++}}}}
+                if($f){$timelineBlocks++;if($f.page_info){$pageInfo++};if($f.edges){$ee=@($f.edges);$edges+=$ee.Count;foreach($e in $ee){if($e.node){$edgeNodes++};if($e.node.post_id){$posts++}}}}
               }
               $summary=[ordered]@{
                 response_bytes=[Text.Encoding]::UTF8.GetByteCount($body)
+                nonempty_lines=(($body -split "`r?`n" | Where-Object {$_.Trim()}).Count)
                 json_lines=$jsonLines
+                parse_failures=$parseFailures
                 graphql_error_count=$errors
                 graphql_error_codes=@($codes.Keys|Sort-Object)
                 data_blocks=$dataBlocks
@@ -183,6 +186,7 @@ jobs:
                 node_blocks=$nodeBlocks
                 node_id_matches_requested=$nodeIdMatch
                 node_typenames=@($nodeTypes.Keys|Sort-Object)
+                timeline_blocks=$timelineBlocks
                 timeline_edges=$edges
                 timeline_edge_nodes=$edgeNodes
                 post_nodes_with_post_id=$posts
@@ -192,7 +196,6 @@ jobs:
             }
           }
           Write-Output ('GRAPHQL_CONTRACT=' + ($contract|ConvertTo-Json -Compress))
-          Write-Output ('FACEBOOK_DOCUMENT_STATUSES=' + (@($docStatuses)|ConvertTo-Json -Compress))
           Write-Output ('GRAPHQL_HTTP_STATUS=' + $(if($null -eq $http){'NONE'}else{$http}))
           Write-Output ('GRAPHQL_RESPONSE_SUMMARY=' + ($summary|ConvertTo-Json -Compress))
           try{$w.Dispose()}catch{};try{$mw.Dispose()}catch{}
