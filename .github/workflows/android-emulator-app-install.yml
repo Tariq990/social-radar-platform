@@ -1,12 +1,6 @@
 name: Android Emulator App Install
 
 on:
-  push:
-    branches:
-      - test/android-headless-emulator-20260909
-    paths:
-      - .github/workflows/android-emulator-app-install.yml
-      - android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java
   workflow_dispatch:
 
 permissions:
