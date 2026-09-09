@@ -1,0 +1,78 @@
+name: Android Live Package Repair
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths:
+      - .github/workflows/android-live-package-repair.yml
+
+permissions:
+  contents: read
+
+jobs:
+  repair-live-package:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 6
+    steps:
+      - name: Repair installed package and launch app
+        shell: bash
+        run: |
+          set -u
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"
+          pkg="com.mrscrap.socialradar"
+          apk="$RUNNER_WORKSPACE/SCRAP-APP/android/app/build/outputs/apk/debug/app-debug.apk"
+          win_tmp="/mnt/c/Users/${win_user}/AppData/Local/Temp/MRSCRAP/app-debug.apk"
+
+          echo "=== DEVICE ==="
+          "$adb" devices -l | tr -d '\r'
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
+          test -n "$serial" || { echo EMULATOR_DEVICE_FOUND=0; exit 10; }
+          echo EMULATOR_DEVICE_FOUND=1
+
+          boot="$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
+          echo "BOOT_COMPLETED=$boot"
+          test "$boot" = "1" || exit 11
+
+          echo "=== APK ==="
+          test -s "$apk" || { echo "APK_REUSE_AVAILABLE=0 path=$apk"; exit 12; }
+          ls -lh "$apk"
+          mkdir -p "$(dirname "$win_tmp")"
+          cp -f "$apk" "$win_tmp"
+          win_apk="$(wslpath -w "$win_tmp")"
+          echo APK_REUSE_AVAILABLE=1
+
+          echo "=== BEFORE ==="
+          "$adb" -s "$serial" shell dumpsys package "$pkg" 2>/dev/null | tr -d '\r' | grep -E 'versionCode=|versionName=|User 0:|MainActivity' | head -n 40 || true
+
+          echo "=== CLEAN REINSTALL ==="
+          "$adb" -s "$serial" uninstall "$pkg" 2>&1 | tr -d '\r' || true
+          "$adb" -s "$serial" install "$win_apk" 2>&1 | tr -d '\r'
+          install_rc=${PIPESTATUS[0]}
+          test "$install_rc" -eq 0 || exit "$install_rc"
+
+          echo "=== AFTER INSTALL ==="
+          "$adb" -s "$serial" shell pm path "$pkg" 2>&1 | tr -d '\r'
+          "$adb" -s "$serial" shell dumpsys package "$pkg" 2>/dev/null | tr -d '\r' | grep -E 'versionCode=|versionName=|User 0:|MainActivity|android.intent.action.MAIN|android.intent.category.LAUNCHER' | head -n 80 || true
+
+          echo "=== RESOLVE ==="
+          "$adb" -s "$serial" shell cmd package resolve-activity --brief --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p "$pkg" 2>&1 | tr -d '\r' || true
+
+          echo "=== LAUNCH EXACT ==="
+          launch_out="$($adb -s "$serial" shell am start --user 0 -W -n "$pkg/.MainActivity" 2>&1 | tr -d '\r')"
+          launch_rc=$?
+          printf '%s\n' "$launch_out"
+
+          sleep 2
+          pid="$($adb -s "$serial" shell pidof "$pkg" 2>/dev/null | tr -d '\r' || true)"
+          echo "PID=$pid"
+
+          if [ "$launch_rc" -ne 0 ] || [ -z "$pid" ]; then
+            echo "=== FAILURE DIAGNOSTICS ==="
+            "$adb" -s "$serial" shell dumpsys package "$pkg" 2>/dev/null | tr -d '\r' | grep -A25 -B8 'MainActivity' | head -n 160 || true
+            "$adb" -s "$serial" logcat -d -t 300 2>/dev/null | tr -d '\r' | grep -E -i 'mrscrap|MainActivity|ActivityTaskManager|PackageManager|FATAL EXCEPTION|AndroidRuntime' | tail -n 160 || true
+            echo EMULATOR_APP_LAUNCHED=0
+            exit 20
+          fi
+
+          echo EMULATOR_APP_LAUNCHED=1
