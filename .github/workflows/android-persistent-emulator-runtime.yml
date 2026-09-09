@@ -18,7 +18,7 @@ permissions:
 jobs:
   runtime:
     runs-on: [self-hosted, Linux]
-    timeout-minutes: 15
+    timeout-minutes: 9
     steps:
       - name: Repair persistent AVD and start Android 36 on Windows
         shell: bash
@@ -31,7 +31,6 @@ jobs:
           android_wsl="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidCLI/android.exe"
           sdk_wsl="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk"
           sdk_win="C:\\Users\\${win_user}\\AppData\\Local\\MRSCRAP\\AndroidSdk"
-          image_rel='system-images\\android-36\\google_apis\\x86_64\\'
           image_win="${sdk_win}\\system-images\\android-36\\google_apis\\x86_64"
           emulator_wsl="${sdk_wsl}/emulator/emulator.exe"
           adb_wsl="${sdk_wsl}/platform-tools/adb.exe"
@@ -44,6 +43,8 @@ jobs:
           test -s "$adb_wsl"
           test -s "$image_wsl"
           echo RUNTIME_SDK_READY=1
+
+          "$emulator_wsl" -accel-check 2>&1 | tr -d '\r' | sed 's/^/ACCEL_CHECK=/' || true
 
           avds="$($emulator_wsl -list-avds 2>/dev/null | tr -d '\r' | sed '/^[[:space:]]*$/d' || true)"
           avd_name="$(printf '%s\n' "$avds" | head -n1)"
@@ -133,8 +134,10 @@ jobs:
           if ('${launch_headless}' -eq 'true') { \$args += '-no-window' }
           \$windowStyle = if ('${launch_headless}' -eq 'true') { 'Hidden' } else { 'Normal' }
           \$p = Start-Process -FilePath \$emulator -ArgumentList \$args -WindowStyle \$windowStyle -RedirectStandardOutput \$stdout -RedirectStandardError \$stderr -PassThru
+          Start-Sleep -Seconds 3
           Write-Output 'EMULATOR_PROCESS_STARTED=1'
           Write-Output ("EMULATOR_PROCESS_ALIVE=" + [int](-not \$p.HasExited))
+          if (\$p.HasExited) { Write-Output ("EMULATOR_PROCESS_EXIT_CODE=" + \$p.ExitCode) }
           POWERSHELL
 
             ps1_win="$(wslpath -w "$ps1")"
@@ -144,38 +147,47 @@ jobs:
 
             "$adb_wsl" start-server >/dev/null 2>&1 || true
             serial=''
-            for i in $(seq 1 60); do
+            for i in $(seq 1 24); do
               serial="$($adb_wsl devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
               [ -n "$serial" ] && break
+              if (( i % 6 == 0 )); then
+                count="$($adb_wsl devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ {c++} END {print c+0}')"
+                echo "ADB_WAIT_SECONDS=$((i * 5)) EMULATOR_ROWS=${count}"
+              fi
               sleep 5
             done
           fi
 
-          if [ -z "${serial:-}" ]; then
-            echo EMULATOR_ADB_READY=0
-            "$emulator_wsl" -accel-check 2>&1 | tr -d '\r' | sed 's/^/ACCEL_CHECK=/' || true
+          dump_logs() {
             echo EMULATOR_STDERR_TAIL_BEGIN
             if [ -f "$stderr_wsl" ]; then
-              tail -n 140 "$stderr_wsl" | tr -d '\r' | sed "s#${win_user}#[USER]#g" | sed -E 's/([0-9]{5,})/[number]/g'
+              tail -n 120 "$stderr_wsl" | tr -d '\r' | sed "s#${win_user}#[USER]#g" | sed -E 's/([0-9]{5,})/[number]/g'
             fi
             echo EMULATOR_STDERR_TAIL_END
             echo EMULATOR_STDOUT_TAIL_BEGIN
             if [ -f "$stdout_wsl" ]; then
-              tail -n 140 "$stdout_wsl" | tr -d '\r' | sed "s#${win_user}#[USER]#g" | sed -E 's/([0-9]{5,})/[number]/g'
+              tail -n 120 "$stdout_wsl" | tr -d '\r' | sed "s#${win_user}#[USER]#g" | sed -E 's/([0-9]{5,})/[number]/g'
             fi
             echo EMULATOR_STDOUT_TAIL_END
+          }
+
+          if [ -z "${serial:-}" ]; then
+            echo EMULATOR_ADB_READY=0
+            dump_logs
             exit 1
           fi
           echo EMULATOR_ADB_READY=1
 
           boot=''
-          for i in $(seq 1 72); do
+          for i in $(seq 1 36); do
             boot="$($adb_wsl -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1 || true)"
             [ "$boot" = '1' ] && break
+            if (( i % 6 == 0 )); then echo "BOOT_WAIT_SECONDS=$((i * 5))"; fi
             sleep 5
           done
           if [ "$boot" != '1' ]; then
             echo EMULATOR_BOOT_READY=0
+            dump_logs
             exit 1
           fi
 
