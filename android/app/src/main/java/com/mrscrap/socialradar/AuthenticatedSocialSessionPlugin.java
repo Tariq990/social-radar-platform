@@ -257,25 +257,28 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
 
         Log.i(FLOW_TAG, "event=collect_source_enter platform=" + platform +
             " foreground=" + (getActivity() != null));
+
+        AuthenticatedWebCollector.Callback terminal = terminalCollectCallback(call, platform, limit);
+        if (!"facebook".equals(platform)) {
+            AuthenticatedWebCollector.collect(foregroundContext(), url, limit, terminal);
+            return;
+        }
+
         FacebookGraphqlWebViewCollector.collect(foregroundContext(), url, limit, new AuthenticatedWebCollector.Callback() {
             @Override
             public void onSuccess(JSONObject result) {
-                try {
-                    int postCount = result.optJSONArray("posts") == null ? 0 : result.optJSONArray("posts").length();
-                    Log.i(FLOW_TAG, "event=collect_source_success platform=" + platform + " posts=" + postCount);
-                    SessionStateStore.markChecked(getContext());
-                    JSObject output = new JSObject();
-                    output.put("posts", result.getJSONArray("posts"));
-                    output.put("checkedAt", java.time.Instant.now().toString());
-                    output.put("requestedLimit", limit);
-                    call.resolve(output);
-                } catch (Exception error) {
-                    call.reject("Could not normalize collected posts");
-                }
+                terminal.onSuccess(result);
             }
-            @Override public void onError(String message) {
-                Log.w(FLOW_TAG, "event=collect_source_error platform=" + platform + " code=" + safeErrorCode(message));
-                call.reject(message);
+
+            @Override
+            public void onError(String message) {
+                String code = safeErrorCode(message);
+                if (!shouldFallbackFromFacebookGraphql(code)) {
+                    terminal.onError(message);
+                    return;
+                }
+                Log.w(FLOW_TAG, "event=collect_source_fallback platform=facebook from=graphql to=dom code=" + code);
+                AuthenticatedWebCollector.collect(foregroundContext(), url, limit, terminal);
             }
         });
     }
@@ -392,15 +395,47 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
         call.resolve(result);
     }
 
+    private AuthenticatedWebCollector.Callback terminalCollectCallback(PluginCall call, String platform, int limit) {
+        return new AuthenticatedWebCollector.Callback() {
+            @Override
+            public void onSuccess(JSONObject result) {
+                try {
+                    int postCount = result.optJSONArray("posts") == null ? 0 : result.optJSONArray("posts").length();
+                    Log.i(FLOW_TAG, "event=collect_source_success platform=" + platform + " posts=" + postCount);
+                    SessionStateStore.markChecked(getContext());
+                    JSObject output = new JSObject();
+                    output.put("posts", result.getJSONArray("posts"));
+                    output.put("checkedAt", java.time.Instant.now().toString());
+                    output.put("requestedLimit", limit);
+                    call.resolve(output);
+                } catch (Exception error) {
+                    Log.w(FLOW_TAG, "event=collect_source_error platform=" + platform + " code=NORMALIZE_ERROR");
+                    call.reject("Could not normalize collected posts");
+                }
+            }
+
+            @Override
+            public void onError(String message) {
+                Log.w(FLOW_TAG, "event=collect_source_error platform=" + platform + " code=" + safeErrorCode(message));
+                call.reject(message);
+            }
+        };
+    }
+
     private Context foregroundContext() {
         Activity activity = getActivity();
         return activity != null ? activity : getContext();
     }
 
+    private static boolean shouldFallbackFromFacebookGraphql(String code) {
+        return code != null && code.startsWith("GRAPHQL_");
+    }
+
     private static String safeErrorCode(String message) {
         if (message == null || message.isBlank()) return "unknown";
         String code = message.split("\\|", 2)[0];
-        return code.replaceAll("[^A-Za-z0-9_.:-]", "_").substring(0, Math.min(80, code.length()));
+        String safe = code.replaceAll("[^A-Za-z0-9_.:-]", "_");
+        return safe.substring(0, Math.min(80, safe.length()));
     }
 
     private static String uniqueWorkName(String sourceId) {
