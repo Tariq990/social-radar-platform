@@ -18,17 +18,50 @@ jobs:
     runs-on: [self-hosted, Linux]
     timeout-minutes: 5
     steps:
-      - name: Checkout test lane
+      - name: Checkout test lane without deleting local APK
         uses: actions/checkout@v4
         with:
           ref: test/android-headless-emulator-20260909
           fetch-depth: 0
+          clean: false
+
+      - name: Restore existing installed APK if workspace copy is missing
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          sdk="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk"
+          adb="${sdk}/platform-tools/adb.exe"
+          pkg="com.mrscrap.socialradar"
+          apk="/home/tarik/actions-runnerr/_work/SCRAP-APP/SCRAP-APP/android/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$adb"
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1; exit}')"
+          test -n "$serial"
+          if [ -s "$apk" ]; then
+            echo APK_WORKSPACE_PRESENT=1
+          else
+            echo APK_WORKSPACE_PRESENT=0
+            remote="$($adb -s "$serial" shell pm path "$pkg" 2>/dev/null | tr -d '\r' | sed -n 's/^package://p' | head -n1)"
+            test -n "$remote"
+            tmp="/mnt/c/Users/${win_user}/AppData/Local/Temp/MRSCRAP/recovered-installed-base.apk"
+            mkdir -p "$(dirname "$tmp")" "$(dirname "$apk")"
+            rm -f "$tmp"
+            $adb -s "$serial" pull "$remote" "$(wslpath -w "$tmp")" >/dev/null
+            test -s "$tmp"
+            cp "$tmp" "$apk"
+            rm -f "$tmp"
+            echo APK_RECOVERED_FROM_INSTALLED_PACKAGE=1
+          fi
+          size="$(stat -c '%s' "$apk")"
+          echo "APK_WORKSPACE_SIZE=$size"
+          test "$size" = '6363986'
+          echo APK_PRESERVATION_GATE=PASS
 
       - name: Apply exact newline escaping fix
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
+          python3 - <<'PY'
           from pathlib import Path
           p = Path('android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java')
           s = p.read_text()
