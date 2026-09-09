@@ -71,8 +71,8 @@ resolver = r'''              let sourceId = '';
                   handleHits++;
                   let windowText = html.slice(Math.max(0, at - 7000), Math.min(html.length, at + needle.length + 7000));
                   windowText = windowText.replace(/&quot;|&#34;/g, '"').replace(/&amp;/g, '&');
-                  const jsonRe = /["']([A-Za-z][A-Za-z0-9_]{1,48})["']\s*:\s*["']?(\d{5,32})/g;
-                  const queryRe = /([A-Za-z][A-Za-z0-9_]{1,48})=(\d{5,32})/g;
+                  const jsonRe = /["']([A-Za-z][A-Za-z0-9_]{1,48})["']\\s*:\\s*["']?(\\d{5,32})/g;
+                  const queryRe = /([A-Za-z][A-Za-z0-9_]{1,48})=(\\d{5,32})/g;
                   for (const re of [jsonRe, queryRe]) {
                     re.lastIndex = 0;
                     let match;
