@@ -1,0 +1,62 @@
+name: Android Headless Emulator Provision
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-headless-emulator-provision.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  provision:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 30
+    steps:
+      - name: Install minimal emulator packages on Windows
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          test -n "$win_user"
+
+          android="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidCLI/android.exe"
+          sdk_wsl="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk"
+          sdk_win="C:\\Users\\${win_user}\\AppData\\Local\\MRSCRAP\\AndroidSdk"
+          test -s "$android"
+          mkdir -p "$sdk_wsl"
+
+          before_kb="$(du -sk "$sdk_wsl" 2>/dev/null | awk '{print $1}')"
+          before_kb="${before_kb:-0}"
+          echo "SDK_BEFORE_MB=$((before_kb / 1024))"
+
+          "$android" --no-metrics --sdk="$sdk_win" sdk install \
+            emulator \
+            platform-tools \
+            system-images/android-36/google_apis/x86_64 2>&1 |
+            tr -d '\r' |
+            sed -E 's/([0-9]{5,})/[number]/g'
+
+          emulator="${sdk_wsl}/emulator/emulator.exe"
+          adb="${sdk_wsl}/platform-tools/adb.exe"
+          image_dir="${sdk_wsl}/system-images/android-36/google_apis/x86_64"
+
+          test -s "$emulator"
+          test -s "$adb"
+          test -d "$image_dir"
+          test -s "$image_dir/system.img"
+          echo EMULATOR_BINARY_PRESENT=1
+          echo PLATFORM_TOOLS_PRESENT=1
+          echo SYSTEM_IMAGE_PRESENT=1
+
+          after_kb="$(du -sk "$sdk_wsl" 2>/dev/null | awk '{print $1}')"
+          after_kb="${after_kb:-0}"
+          echo "SDK_AFTER_MB=$((after_kb / 1024))"
+          echo "SDK_DELTA_MB=$(((after_kb - before_kb) / 1024))"
+
+          "$emulator" -version 2>&1 | tr -d '\r' | head -n 4 | sed 's/^/EMULATOR_VERSION=/' || true
+          "$adb" version 2>&1 | tr -d '\r' | head -n 3 | sed 's/^/ADB_VERSION=/' || true
+          "$emulator" -accel-check 2>&1 | tr -d '\r' | sed 's/^/ACCEL_CHECK=/' || true
+
+          echo HEADLESS_SDK_PROVISION=PASS
