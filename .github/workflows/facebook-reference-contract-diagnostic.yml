@@ -14,7 +14,7 @@ jobs:
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
-      - name: Run exact safe reference contract
+      - name: Run full safe reference contract
         shell: bash
         run: |
           set -euo pipefail
@@ -23,25 +23,62 @@ jobs:
 
           url = 'https://www.facebook.com/api/graphql/'
           headers = {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36',
               'Accept': '*/*',
               'Accept-Language': 'en-US,en;q=0.9',
               'Origin': 'https://www.facebook.com',
               'Referer': 'https://www.facebook.com/',
               'Content-Type': 'application/x-www-form-urlencoded',
+              'Sec-Fetch-Site': 'same-origin',
           }
           variables = {
+              'afterTime': None,
+              'beforeTime': None,
               'count': 1,
               'cursor': None,
               'feedLocation': 'TIMELINE',
               'feedbackSource': 0,
               'focusCommentID': None,
-              'id': '100067932423860',
+              'memorializedSplitTimeFilter': None,
+              'omitPinnedPost': True,
+              'postedBy': {'group': 'OWNER'},
+              'privacy': None,
+              'privacySelectorRenderLocation': 'COMET_STREAM',
+              'referringStoryRenderLocation': None,
+              'renderLocation': 'timeline',
               'scale': 1,
               'stream_count': 1,
+              'taggedInOnly': None,
+              'trackingCode': None,
               'useDefaultActor': False,
-              'renderLocation': 'timeline',
+              'id': '100067932423860',
+              '__relay_internal__pv__GHLShouldChangeAdIdFieldNamerelayprovider': False,
+              '__relay_internal__pv__GHLShouldChangeSponsoredDataFieldNamerelayprovider': False,
+              '__relay_internal__pv__CometFeedStory_enable_reactor_facepilerelayprovider': False,
+              '__relay_internal__pv__CometFeedStory_enable_social_bubblesrelayprovider': False,
+              '__relay_internal__pv__CometFeedStory_enable_post_permalink_white_space_clickrelayprovider': False,
+              '__relay_internal__pv__CometUFICommentActionLinksRewriteEnabledrelayprovider': True,
+              '__relay_internal__pv__CometUFICommentAvatarStickerAnimatedImagerelayprovider': False,
               '__relay_internal__pv__IsWorkUserrelayprovider': False,
+              '__relay_internal__pv__TestPilotShouldIncludeDemoAdUseCaserelayprovider': False,
+              '__relay_internal__pv__FBReels_deprecate_short_form_video_context_gkrelayprovider': True,
+              '__relay_internal__pv__FBReels_enable_view_dubbed_audio_type_gkrelayprovider': True,
+              '__relay_internal__pv__CometFeedShareMedia_shouldPrefetchShareImagerelayprovider': False,
+              '__relay_internal__pv__CometImmersivePhotoCanUserDisable3DMotionrelayprovider': False,
+              '__relay_internal__pv__WorkCometIsEmployeeGKProviderrelayprovider': False,
+              '__relay_internal__pv__IsMergQAPollsrelayprovider': False,
+              '__relay_internal__pv__FBReelsMediaFooter_comet_enable_reels_ads_gkrelayprovider': True,
+              '__relay_internal__pv__CometUFIReactionsEnableShortNamerelayprovider': False,
+              '__relay_internal__pv__CometUFICommentAutoTranslationTyperelayprovider': 'AUTO_TRANSLATE',
+              '__relay_internal__pv__CometUFIShareActionMigrationrelayprovider': True,
+              '__relay_internal__pv__CometUFISingleLineUFIrelayprovider': True,
+              '__relay_internal__pv__relay_provider_comet_ufi_ssr_seo_deferrelayprovider': True,
+              '__relay_internal__pv__CometUFI_dedicated_comment_routable_dialog_gkrelayprovider': True,
+              '__relay_internal__pv__ReelsIFUCard_reelsIFULikeCountrelayprovider': False,
+              '__relay_internal__pv__FBReelsIFUTileContent_reelsIFUPlayOnHoverrelayprovider': True,
+              '__relay_internal__pv__GroupsCometGYSJFeedItemHeightrelayprovider': 206,
+              '__relay_internal__pv__ShouldEnableBakedInTextStoriesrelayprovider': False,
+              '__relay_internal__pv__StoriesShouldIncludeFbNotesrelayprovider': True,
           }
           body = urllib.parse.urlencode({
               'variables': json.dumps(variables, separators=(',', ':')),
@@ -60,27 +97,63 @@ jobs:
               raise SystemExit(3)
 
           print(f'REFERENCE_HTTP_STATUS={status}')
-          first = next((line for line in text.splitlines() if line.strip()), '')
-          try:
-              payload = json.loads(first)
-          except Exception:
-              print('REFERENCE_JSON=INVALID')
-              raise SystemExit(4)
-          errors = payload.get('errors') or [] if isinstance(payload, dict) else []
-          codes = sorted({str(e.get('code')) for e in errors if isinstance(e, dict) and e.get('code') is not None})
-          data = payload.get('data') if isinstance(payload, dict) else None
-          node = data.get('node') if isinstance(data, dict) else None
-          feed = node.get('timeline_list_feed_units') if isinstance(node, dict) else None
-          edges = feed.get('edges') if isinstance(feed, dict) else None
-          print(f'REFERENCE_ERRORS={len(errors) if isinstance(errors, list) else 0}')
-          print('REFERENCE_ERROR_CODES=' + ','.join(codes))
-          print(f'REFERENCE_DATA_PRESENT={1 if isinstance(data, dict) else 0}')
-          print(f'REFERENCE_NODE_PRESENT={1 if isinstance(node, dict) else 0}')
-          print(f'REFERENCE_TIMELINE_PRESENT={1 if isinstance(feed, dict) else 0}')
-          print(f'REFERENCE_EDGES={len(edges) if isinstance(edges, list) else 0}')
-          if isinstance(edges, list) and len(edges) > 0:
-              print('REFERENCE_CONTRACT=PASS')
+          total_errors = 0
+          codes = set()
+          data_blocks = node_blocks = timeline_blocks = edges_total = post_nodes = page_info_blocks = 0
+          json_lines = parse_failures = 0
+          for line in text.splitlines():
+              if not line.strip():
+                  continue
+              try:
+                  payload = json.loads(line)
+              except Exception:
+                  parse_failures += 1
+                  continue
+              json_lines += 1
+              if not isinstance(payload, dict):
+                  continue
+              errors = payload.get('errors') or []
+              if isinstance(errors, list):
+                  total_errors += len(errors)
+                  for e in errors:
+                      if isinstance(e, dict) and e.get('code') is not None:
+                          codes.add(str(e.get('code')))
+              data = payload.get('data')
+              if not isinstance(data, dict):
+                  continue
+              data_blocks += 1
+              if isinstance(data.get('page_info'), dict):
+                  page_info_blocks += 1
+              node = data.get('node')
+              if not isinstance(node, dict):
+                  continue
+              node_blocks += 1
+              if node.get('post_id'):
+                  post_nodes += 1
+              feed = node.get('timeline_list_feed_units')
+              if not isinstance(feed, dict):
+                  continue
+              timeline_blocks += 1
+              if isinstance(feed.get('page_info'), dict):
+                  page_info_blocks += 1
+              edges = feed.get('edges')
+              if isinstance(edges, list):
+                  edges_total += len(edges)
+                  post_nodes += sum(1 for edge in edges if isinstance(edge, dict) and isinstance(edge.get('node'), dict) and edge['node'].get('post_id'))
+
+          print(f'REFERENCE_JSON_LINES={json_lines}')
+          print(f'REFERENCE_PARSE_FAILURES={parse_failures}')
+          print(f'REFERENCE_ERRORS={total_errors}')
+          print('REFERENCE_ERROR_CODES=' + ','.join(sorted(codes)))
+          print(f'REFERENCE_DATA_BLOCKS={data_blocks}')
+          print(f'REFERENCE_NODE_BLOCKS={node_blocks}')
+          print(f'REFERENCE_TIMELINE_BLOCKS={timeline_blocks}')
+          print(f'REFERENCE_EDGES={edges_total}')
+          print(f'REFERENCE_POST_NODES={post_nodes}')
+          print(f'REFERENCE_PAGE_INFO={page_info_blocks}')
+          if edges_total > 0 or post_nodes > 0:
+              print('REFERENCE_FULL_CONTRACT=PASS')
               raise SystemExit(0)
-          print('REFERENCE_CONTRACT=NO_EDGES')
+          print('REFERENCE_FULL_CONTRACT=NO_POSTS')
           raise SystemExit(5)
           PY
