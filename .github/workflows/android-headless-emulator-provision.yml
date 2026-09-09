@@ -32,17 +32,27 @@ jobs:
           test -s "${sdk_wsl}/emulator/emulator.exe" || packages+=(emulator)
           test -s "${sdk_wsl}/platform-tools/adb.exe" || packages+=(platform-tools)
 
+          install_rc=0
           if ((${#packages[@]})); then
             echo "CORE_PACKAGES_MISSING=${#packages[@]}"
+            set +e
             "$android" --no-metrics --sdk="$sdk_win" sdk install "${packages[@]}" 2>&1 |
               tr -d '\r' |
               sed -E 's/([0-9]{5,})/[number]/g'
+            pipe_rc=("${PIPESTATUS[@]}")
+            set -e
+            install_rc="${pipe_rc[0]}"
+            echo "CORE_INSTALL_RC=${install_rc}"
           else
             echo CORE_PACKAGES_REUSED=1
           fi
 
-          test -s "${sdk_wsl}/emulator/emulator.exe"
-          test -s "${sdk_wsl}/platform-tools/adb.exe"
+          if ! test -s "${sdk_wsl}/emulator/emulator.exe" || ! test -s "${sdk_wsl}/platform-tools/adb.exe"; then
+            echo CORE_PACKAGES_VERIFY=FAIL
+            if ((install_rc != 0)); then exit "$install_rc"; fi
+            exit 1
+          fi
+
           echo CORE_PACKAGES_READY=1
 
       - name: Install Android system image if missing
@@ -60,6 +70,7 @@ jobs:
           image_dir="${sdk_wsl}/system-images/android-36/google_apis/x86_64"
           test -s "$android"
 
+          install_rc=0
           if test -s "${image_dir}/system.img" && test -s "${image_dir}/package.xml"; then
             echo SYSTEM_IMAGE_REUSED=1
           else
@@ -67,10 +78,15 @@ jobs:
             before_kb="${before_kb:-0}"
             echo "SDK_BEFORE_MB=$((before_kb / 1024))"
 
+            set +e
             "$android" --no-metrics --sdk="$sdk_win" sdk install \
               system-images/android-36/google_apis/x86_64 2>&1 |
               tr -d '\r' |
               sed -E 's/([0-9]{5,})/[number]/g'
+            pipe_rc=("${PIPESTATUS[@]}")
+            set -e
+            install_rc="${pipe_rc[0]}"
+            echo "SYSTEM_IMAGE_INSTALL_RC=${install_rc}"
 
             after_kb="$(du -sk "$sdk_wsl" 2>/dev/null | awk '{print $1}')"
             after_kb="${after_kb:-0}"
@@ -78,8 +94,12 @@ jobs:
             echo "SDK_DELTA_MB=$(((after_kb - before_kb) / 1024))"
           fi
 
-          test -s "${image_dir}/system.img"
-          test -s "${image_dir}/package.xml"
+          if ! test -s "${image_dir}/system.img" || ! test -s "${image_dir}/package.xml"; then
+            echo SYSTEM_IMAGE_VERIFY=FAIL
+            if ((install_rc != 0)); then exit "$install_rc"; fi
+            exit 1
+          fi
+
           echo SYSTEM_IMAGE_READY=1
 
       - name: Verify headless emulator SDK
