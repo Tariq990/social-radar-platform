@@ -43,13 +43,13 @@ jobs:
           Write-Output ('TARGET_COUNT=' + $targets.Count)
           $i=0
           foreach($t in $targets){
-            $scheme='unknown';$host='unknown'
-            try{$u=[Uri][string]$t.url;$scheme=$u.Scheme;$host=$u.Host}catch{}
-            if($host -match 'facebook\.com$'){$host='facebook'}
-            elseif($host -match 'instagram\.com$'){$host='instagram'}
-            elseif($host -in @('localhost','127.0.0.1')){$host='localhost'}
-            elseif($host){$host='other'}
-            Write-Output ('TARGET_' + $i + '_TYPE=' + [string]$t.type + ' SCHEME=' + $scheme + ' HOST=' + $host)
+            $scheme='unknown';$targetHost='unknown'
+            try{$u=[Uri][string]$t.url;$scheme=$u.Scheme;$targetHost=$u.Host}catch{}
+            if($targetHost -match 'facebook\.com$'){$targetHost='facebook'}
+            elseif($targetHost -match 'instagram\.com$'){$targetHost='instagram'}
+            elseif($targetHost -in @('localhost','127.0.0.1')){$targetHost='localhost'}
+            elseif($targetHost){$targetHost='other'}
+            Write-Output ('TARGET_' + $i + '_TYPE=' + [string]$t.type + ' SCHEME=' + $scheme + ' HOST=' + $targetHost)
             $i++
           }
           PS
