@@ -1,4 +1,4 @@
-name: Android Facebook DOM v151 Resilient Collection Proof
+name: Android Facebook DOM v151 Extended Hydration Proof
 
 on:
   push:
@@ -29,7 +29,7 @@ jobs:
           fetch-depth: 1
           clean: false
 
-      - name: Apply workspace-only resilient DOM experiment
+      - name: Apply workspace-only hydration experiment
         shell: bash
         run: |
           set -euo pipefail
@@ -37,68 +37,25 @@ jobs:
           from pathlib import Path
           p=Path('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedWebCollector.java')
           s=p.read_text()
-          replacements={
+          reps={
+            'private static final long TIMEOUT_MS = 45_000;':'private static final long TIMEOUT_MS = 75_000;',
             'private static final long PAGE_STARTED_EXTRACTION_DELAY_MS = 900;':'private static final long PAGE_STARTED_EXTRACTION_DELAY_MS = 3_000;',
             'private static final long EVALUATION_WATCHDOG_MS = 2_500;':'private static final long EVALUATION_WATCHDOG_MS = 10_000;',
-            'private static final int SURFACE_FALLBACK_ATTEMPT = 4;':'private static final int SURFACE_FALLBACK_ATTEMPT = 12;',
-            'private static final int MAX_EXTRACTION_ATTEMPTS = 12;':'private static final int MAX_EXTRACTION_ATTEMPTS = 20;'
+            'private static final int SURFACE_FALLBACK_ATTEMPT = 4;':'private static final int SURFACE_FALLBACK_ATTEMPT = 20;',
+            'private static final int MAX_EXTRACTION_ATTEMPTS = 12;':'private static final int MAX_EXTRACTION_ATTEMPTS = 30;'
           }
-          for old,new in replacements.items():
+          for old,new in reps.items():
               assert s.count(old)==1,(old,s.count(old)); s=s.replace(old,new)
           anchor='            settings.setOffscreenPreRaster(true);'
-          assert s.count(anchor)==1
-          s=s.replace(anchor, anchor+'\n            settings.setUserAgentString("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36");\n            Log.i(TAG, "event=user_agent mode=desktop");')
-          flags='            boolean[] triedBasicFallback = new boolean[] { false };'
-          assert s.count(flags)==1
-          s=s.replace(flags,flags+'\n            JSONObject[] bestResult = new JSONObject[] { null };\n            int[] bestPostCount = new int[] { 0 };')
-          old='''                Log.w(TAG, "event=global_timeout attempts=" + attempts[0] +
-                    " progress=" + webView.getProgress() + " attached=" + webView.isAttachedToWindow());
-                finishError(main, null, webView, finished, callback,
-                    "COLLECTOR_TIMEOUT|attempts=" + attempts[0] +
-                    "|progress=" + webView.getProgress() +
-                    "|attached=" + webView.isAttachedToWindow());'''
-          new='''                Log.w(TAG, "event=global_timeout attempts=" + attempts[0] +
-                    " progress=" + webView.getProgress() + " attached=" + webView.isAttachedToWindow());
-                if (bestResult[0] != null && bestPostCount[0] > 0) {
-                    Log.i(TAG, "event=best_result_timeout posts=" + bestPostCount[0]);
-                    finishSuccess(main, null, webView, finished, callback, bestResult[0]);
-                } else {
-                    finishError(main, null, webView, finished, callback,
-                        "COLLECTOR_TIMEOUT|attempts=" + attempts[0] +
-                        "|progress=" + webView.getProgress() +
-                        "|attached=" + webView.isAttachedToWindow());
-                }'''
-          assert s.count(old)==1,s.count(old); s=s.replace(old,new)
-          old='''                    if (attempts[0] >= SURFACE_FALLBACK_ATTEMPT) {
-                        if (!triedMobileFallback[0] && mobileUrl != null && !mobileUrl.equals(desktopUrl)) {'''
-          new='''                    if (bestResult[0] != null && bestPostCount[0] > 0) {
-                        if (attempts[0] >= MAX_EXTRACTION_ATTEMPTS) {
-                            Log.i(TAG, "event=best_result_watchdog posts=" + bestPostCount[0]);
-                            finishSuccess(main, timeoutHolder[0], webView, finished, callback, bestResult[0]);
-                        } else {
-                            main.postDelayed(extractionRunner[0], RETRY_DELAY_MS);
-                        }
-                        return;
-                    }
-
-                    if (attempts[0] >= SURFACE_FALLBACK_ATTEMPT) {
-                        if (!triedMobileFallback[0] && mobileUrl != null && !mobileUrl.equals(desktopUrl)) {'''
-          assert s.count(old)==1,s.count(old); s=s.replace(old,new,1)
-          marker='''                        boolean reliableSource = errorCode.isBlank() && source != null &&
-                            isAllowedSocialUrl(sourceUrl) && !isBlank(displayName) && !isBlank(externalId);'''
-          repl=marker+'''\n                        if (reliableSource && postCount > bestPostCount[0]) {
-                            bestPostCount[0] = postCount;
-                            bestResult[0] = result;
-                            Log.i(TAG, "event=best_result posts=" + postCount);
-                        }'''
-          assert s.count(marker)==1,s.count(marker); s=s.replace(marker,repl)
+          assert s.count(anchor)==1,s.count(anchor)
+          s=s.replace(anchor,anchor+'\n            settings.setUserAgentString("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36");\n            Log.i(TAG, "event=user_agent mode=desktop");')
           p.write_text(s)
-          for token in ['event=user_agent mode=desktop','bestPostCount','event=best_result','MAX_EXTRACTION_ATTEMPTS = 20','SURFACE_FALLBACK_ATTEMPT = 12']:
+          for token in ['TIMEOUT_MS = 75_000','PAGE_STARTED_EXTRACTION_DELAY_MS = 3_000','EVALUATION_WATCHDOG_MS = 10_000','SURFACE_FALLBACK_ATTEMPT = 20','MAX_EXTRACTION_ATTEMPTS = 30','event=user_agent mode=desktop']:
               assert token in s,token
           print('V151_WORKSPACE_PATCH=PASS')
           PY
           git diff --check
-          git diff -- android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedWebCollector.java | sed -n '1,250p'
+          git diff -- android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedWebCollector.java | sed -n '1,180p'
 
       - name: Setup Java 21
         uses: actions/setup-java@v4
@@ -155,6 +112,7 @@ jobs:
           sleep 9
           pid="$($ADB -s "$SERIAL" shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"; test -n "$pid"
           echo "APP_PID=$pid" >> "$GITHUB_ENV"
+          echo V151_APP_LAUNCHED=PASS
 
       - name: Trigger real latest-10 Grab
         shell: bash
@@ -186,37 +144,39 @@ jobs:
           PS
           $ADB -s "$SERIAL" logcat -c >/dev/null 2>&1 || true
           /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
+          echo V151_REAL_GRAB_TRIGGER=PASS
 
-      - name: Prove actual collected count
+      - name: Prove exact latest-10 result or capture max progress
         shell: bash
         run: |
           set -euo pipefail
           success=''; failure=''
-          for i in $(seq 1 65); do
+          for i in $(seq 1 90); do
             events="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' || true)"
             success="$(printf '%s\n' "$events" | grep -E 'event=collect_source_success platform=facebook posts=[0-9]+' | tail -n1 || true)"
             failure="$(printf '%s\n' "$events" | grep -E 'event=collect_source_error platform=facebook code=' | tail -n1 || true)"
             [ -n "$success" ] || [ -n "$failure" ] || { sleep 1; continue; }
             break
           done
-          echo '=== SAFE V151 TRACE ==='
-          $ADB -s "$SERIAL" logcat -b all -d -v threadtime 2>/dev/null | tr -d '\r' | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' | tail -n 380 || true
-          best="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | sed -n 's/.*event=best_result posts=\([0-9][0-9]*\).*/\1/p' | sort -n | tail -n1)"
-          echo "MAX_BEST_RESULT_POSTS=${best:-0}"
+          echo '=== SAFE V151 HYDRATION TRACE ==='
+          $ADB -s "$SERIAL" logcat -b all -d -v threadtime 2>/dev/null | tr -d '\r' | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' | tail -n 420 || true
+          max_posts="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | sed -n 's/.*event=eval_result.* posts=\([0-9][0-9]*\).*/\1/p' | sort -n | tail -n1)"
+          watchdogs="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -c 'MRSCRAP_COLLECTOR.*event=eval_watchdog' || true)"
+          echo "MAX_EVAL_POSTS=${max_posts:-0}"
+          echo "EVAL_WATCHDOG_COUNT=$watchdogs"
           if [ -n "$failure" ]; then code="$(printf '%s' "$failure" | sed -n 's/.*code=\([^ ]*\).*/\1/p')"; echo "FACEBOOK_COLLECTOR_FAILURE_CODE=${code:-unknown}"; exit 153; fi
           test -n "$success"
           posts="$(printf '%s' "$success" | sed -n 's/.*posts=\([0-9][0-9]*\).*/\1/p')"
-          echo REQUESTED_POSTS=10
-          echo "FACEBOOK_POSTS_COLLECTED=$posts"
-          test -n "$posts"; test "$posts" -gt 0
-          if [ "$posts" -ge 10 ]; then echo FACEBOOK_LATEST_10_GATE=PASS; else echo FACEBOOK_PARTIAL_COLLECTION_ONLY=1; exit 154; fi
+          echo REQUESTED_POSTS=10; echo "FACEBOOK_POSTS_COLLECTED=$posts"
+          test "$posts" -ge 10
+          echo FACEBOOK_LATEST_10_GATE=PASS
 
       - name: Prove Facebook session survives restart
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          test -n "${ADB:-}"; test -n "${SERIAL:-}"
+          if [ -z "${ADB:-}" ] || [ -z "${SERIAL:-}" ]; then echo SESSION_PROOF_SKIPPED_BEFORE_ADB=1; exit 0; fi
           $ADB -s "$SERIAL" shell am force-stop "$PKG" >/dev/null 2>&1 || true
           $ADB -s "$SERIAL" shell am start -W -n "$PKG/.MainActivity" >/dev/null
           sleep 6
