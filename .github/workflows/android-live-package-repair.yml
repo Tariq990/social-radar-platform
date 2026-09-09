@@ -14,7 +14,7 @@ jobs:
     runs-on: [self-hosted, Linux]
     timeout-minutes: 10
     steps:
-      - name: Ensure current AVD is booted
+      - name: Restart emulator with gfxstream DMA workaround
         shell: bash
         run: |
           set -euo pipefail
@@ -25,27 +25,44 @@ jobs:
           image_win="${sdk_win}\\system-images\\android-36\\google_apis\\x86_64"
           avd_dir="/mnt/c/Users/${win_user}/.android/avd/test_avd.avd"
           test -s "${avd_dir}/userdata-qemu.img"
-          test -s "${avd_dir}/userdata-qemu.pre-clean.img"
 
-          "$adb" start-server >/dev/null 2>&1 || true
-          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
-          if [ -z "$serial" ]; then
-            echo EMULATOR_RESTART_REQUIRED=1
-            ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-diagnostic-start.ps1"
-            cat > "$ps1" <<POWERSHELL
+          echo "=== STOP CURRENT TEST AVD WITHOUT WIPING DATA ==="
+          "$adb" kill-server >/dev/null 2>&1 || true
+          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-gfx-workaround.ps1"
+          cat > "$ps1" <<POWERSHELL
           \$ErrorActionPreference = 'Stop'
-          Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-            ([string]\$_.CommandLine -like '*@test_avd*') -or
-            ([string]\$_.ExecutablePath -like '${sdk_win}\\emulator\\*')
-          } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }
-          Start-Sleep -Seconds 2
-          \$emu = '${sdk_win}\\emulator\\emulator.exe'
-          \$args = @('@test_avd','-sysdir','${image_win}','-no-audio','-no-boot-anim','-no-snapshot','-gpu','swiftshader_indirect','-no-window')
+          \$sdk = '${sdk_win}'
+          \$holders = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+            \$cmd = [string]\$_.CommandLine
+            \$path = [string]\$_.ExecutablePath
+            (\$cmd -like '*@test_avd*') -or
+            (\$path -like (\$sdk + '\\emulator\\*')) -or
+            (\$_.Name -eq 'emulator.exe') -or
+            (\$_.Name -eq 'qemu-system-x86_64.exe') -or
+            (\$_.Name -eq 'qemu-system-x86_64-headless.exe')
+          })
+          foreach (\$p in \$holders) {
+            Write-Output ('KILL=' + \$p.ProcessId + ':' + \$p.Name)
+            Stop-Process -Id \$p.ProcessId -Force -ErrorAction SilentlyContinue
+          }
+          Start-Sleep -Seconds 3
+          \$emu = Join-Path \$sdk 'emulator\\emulator.exe'
+          \$args = @(
+            '@test_avd',
+            '-sysdir','${image_win}',
+            '-no-audio',
+            '-no-boot-anim',
+            '-no-snapshot',
+            '-gpu','swiftshader_indirect',
+            '-feature','-HasSharedSlotsHostMemoryAllocator',
+            '-no-window'
+          )
+          Write-Output ('EMULATOR_ARGS=' + (\$args -join ' '))
           Start-Process -FilePath \$emu -ArgumentList \$args -WindowStyle Hidden
           POWERSHELL
-            /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
-          fi
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
 
+          "$adb" start-server >/dev/null 2>&1 || true
           serial=''
           for i in $(seq 1 48); do
             serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
@@ -71,111 +88,108 @@ jobs:
           echo "ACTIVITY_SERVICE=$activity"
           test "$boot" = "1"
           echo "$activity" | grep -q 'found'
-          sleep 10
+          sleep 12
 
           echo "ADB=$adb" >> "$GITHUB_ENV"
           echo "SERIAL=$serial" >> "$GITHUB_ENV"
           echo "WINUSER=$win_user" >> "$GITHUB_ENV"
-          echo EMULATOR_RUNTIME_READY=1
+          echo GFX_WORKAROUND_BOOT_READY=1
 
-      - name: Control launch and capture MR SCRAP system death
+      - name: Verify graphics stability and MR SCRAP launch
         shell: bash
         run: |
-          set -u
+          set -euo pipefail
           pkg="com.mrscrap.socialradar"
           apk="$RUNNER_WORKSPACE/SCRAP-APP/android/app/build/outputs/apk/debug/app-debug.apk"
           win_tmp="/mnt/c/Users/${WINUSER}/AppData/Local/Temp/MRSCRAP/app-debug.apk"
-          trace="$RUNNER_TEMP/mrscrap-prelaunch-logcat.txt"
-          crashtrace="$RUNNER_TEMP/mrscrap-crash-logcat.txt"
 
           if ! "$ADB" -s "$SERIAL" shell pm path "$pkg" >/dev/null 2>&1; then
+            echo PACKAGE_INSTALL_REQUIRED=1
             test -s "$apk"
             mkdir -p "$(dirname "$win_tmp")"
             cp -f "$apk" "$win_tmp"
-            "$ADB" -s "$SERIAL" install "$(wslpath -w "$win_tmp")" 2>&1 | tr -d '\r'
+            "$ADB" -s "$SERIAL" install "$(wslpath -w "$win_tmp")" | tr -d '\r'
+          else
+            echo PACKAGE_INSTALL_REQUIRED=0
           fi
           "$ADB" -s "$SERIAL" shell pm enable --user 0 "$pkg" >/dev/null 2>&1 || true
 
-          echo "=== PRE-CONTROL ==="
-          ss0="$($ADB -s "$SERIAL" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
-          echo "SYSTEM_SERVER_PID_INITIAL=$ss0"
-          "$ADB" -s "$SERIAL" shell service check activity 2>&1 | tr -d '\r' || true
-
-          echo "=== CONTROL: SETTINGS ==="
-          set +e
-          "$ADB" -s "$SERIAL" shell am start --user 0 -a android.settings.SETTINGS 2>&1 | tr -d '\r'
-          control_rc=${PIPESTATUS[0]}
-          sleep 5
-          ss1="$($ADB -s "$SERIAL" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
-          settings_pid="$($ADB -s "$SERIAL" shell pidof com.android.settings 2>/dev/null | tr -d '\r' || true)"
-          set -e
-          echo "CONTROL_RC=$control_rc"
-          echo "SETTINGS_PID=$settings_pid"
-          echo "SYSTEM_SERVER_PID_AFTER_SETTINGS=$ss1"
-          if [ -z "$ss1" ] || [ "$ss0" != "$ss1" ]; then
-            echo CONTROL_SYSTEM_SERVER_STABLE=0
-            exit 31
+          echo "=== HOST EXTENSION CHECK ==="
+          dma_lines="$($ADB -s "$SERIAL" logcat -d 2>/dev/null | tr -d '\r' | grep -i 'ANDROID_EMU_read_color_buffer_dma' || true)"
+          if [ -n "$dma_lines" ]; then
+            echo READ_COLOR_BUFFER_DMA_ADVERTISED=1
+            printf '%s\n' "$dma_lines" | tail -n 10
+          else
+            echo READ_COLOR_BUFFER_DMA_ADVERTISED=0
           fi
-          echo CONTROL_SYSTEM_SERVER_STABLE=1
 
-          echo "=== PACKAGE RESOLUTION ==="
-          "$ADB" -s "$SERIAL" shell cmd package query-activities --brief --components --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p "$pkg" 2>&1 | tr -d '\r' || true
-          "$ADB" -s "$SERIAL" shell pm path "$pkg" 2>&1 | tr -d '\r' || true
+          "$ADB" -s "$SERIAL" logcat -b crash -c >/dev/null 2>&1 || true
+          "$ADB" -s "$SERIAL" logcat -c >/dev/null 2>&1 || true
 
-          echo "=== START LIVE LOG CAPTURE ==="
-          rm -f "$trace" "$crashtrace"
-          "$ADB" -s "$SERIAL" logcat -b all -v threadtime >"$trace" 2>&1 &
-          logger_pid=$!
-          "$ADB" -s "$SERIAL" logcat -b crash -v threadtime >"$crashtrace" 2>&1 &
-          crash_logger_pid=$!
-          sleep 2
+          sf0="$($ADB -s "$SERIAL" shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true)"
+          ss0="$($ADB -s "$SERIAL" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
+          echo "SURFACEFLINGER_PID_BEFORE=$sf0"
+          echo "SYSTEM_SERVER_PID_BEFORE=$ss0"
+          test -n "$sf0"
+          test -n "$ss0"
 
-          ss_before="$($ADB -s "$SERIAL" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
-          echo "SYSTEM_SERVER_PID_BEFORE_MRSCRAP=$ss_before"
+          echo "=== CONTROL SETTINGS ==="
+          "$ADB" -s "$SERIAL" shell am start --user 0 -a android.settings.SETTINGS 2>&1 | tr -d '\r'
+          sleep 5
+          settings_pid="$($ADB -s "$SERIAL" shell pidof com.android.settings 2>/dev/null | tr -d '\r' || true)"
+          echo "SETTINGS_PID=$settings_pid"
+          test -n "$settings_pid"
+          echo SETTINGS_CONTROL_OK=1
 
-          echo "=== MR SCRAP LAUNCH (NO -W) ==="
-          set +e
+          echo "=== LAUNCH MR SCRAP ==="
+          resolve="$($ADB -s "$SERIAL" shell cmd package resolve-activity --brief --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p "$pkg" 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+          echo "RESOLVED_ACTIVITY=$resolve"
           "$ADB" -s "$SERIAL" shell am start --user 0 -f 0x20 -n "$pkg/.MainActivity" 2>&1 | tr -d '\r'
-          launch_rc=${PIPESTATUS[0]}
-          echo "LAUNCH_RC=$launch_rc"
-          sleep 10
-          set -e
+          sleep 8
+          app_pid="$($ADB -s "$SERIAL" shell pidof "$pkg" 2>/dev/null | tr -d '\r' || true)"
+          echo "APP_PID_INITIAL=$app_pid"
+          test -n "$app_pid"
+          echo MRSCRAP_APP_LAUNCHED=1
 
-          kill "$logger_pid" "$crash_logger_pid" >/dev/null 2>&1 || true
-          wait "$logger_pid" "$crash_logger_pid" >/dev/null 2>&1 || true
-
-          "$ADB" start-server >/dev/null 2>&1 || true
-          serial2=''
+          echo "=== 75 SECOND STABILITY WINDOW ==="
+          stable=1
           for i in $(seq 1 15); do
-            serial2="$($ADB devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
-            [ -n "$serial2" ] && break
-            sleep 2
+            sleep 5
+            sf="$($ADB -s "$SERIAL" shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true)"
+            ss="$($ADB -s "$SERIAL" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
+            app="$($ADB -s "$SERIAL" shell pidof "$pkg" 2>/dev/null | tr -d '\r' || true)"
+            echo "STABILITY_$((i*5))S SF=${sf:-none} SS=${ss:-none} APP=${app:-none}"
+            if [ -z "$sf" ] || [ "$sf" != "$sf0" ] || [ -z "$ss" ] || [ "$ss" != "$ss0" ] || [ -z "$app" ]; then
+              stable=0
+              break
+            fi
           done
-          [ -n "$serial2" ] || serial2="$SERIAL"
-          ss_after="$($ADB -s "$serial2" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
-          app_pid="$($ADB -s "$serial2" shell pidof "$pkg" 2>/dev/null | tr -d '\r' || true)"
-          echo "SYSTEM_SERVER_PID_AFTER_MRSCRAP=$ss_after"
-          echo "APP_PID=$app_pid"
 
-          echo "=== CAPTURED CRITICAL LOGS ==="
-          grep -E -i 'FATAL|Fatal signal|system_server|ActivityTaskManager|ActivityManager|Watchdog|binder|IPCThreadState|mrscrap|MainActivity|tombstone|SIG[A-Z]+|abort|crash|RuntimeException|Exception' "$trace" | tail -n 700 || true
-          echo "=== CRASH BUFFER ==="
-          tail -n 300 "$crashtrace" || true
+          crash="$($ADB -s "$SERIAL" logcat -b crash -d -v threadtime 2>/dev/null | tr -d '\r' || true)"
+          assertion_count="$(printf '%s\n' "$crash" | grep -c 'hasReadColorBufferDma' || true)"
+          sf_crash_count="$(printf '%s\n' "$crash" | grep -c 'surfaceflinger' || true)"
+          echo "READ_COLOR_BUFFER_DMA_ASSERTIONS=$assertion_count"
+          echo "SURFACEFLINGER_CRASH_LINES=$sf_crash_count"
+          if [ "$assertion_count" -gt 0 ] || [ "$sf_crash_count" -gt 0 ]; then
+            printf '%s\n' "$crash" | grep -E -i 'surfaceflinger|RegionSampling|hasReadColorBufferDma|Fatal signal|Abort message' | tail -n 120 || true
+            stable=0
+          fi
 
-          echo "=== DROPBOX TAGS ==="
-          "$ADB" -s "$serial2" shell dumpsys dropbox 2>/dev/null | tr -d '\r' | grep -E -i 'system_server|tombstone|crash|anr|wtf|last_kmsg' | tail -n 120 || true
+          sf_end="$($ADB -s "$SERIAL" shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true)"
+          ss_end="$($ADB -s "$SERIAL" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
+          app_end="$($ADB -s "$SERIAL" shell pidof "$pkg" 2>/dev/null | tr -d '\r' || true)"
+          echo "SURFACEFLINGER_PID_AFTER=$sf_end"
+          echo "SYSTEM_SERVER_PID_AFTER=$ss_end"
+          echo "APP_PID_AFTER=$app_end"
 
-          echo "=== ROOT / TOMBSTONES PROBE ==="
-          "$ADB" -s "$serial2" root 2>&1 | tr -d '\r' || true
-          sleep 2
-          "$ADB" -s "$serial2" shell 'ls -lt /data/tombstones 2>/dev/null | head -20' 2>&1 | tr -d '\r' || true
-
-          if [ -n "$ss_before" ] && [ -n "$ss_after" ] && [ "$ss_before" != "$ss_after" ]; then
-            echo MRSCRAP_CAUSES_SYSTEM_SERVER_RESTART=1
+          if [ "$stable" -ne 1 ]; then
+            echo SURFACEFLINGER_STABLE=0
+            echo SYSTEM_SERVER_STABLE=$([ "$ss_end" = "$ss0" ] && echo 1 || echo 0)
+            echo "=== RELEVANT LOGCAT ==="
+            "$ADB" -s "$SERIAL" logcat -d -v threadtime 2>/dev/null | tr -d '\r' | grep -E -i 'surfaceflinger|RegionSampling|hasReadColorBufferDma|mrscrap|MainActivity|Fatal signal|SIGABRT|Abort message' | tail -n 220 || true
             exit 40
           fi
-          if [ -z "$app_pid" ]; then
-            echo MRSCRAP_APP_LAUNCHED=0
-            exit 41
-          fi
-          echo MRSCRAP_APP_LAUNCHED=1
+
+          echo SURFACEFLINGER_STABLE=1
+          echo SYSTEM_SERVER_STABLE=1
+          echo GFXSTREAM_DMA_WORKAROUND=PASS
