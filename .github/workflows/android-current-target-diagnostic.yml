@@ -1,0 +1,57 @@
+name: Current Android WebView Target Diagnostic
+
+on:
+  push:
+    branches: [test/android-physical-fix-20260909]
+    paths: [.github/workflows/android-current-target-diagnostic.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 3
+    steps:
+      - name: Inspect safe current WebView target metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-platform-tools/platform-tools/adb.exe"
+          serial=""
+          for i in $(seq 1 30); do
+            serial="$($adb devices 2>/dev/null | tr -d '\r' | awk 'NR>1 && $2=="device" {print $1; exit}')"
+            [ -n "$serial" ] && break
+            sleep 1
+          done
+          test -n "$serial"
+          echo "::add-mask::$serial"
+          "$adb" -s "$serial" shell am start -W -n com.mrscrap.socialradar/.MainActivity | tr -d '\r'
+          "$adb" -s "$serial" shell dumpsys package com.mrscrap.socialradar | tr -d '\r' | grep -E 'versionCode=|versionName=' | head -n4
+          sleep 7
+          pid="$($adb -s "$serial" shell pidof com.mrscrap.socialradar 2>/dev/null | tr -d '\r' | awk '{print $1}')"
+          test -n "$pid"
+          socket_name="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | grep -o "webview_devtools_remote_${pid}" | head -n1 || true)"
+          test -n "$socket_name"
+          "$adb" -s "$serial" forward --remove tcp:19222 >/dev/null 2>&1 || true
+          "$adb" -s "$serial" forward tcp:19222 "localabstract:${socket_name}" >/dev/null
+          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-target-meta.ps1"
+          cat > "$ps1" <<'PS'
+          $ErrorActionPreference='Stop'
+          $targets=@(Invoke-RestMethod -Uri 'http://127.0.0.1:19222/json' -TimeoutSec 4)
+          Write-Output ('TARGET_COUNT=' + $targets.Count)
+          $i=0
+          foreach($t in $targets){
+            $scheme='unknown';$host='unknown'
+            try{$u=[Uri][string]$t.url;$scheme=$u.Scheme;$host=$u.Host}catch{}
+            if($host -match 'facebook\.com$'){$host='facebook'}
+            elseif($host -match 'instagram\.com$'){$host='instagram'}
+            elseif($host -in @('localhost','127.0.0.1')){$host='localhost'}
+            elseif($host){$host='other'}
+            Write-Output ('TARGET_' + $i + '_TYPE=' + [string]$t.type + ' SCHEME=' + $scheme + ' HOST=' + $host)
+            $i++
+          }
+          PS
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\\Users\\${win_user}\\AppData\\Local\\Temp\\mrscrap-target-meta.ps1"
+          "$adb" -s "$serial" forward --remove tcp:19222 >/dev/null 2>&1 || true
