@@ -259,33 +259,10 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
             " foreground=" + (getActivity() != null));
 
         AuthenticatedWebCollector.Callback terminal = terminalCollectCallback(call, platform, limit);
-        if (!"facebook".equals(platform)) {
-            AuthenticatedWebCollector.collect(foregroundContext(), url, limit, terminal);
-            return;
+        if ("facebook".equals(platform)) {
+            Log.i(FLOW_TAG, "event=collect_source_strategy platform=facebook primary=dom");
         }
-
-        FacebookGraphqlWebViewCollector.collect(foregroundContext(), url, limit, new AuthenticatedWebCollector.Callback() {
-            @Override
-            public void onSuccess(JSONObject result) {
-                terminal.onSuccess(result);
-            }
-
-            @Override
-            public void onError(String message) {
-                String code = safeErrorCode(message);
-                if (!shouldFallbackFromFacebookGraphql(code)) {
-                    terminal.onError(message);
-                    return;
-                }
-                final long fallbackDelayMs = 750L;
-                Log.w(FLOW_TAG, "event=collect_source_fallback platform=facebook from=graphql to=dom code=" + code);
-                Log.i(FLOW_TAG, "event=collect_source_fallback_delay platform=facebook ms=" + fallbackDelayMs);
-                new Handler(Looper.getMainLooper()).postDelayed(
-                    () -> AuthenticatedWebCollector.collect(foregroundContext(), url, limit, terminal),
-                    fallbackDelayMs
-                );
-            }
-        });
+        AuthenticatedWebCollector.collect(foregroundContext(), url, limit, terminal);
     }
 
     @PluginMethod
