@@ -39,7 +39,8 @@ jobs:
 
           "$adb" kill-server >/dev/null 2>&1 || true
           ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/MRSCRAP/gfx-trace-start.ps1"
-          hostlog="/mnt/c/Users/${win_user}/AppData/Local/Temp/MRSCRAP/gfx-trace-host.log"
+          hostout="/mnt/c/Users/${win_user}/AppData/Local/Temp/MRSCRAP/gfx-trace-host.out.log"
+          hosterr="/mnt/c/Users/${win_user}/AppData/Local/Temp/MRSCRAP/gfx-trace-host.err.log"
           cat > "$ps1" <<POWERSHELL
           \$ErrorActionPreference='Stop'
           \$sdk='${sdk_win}'
@@ -49,10 +50,11 @@ jobs:
             (\$_.Name -in @('emulator.exe','qemu-system-x86_64.exe','qemu-system-x86_64-headless.exe'))
           }) | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }
           Start-Sleep -Seconds 3
-          \$log='C:\\Users\\${win_user}\\AppData\\Local\\Temp\\MRSCRAP\\gfx-trace-host.log'
-          Remove-Item -Force \$log -ErrorAction SilentlyContinue
+          \$out='C:\\Users\\${win_user}\\AppData\\Local\\Temp\\MRSCRAP\\gfx-trace-host.out.log'
+          \$err='C:\\Users\\${win_user}\\AppData\\Local\\Temp\\MRSCRAP\\gfx-trace-host.err.log'
+          Remove-Item -Force \$out,\$err -ErrorAction SilentlyContinue
           \$args=@('@test_avd','-sysdir','${sdk_win}\\system-images\\android-36\\google_apis\\x86_64','-no-audio','-no-boot-anim','-no-snapshot','-gpu','swangle_indirect','-no-window','-verbose')
-          Start-Process -FilePath (Join-Path \$sdk 'emulator\\emulator.exe') -ArgumentList \$args -RedirectStandardOutput \$log -RedirectStandardError \$log -WindowStyle Hidden
+          Start-Process -FilePath (Join-Path \$sdk 'emulator\\emulator.exe') -ArgumentList \$args -RedirectStandardOutput \$out -RedirectStandardError \$err -WindowStyle Hidden
           POWERSHELL
           /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
 
@@ -63,7 +65,12 @@ jobs:
             [ -n "$serial" ] && break
             sleep 5
           done
-          if [ -z "$serial" ]; then echo EMULATOR_DEVICE_FOUND=0; tail -n 250 "$hostlog" 2>/dev/null || true; exit 10; fi
+          if [ -z "$serial" ]; then
+            echo EMULATOR_DEVICE_FOUND=0
+            tail -n 250 "$hostout" 2>/dev/null || true
+            tail -n 250 "$hosterr" 2>/dev/null || true
+            exit 10
+          fi
 
           echo "SERIAL=$serial"
           sleep 75
@@ -73,7 +80,7 @@ jobs:
           echo "GUEST_DMA_TOKEN_COUNT=$(printf '%s\n' "$full" | grep -c 'ANDROID_EMU_read_color_buffer_dma' || true)"
           echo "GUEST_DMA_ASSERT_COUNT=$(printf '%s\n' "$full" | grep -c 'hasReadColorBufferDma' || true)"
           echo '=== HOST EMULATOR DMA / FEATURE LINES ==='
-          grep -E -i 'GLDirectMem|HasSharedSlotsHostMemoryAllocator|GLESDynamicVersion|read_color_buffer_dma|ReadColor|DMA|gfxstream|swangle' "$hostlog" 2>/dev/null | tail -n 700 || true
+          cat "$hostout" "$hosterr" 2>/dev/null | grep -E -i 'GLDirectMem|HasSharedSlotsHostMemoryAllocator|GLESDynamicVersion|read_color_buffer_dma|ReadColor|DMA|gfxstream|swangle' | tail -n 700 || true
           echo '=== FINAL CORE STATE ==='
           echo "BOOT=$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1 || true)"
           echo "SS=$($adb -s "$serial" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
