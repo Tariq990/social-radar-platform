@@ -16,7 +16,7 @@ concurrency:
 jobs:
   prove:
     runs-on: [self-hosted, Linux]
-    timeout-minutes: 15
+    timeout-minutes: 18
     env:
       PKG: com.mrscrap.socialradar
       EXPECTED_VERSION_CODE: '154'
@@ -105,7 +105,7 @@ jobs:
             const base='https://mr-scrap-api-live.onrender.com';
             const j=async r=>{try{return await r.json()}catch{return null}};
             const [rr,ar,sr]=await Promise.all([fetch(base+'/api/rules',{credentials:'include'}),fetch(base+'/api/alerts',{credentials:'include'}),fetch(base+'/api/sources',{credentials:'include'})]);
-            if(!rr.ok||!ar.ok||!sr.ok)return{stage:'backend',rulesHttp:rr.status,alertsHttp:ar.status,sourcesHttp:sr.status};
+            if(!rr.ok||!ar.ok||!sr.ok)return{stage:'backend'};
             const rules=await j(rr),alerts=await j(ar),sources=await j(sr);
             const enabled=(Array.isArray(rules)?rules:[]).filter(x=>x&&Boolean(x.enabled));
             const globalEnabled=enabled.filter(x=>{const ids=Array.isArray(x.source_ids)?x.source_ids:Array.isArray(x.sourceIds)?x.sourceIds:[];return ids.length===0}).length;
@@ -113,8 +113,7 @@ jobs:
             const source=(Array.isArray(sources)?sources:[]).find(x=>x&&x.platform==='facebook'&&!Boolean(x.is_paused??x.isPaused)&&(x.connector_type||x.connectorType||'device_session')==='device_session');
             const leftovers=(Array.isArray(sources)?sources:[]).filter(x=>typeof x?.external_id==='string'&&x.external_id.startsWith('wmprobe_emulator_')).length;
             const cap=globalThis.Capacitor?.Plugins?.AuthenticatedSocialSession;
-            if(!source)return{stage:'source',enabledRules:enabled.length,globalEnabled,alertCount,leftovers,sourceFound:false};
-            if(!cap)return{stage:'plugin',enabledRules:enabled.length,globalEnabled,alertCount,leftovers,sourceFound:true};
+            if(!source||!cap)return{stage:'prereq',enabledRules:enabled.length,globalEnabled,alertCount,leftovers,sourceFound:Boolean(source)};
             const st=await cap.status();
             const facebook=st?.facebookConnected===true||(st?.facebookConnected==null&&st?.connected===true);
             const auth=await cap.getBackendAuth();
@@ -147,11 +146,31 @@ jobs:
           PS
           /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
 
-      - name: Resolve only the newly scheduled probe job and capture baseline
+      - name: Wait for initial scheduled probe cycle to settle
         shell: bash
         run: |
           set -euo pipefail
-          sleep 3
+          ps1="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-workmanager-settle.ps1"
+          cat > "$ps1" <<'PS'
+          $ErrorActionPreference='Stop'
+          function Targets{for($i=0;$i-lt 30;$i++){try{$t=@(Invoke-RestMethod -Uri 'http://127.0.0.1:9225/json/list' -TimeoutSec 2);if($t.Count-gt 0){return $t}}catch{};Start-Sleep -Milliseconds 250};throw'targets unavailable'}
+          function AppTarget{$a=@(Targets|Where-Object{$_.type-eq'page'-and[string]$_.url-like'https://localhost*'}|Select-Object -First 1);if($a.Count-eq 0){throw'app target missing'};$a[0]}
+          function Eval([string]$raw,[string]$expr,[int]$seconds=120){$u=[Uri]$raw;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($seconds));$ws.ConnectAsync([Uri]('ws://127.0.0.1:9225'+$u.PathAndQuery),$cts.Token).GetAwaiter().GetResult()|Out-Null;$p=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 8;$b=[Text.Encoding]::UTF8.GetBytes($p);$ws.SendAsync([ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null;$buf=New-Object byte[] 65536;$sb=[Text.StringBuilder]::new();while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id-ne 1){continue};if($m.result.exceptionDetails){throw'runtime eval exception'};return $m.result.result.value}}
+          $app=AppTarget
+          $expr=@'
+          (async()=>{const base='https://mr-scrap-api-live.onrender.com';const id=localStorage.getItem('mrscrap_wm_probe_source_id')||'';if(!id)return{ok:false};for(let i=0;i<90;i++){const r=await fetch(base+'/api/sources',{credentials:'include'});let s=null;try{s=await r.json()}catch{};const p=(Array.isArray(s)?s:[]).find(x=>x?.id===id);if(r.ok&&p&&(p.last_checked_at||p.lastCheckedAt))return{ok:true,alerts:0};await new Promise(x=>setTimeout(x,1000))}return{ok:false}})()
+          '@
+          $r=Eval ([string]$app.webSocketDebuggerUrl) $expr 120
+          Write-Output ('INITIAL_PROBE_CYCLE_SETTLED='+$(if($r.ok){'1'}else{'0'}))
+          if(!$r.ok){exit 233}
+          Write-Output WORKMANAGER_INITIAL_CYCLE_GATE=PASS
+          PS
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
+
+      - name: Resolve only the probe periodic job and capture post-cycle baseline
+        shell: bash
+        run: |
+          set -euo pipefail
           jobs="$RUNNER_TEMP/mrscrap-jobs-after.txt"
           $ADB -s "$SERIAL" shell dumpsys jobscheduler 2>/dev/null | tr -d '\r' > "$jobs"
           grep -E "${PKG}/androidx\.work\.impl\.background\.systemjob\.SystemJobService" "$jobs" | sed -n 's/.*\/\([0-9][0-9]*\):.*/\1/p' | sort -un > "$RUNNER_TEMP/mrscrap-job-ids-after.txt"
@@ -162,31 +181,32 @@ jobs:
           echo "PROBE_WORKMANAGER_JOB_ID=$job_id"
           echo "WM_JOB_ID=$job_id" >> "$GITHUB_ENV"
           line="$($ADB -s "$SERIAL" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' | grep 'last_checked_at' | head -n1 || true)"
-          if [ -n "$line" ]; then before="$(printf '%s' "$line" | sha256sum | awk '{print $1}')"; else before='NONE'; fi
-          echo "LAST_CHECKED_BASELINE_PRESENT=$([ "$before" = NONE ] && echo 0 || echo 1)"
+          test -n "$line"
+          before="$(printf '%s' "$line" | sha256sum | awk '{print $1}')"
           echo "WM_BEFORE_HASH=$before" >> "$GITHUB_ENV"
+          echo LAST_CHECKED_BASELINE_PRESENT=1
           echo WORKMANAGER_PROBE_JOB_RESOLUTION_GATE=PASS
 
-      - name: Background app then force only the isolated probe job
+      - name: Kill settled app process without force-stop then force probe job
         shell: bash
         run: |
           set -euo pipefail
           $ADB -s "$SERIAL" logcat -c >/dev/null 2>&1 || true
           $ADB -s "$SERIAL" shell input keyevent 3 >/dev/null 2>&1 || true
-          sleep 2
-          $ADB -s "$SERIAL" shell am kill "$PKG" >/dev/null 2>&1 || true
-          for i in $(seq 1 15); do
+          sleep 3
+          absent=0
+          for i in $(seq 1 30); do
             pid="$($ADB -s "$SERIAL" shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"
-            [ -z "$pid" ] && break
+            if [ -z "$pid" ]; then absent=1; break; fi
+            $ADB -s "$SERIAL" shell am kill "$PKG" >/dev/null 2>&1 || true
             sleep 1
           done
-          pid="$($ADB -s "$SERIAL" shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"
-          echo "APP_PROCESS_ABSENT_BEFORE_JOB=$([ -z "$pid" ] && echo 1 || echo 0)"
-          test -z "$pid"
+          echo "APP_PROCESS_ABSENT_BEFORE_FORCED_JOB=$absent"
+          test "$absent" -eq 1
           $ADB -s "$SERIAL" shell cmd jobscheduler run -f "$PKG" "$WM_JOB_ID" >/dev/null
           echo WORKMANAGER_PROBE_FORCE_REQUESTED=1
 
-      - name: Prove background worker completed a real 2xx ingestion
+      - name: Prove forced worker restarted process and completed second 2xx ingestion
         shell: bash
         run: |
           set -euo pipefail
@@ -200,15 +220,15 @@ jobs:
             if [ "$now" != NONE ] && [ "$now" != "$WM_BEFORE_HASH" ]; then changed=1; break; fi
             sleep 1
           done
-          echo "APP_PROCESS_STARTED_BY_BACKGROUND_JOB=$started"
-          echo "LAST_CHECKED_CHANGED=$changed"
+          echo "APP_PROCESS_STARTED_BY_FORCED_BACKGROUND_JOB=$started"
+          echo "LAST_CHECKED_CHANGED_AFTER_FORCED_JOB=$changed"
           if [ "$changed" -ne 1 ]; then
             echo '=== SAFE BACKGROUND COLLECTOR TRACE ==='
             $ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' | tail -n 180 || true
           fi
           test "$started" -eq 1
           test "$changed" -eq 1
-          echo WORKMANAGER_BACKGROUND_2XX_INGEST_GATE=PASS
+          echo WORKMANAGER_FORCED_BACKGROUND_2XX_INGEST_GATE=PASS
 
       - name: Verify backend state then clean isolated probe source and work
         if: always()
@@ -228,7 +248,7 @@ jobs:
           ps1="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-workmanager-cleanup.ps1"
           cat > "$ps1" <<'PS'
           $ErrorActionPreference='Stop'
-          function Targets{for($i=0;$i-lt 30;$i++){try{$t=@(Invoke-RestMethod -Uri 'http://127.0.0.1:9226/json/list' -TimeoutSec 2);if($t.Count-gt 0){return $t}}catch{};Start-Sleep -Milliseconds 250};throw 'targets unavailable'}
+          function Targets{for($i=0;$i-lt 30;$i++){try{$t=@(Invoke-RestMethod -Uri 'http://127.0.0.1:9226/json/list' -TimeoutSec 2);if($t.Count-gt 0){return $t}}catch{};Start-Sleep -Milliseconds 250};throw'targets unavailable'}
           function AppTarget{$a=@(Targets|Where-Object{$_.type-eq'page'-and[string]$_.url-like'https://localhost*'}|Select-Object -First 1);if($a.Count-eq 0){throw'app target missing'};$a[0]}
           function Eval([string]$raw,[string]$expr,[int]$seconds=90){$u=[Uri]$raw;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($seconds));$ws.ConnectAsync([Uri]('ws://127.0.0.1:9226'+$u.PathAndQuery),$cts.Token).GetAwaiter().GetResult()|Out-Null;$p=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 8;$b=[Text.Encoding]::UTF8.GetBytes($p);$ws.SendAsync([ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null;$buf=New-Object byte[] 65536;$sb=[Text.StringBuilder]::new();while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id-ne 1){continue};if($m.result.exceptionDetails){throw'runtime eval exception'};return $m.result.result.value}}
           $app=AppTarget
@@ -269,5 +289,6 @@ jobs:
           $ADB -s "$SERIAL" forward --remove tcp:9225 >/dev/null 2>&1 || true
           $ADB -s "$SERIAL" forward --remove tcp:9226 >/dev/null 2>&1 || true
           rm -f "/mnt/c/Users/${WIN_USER:-}/AppData/Local/Temp/mrscrap-workmanager-probe.ps1" 2>/dev/null || true
+          rm -f "/mnt/c/Users/${WIN_USER:-}/AppData/Local/Temp/mrscrap-workmanager-settle.ps1" 2>/dev/null || true
           rm -f "/mnt/c/Users/${WIN_USER:-}/AppData/Local/Temp/mrscrap-workmanager-cleanup.ps1" 2>/dev/null || true
           echo ANDROID_WORKMANAGER_EMULATOR_PREPROOF=PASS
