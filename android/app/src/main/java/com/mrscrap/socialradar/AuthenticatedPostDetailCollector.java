@@ -4,6 +4,7 @@ import android.content.Context;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.view.View;
 import android.webkit.CookieManager;
 import android.webkit.WebResourceRequest;
@@ -26,11 +27,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * Raw cookies, browser storage and credentials never cross the native bridge.
  */
 final class AuthenticatedPostDetailCollector {
-    private static final long TIMEOUT_MS = 40_000;
+    private static final long TIMEOUT_MS = 75_000;
     private static final long FIRST_DELAY_MS = 450;
     private static final long RETRY_DELAY_MS = 850;
     private static final int MAX_STANDARD_ATTEMPTS = 10;
     private static final int MAX_ALL_ATTEMPTS = 18;
+    private static final String TAG = "MRSCRAP_DETAIL";
 
     private AuthenticatedPostDetailCollector() {}
 
@@ -83,6 +85,8 @@ final class AuthenticatedPostDetailCollector {
             settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
             settings.setLoadsImagesAutomatically(true);
             settings.setOffscreenPreRaster(true);
+            settings.setUserAgentString("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36");
+            Log.i(TAG, "event=user_agent mode=desktop");
 
             int viewportWidth = Math.max(360, context.getResources().getDisplayMetrics().widthPixels);
             int viewportHeight = Math.max(740, context.getResources().getDisplayMetrics().heightPixels);
@@ -112,7 +116,14 @@ final class AuthenticatedPostDetailCollector {
             final Runnable[] runner = new Runnable[1];
             runner[0] = () -> {
                 if (finished.get()) return;
+                String currentUrl = webView.getUrl();
+                if (currentUrl == null || !AuthenticatedWebCollector.isAllowedSocialUrl(currentUrl)) {
+                    Log.i(TAG, "event=wait_for_social_page");
+                    main.postDelayed(runner[0], RETRY_DELAY_MS);
+                    return;
+                }
                 attempts[0]++;
+                Log.i(TAG, "event=extract_start attempt=" + attempts[0] + " progress=" + webView.getProgress());
 
                 if (photoDetailMode && !photoOpened[0]) {
                     webView.evaluateJavascript(photoClickScript(url), clickedValue -> {
@@ -156,6 +167,9 @@ final class AuthenticatedPostDetailCollector {
                                 int count = comments == null ? 0 : comments.length();
                                 JSONObject diagnostics = result.optJSONObject("diagnostics");
                                 boolean hasMore = diagnostics != null && diagnostics.optBoolean("hasMoreControls", false);
+                                JSONArray media = result.optJSONArray("media");
+                                int mediaCount = media == null ? 0 : media.length();
+                                Log.i(TAG, "event=eval_result attempt=" + attempts[0] + " comments=" + count + " media=" + mediaCount + " hasMore=" + hasMore);
 
                                 if (count == lastCommentCount[0]) stablePasses[0]++;
                                 else stablePasses[0] = 0;
@@ -195,13 +209,20 @@ final class AuthenticatedPostDetailCollector {
             webView.setWebViewClient(new WebViewClient() {
                 private void schedule(long delay) {
                     if (finished.get()) return;
-                    main.removeCallbacks(runner[0]);
                     main.postDelayed(runner[0], delay);
                 }
 
                 @Override
                 public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                     return !AuthenticatedWebCollector.isAllowedSocialUrl(request.getUrl().toString());
+                }
+
+                @Override
+                public void onPageStarted(WebView view, String loadedUrl, android.graphics.Bitmap favicon) {
+                    super.onPageStarted(view, loadedUrl, favicon);
+                    if (!AuthenticatedWebCollector.isAllowedSocialUrl(loadedUrl) || finished.get()) return;
+                    Log.i(TAG, "event=page_started progress=" + view.getProgress());
+                    schedule(3_000);
                 }
 
                 @Override
@@ -217,7 +238,9 @@ final class AuthenticatedPostDetailCollector {
                 }
             });
 
+            Log.i(TAG, "event=load_start");
             webView.loadUrl(targetUrl);
+            main.postDelayed(runner[0], 3_000);
         });
     }
 
