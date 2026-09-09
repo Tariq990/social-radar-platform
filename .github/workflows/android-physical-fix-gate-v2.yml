@@ -84,14 +84,54 @@ jobs:
           echo "ANDROID_SDK_ROOT=$sdk" >> "$GITHUB_ENV"
           printf 'sdk.dir=%s\n' "$sdk" > android/local.properties
 
-      - name: Setup Gradle 8.13
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.13'
-          cache-read-only: true
+      - name: Resolve persistent Gradle 8.13
+        shell: bash
+        run: |
+          set -euo pipefail
+          persistent_root="$HOME/.local/share/mrscrap-gradle"
+          persistent_bin="$persistent_root/gradle-8.13/bin/gradle"
+          action_bin="${RUNNER_TEMP:-/home/tarik/actions-runnerr/_work/_temp}/.gradle-actions/gradle-installations/installs/gradle-8.13/bin/gradle"
+          cache_dir="$HOME/.cache/mrscrap-gradle"
+          zip="$cache_dir/gradle-8.13-bin.zip"
+
+          selected=""
+          for candidate in "$persistent_bin" "$action_bin"; do
+            if [ -x "$candidate" ]; then
+              selected="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$selected" ] && command -v gradle >/dev/null 2>&1; then
+            candidate="$(command -v gradle)"
+            if "$candidate" --version 2>/dev/null | grep -q 'Gradle 8.13'; then
+              selected="$candidate"
+            fi
+          fi
+
+          if [ -z "$selected" ]; then
+            mkdir -p "$cache_dir" "$persistent_root"
+            echo "GRADLE_CACHE_MISS_DOWNLOADING_ONCE"
+            rm -f "$zip.part"
+            curl --fail --location \
+              --connect-timeout 20 --max-time 420 \
+              --retry 3 --retry-delay 2 --retry-all-errors \
+              -o "$zip.part" \
+              https://downloads.gradle.org/distributions/gradle-8.13-bin.zip
+            mv "$zip.part" "$zip"
+            rm -rf "$persistent_root/gradle-8.13"
+            unzip -q -o "$zip" -d "$persistent_root"
+            selected="$persistent_bin"
+          else
+            echo "GRADLE_CACHE_HIT"
+          fi
+
+          test -x "$selected"
+          "$selected" --version | head -n 8
+          echo "GRADLE_BIN=$selected" >> "$GITHUB_ENV"
 
       - name: Compile signed debug APK
-        run: gradle -p android :app:assembleDebug --stacktrace
+        run: "$GRADLE_BIN" -p android :app:assembleDebug --stacktrace
 
       - name: Commit validated production fix on test branch
         shell: bash
