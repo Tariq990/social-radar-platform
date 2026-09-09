@@ -142,9 +142,11 @@ final class FacebookGraphqlWebViewCollector {
                         int nodes = diagnostics == null ? 0 : diagnostics.optInt("nodes", 0);
                         int candidatesTried = diagnostics == null ? 0 : diagnostics.optInt("candidatesTried", 0);
                         int winningCandidate = diagnostics == null ? -1 : diagnostics.optInt("winningCandidate", -1);
+                        int resolverPattern = diagnostics == null ? -99 : diagnostics.optInt("resolverPattern", -99);
                         Log.i(TAG, "event=graphql_result posts=" + postCount +
                             " pages=" + pages + " nodes=" + nodes +
-                            " candidates=" + candidatesTried + " winner=" + winningCandidate);
+                            " candidates=" + candidatesTried + " winner=" + winningCandidate +
+                            " resolver=" + resolverPattern);
                         if (postCount <= 0) {
                             finishError(main, timeout[0], webView, finished, callback,
                                 "GRAPHQL_NO_POSTS|pages=" + pages + "|nodes=" + nodes);
@@ -205,7 +207,11 @@ final class FacebookGraphqlWebViewCollector {
             Uri uri = Uri.parse(rawUrl);
             String host = uri.getHost();
             if (host == null || host.equalsIgnoreCase("fb.watch")) return rawUrl;
-            return uri.buildUpon().authority("www.facebook.com").build().toString();
+            Uri.Builder builder = uri.buildUpon().authority("www.facebook.com");
+            if (uri.getQueryParameter("locale") == null) {
+                builder.appendQueryParameter("locale", "en_US");
+            }
+            return builder.build().toString();
         } catch (Exception ignored) {
             return rawUrl;
         }
@@ -270,77 +276,54 @@ final class FacebookGraphqlWebViewCollector {
               const abs = (raw) => { try { return new URL(raw, location.href).href; } catch (_) { return ''; } };
               const requested = abs(REQUESTED);
               const sourceUrl = requested || abs(location.href);
-              let sourceId = '';
-              const sourceCandidates = [];
-              const numericId = (raw) => {
-                const value = String(raw || '').trim();
-                if (value.length < 5 || value.length > 32) return '';
-                return [...value].every(ch => ch >= '0' && ch <= '9') ? value : '';
-              };
-              const addCandidate = (raw) => {
-                const value = numericId(raw);
-                if (!value || sourceCandidates.includes(value) || sourceCandidates.length >= 12) return;
-                sourceCandidates.push(value);
-              };
-              try {
-                const u = new URL(sourceUrl);
-                addCandidate(u.searchParams.get('id') || '');
-              } catch (_) {}
-
-              const html = document.documentElement?.innerHTML || '';
-              const scanMarker = (raw, marker, maxHits = 3) => {
-                const text = String(raw || '');
-                let from = 0, hits = 0;
-                while (hits < maxHits && sourceCandidates.length < 12) {
-                  const at = text.indexOf(marker, from);
-                  if (at < 0) break;
-                  let pos = at + marker.length;
-                  const end = Math.min(text.length, pos + 80);
-                  while (pos < end && !(text[pos] >= '0' && text[pos] <= '9')) pos++;
-                  let digits = '';
-                  while (pos < end && text[pos] >= '0' && text[pos] <= '9') digits += text[pos++];
-                  if (numericId(digits)) { addCandidate(digits); hits++; }
-                  from = at + marker.length;
-                }
-              };
-
-              for (const meta of [...document.querySelectorAll('meta[property="al:ios:url"], meta[property="al:android:url"]')]) {
-                const content = String(meta?.content || '');
-                scanMarker(content, 'fb://profile/', 2);
-                scanMarker(content, 'fb://page/', 2);
-              }
-              for (const raw of [
-                document.querySelector('link[rel="canonical"]')?.href || '',
-                document.querySelector('meta[property="og:url"]')?.content || '',
-                requested,
-                location.href
-              ]) {
-                try { addCandidate(new URL(raw, location.href).searchParams.get('id') || ''); } catch (_) {}
-              }
-
               let requestedHandle = '';
               try {
                 const parts = new URL(sourceUrl).pathname.split('/').filter(Boolean);
                 if (parts[0] && !['profile.php','groups'].includes(parts[0].toLowerCase())) requestedHandle = parts[0].replace('@','');
               } catch (_) {}
-              const targetMarkers = ['fb://profile/', 'fb://page/', 'profile_id', 'pageID', 'userID', 'actorID'];
-              if (requestedHandle) {
-                let from = 0;
-                for (let occurrence = 0; occurrence < 8 && sourceCandidates.length < 12; occurrence++) {
-                  const at = html.indexOf(requestedHandle, from);
-                  if (at < 0) break;
-                  const windowText = html.slice(Math.max(0, at - 1200), Math.min(html.length, at + requestedHandle.length + 1800));
-                  for (const marker of targetMarkers) scanMarker(windowText, marker, 2);
-                  from = at + requestedHandle.length;
+
+              let sourceId = '';
+              let resolverPattern = -1;
+              const numericId = (raw) => {
+                const value = String(raw || '').trim();
+                if (value.length < 5 || value.length > 32) return '';
+                return [...value].every(ch => ch >= '0' && ch <= '9') ? value : '';
+              };
+              try {
+                const u = new URL(sourceUrl);
+                const direct = numericId(u.searchParams.get('id') || '');
+                if (direct) { sourceId = direct; resolverPattern = -2; }
+              } catch (_) {}
+
+              // Semantic port of facebook-graphql-scraper/client.py::get_page_id:
+              // first matching pattern wins on the locale=en_US Facebook document.
+              const html = document.documentElement?.innerHTML || '';
+              const firstDigitsAfter = (text, marker) => {
+                const value = String(text || '');
+                const at = value.indexOf(marker);
+                if (at < 0) return '';
+                let pos = at + marker.length;
+                let digits = '';
+                while (pos < value.length && value[pos] >= '0' && value[pos] <= '9') digits += value[pos++];
+                return numericId(digits);
+              };
+              if (!sourceId) {
+                const markers = [
+                  'fb://profile/',
+                  'fb://page/',
+                  '"pageID":"',
+                  '"id":"',
+                  'profile_id='
+                ];
+                for (let i = 0; i < markers.length; i++) {
+                  const candidate = firstDigitsAfter(html, markers[i]);
+                  if (candidate) { sourceId = candidate; resolverPattern = i; break; }
                 }
               }
-              if (sourceCandidates.length < 2) {
-                for (const marker of ['fb://profile/', 'fb://page/', 'profile_id', 'pageID']) scanMarker(html, marker, 4);
-              }
-              if (sourceCandidates.length === 0) {
+              if (!sourceId) {
                 return JSON.stringify({pending:true, diagnostics:{collector:'graphql', surface:host, waitingFor:'source_id'}});
               }
-              sourceId = sourceCandidates[0];
+              const sourceCandidates = [sourceId];
 
               const cleanTitle = (raw) => String(raw || '').replace(/\\s*[|·-]\\s*Facebook\\s*$/i, '').trim();
               const title = cleanTitle(
@@ -532,7 +515,7 @@ final class FacebookGraphqlWebViewCollector {
                   result:{
                     source:{platform:'facebook', externalId:stableExternalId, url:sourceUrl, displayName:title || (handle ? '@'+handle : 'Facebook'), handle, avatarUrl:avatar, visibilityType:'authenticated'},
                     posts:posts.slice(0, LIMIT),
-                    diagnostics:{collector:'graphql', surface:host, pages, nodes, candidatesTried, winningCandidate}
+                    diagnostics:{collector:'graphql', surface:host, pages, nodes, candidatesTried, winningCandidate, resolverPattern}
                   }
                 };
               })().catch((error) => {
