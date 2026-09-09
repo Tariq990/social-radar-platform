@@ -10,47 +10,65 @@ permissions:
   contents: read
 
 jobs:
-  prove-api36-on-emulator-37:
+  prove-read-color-buffer-dma:
     runs-on: [self-hosted, Linux]
     timeout-minutes: 8
     steps:
-      - name: A/B API 36 on local emulator 37.1.11
+      - name: Restore required DMA capability and prove Android UI
         shell: bash
         run: |
           set -u
           win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
           sdk="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk"
           sdk_win="C:\\Users\\${win_user}\\AppData\\Local\\MRSCRAP\\AndroidSdk"
-          emu_win="${sdk_win}\\emulator-37.1.11-backup\\emulator.exe"
-          emu="${sdk}/emulator-37.1.11-backup/emulator.exe"
           adb="${sdk}/platform-tools/adb.exe"
+          emu="${sdk}/emulator/emulator.exe"
           features="/mnt/c/Users/${win_user}/.android/advancedFeatures.ini"
           temp="/mnt/c/Users/${win_user}/AppData/Local/Temp/MRSCRAP"
-          hostout="${temp}/emu37-ab-host.out.log"
-          hosterr="${temp}/emu37-ab-host.err.log"
+          hostout="${temp}/dma-required-host.out.log"
+          hosterr="${temp}/dma-required-host.err.log"
           apk="/home/tarik/actions-runnerr/_work/SCRAP-APP/SCRAP-APP/android/app/build/outputs/apk/debug/app-debug.apk"
           pkg="com.mrscrap.socialradar"
           activity="com.mrscrap.socialradar.MainActivity"
           mkdir -p "$temp"
 
-          echo '=== A/B INPUTS ==='
-          [ -f "$emu" ] || { echo EMULATOR_37_PRESENT=0; exit 2; }
-          "$emu" -version 2>&1 | tr -d '\r' | head -n 2 || true
-          grep -E -i '^(GLDMA|GLDirectMem|GLESDynamicVersion|HasSharedSlotsHostMemoryAllocator)[[:space:]]*=' "$features" || true
+          echo '=== RESTORE IMAGE-COMPATIBLE FEATURE DEFAULTS ==='
+          backup="${features}.mrscrap-pre-read-color-buffer-restore"
+          if [ -f "$features" ] && [ ! -f "$backup" ]; then
+            cp "$features" "$backup"
+            echo "FEATURE_BACKUP_CREATED=$backup"
+          fi
+          tmp="${features}.mrscrap-restore-tmp"
+          if [ -f "$features" ]; then
+            grep -Eiv '^[[:space:]]*(GLDMA|GLDirectMem|HasSharedSlotsHostMemoryAllocator)[[:space:]]*=' "$features" > "$tmp" || true
+          else
+            : > "$tmp"
+          fi
+          cat "$tmp" > "$features"
+          rm -f "$tmp"
+          echo '--- user advancedFeatures.ini after restore ---'
+          cat "$features" 2>/dev/null || true
+          if grep -Eiq '^[[:space:]]*(GLDMA|GLDirectMem|HasSharedSlotsHostMemoryAllocator)[[:space:]]*=' "$features"; then
+            echo STALE_DMA_OVERRIDE=1
+            exit 2
+          fi
+          echo STALE_DMA_OVERRIDE=0
 
           "$adb" kill-server >/dev/null 2>&1 || true
-          ps1="${temp}/emu37-ab-start.ps1"
+          ps1="${temp}/dma-required-start.ps1"
           cat > "$ps1" <<POWERSHELL
           \$ErrorActionPreference='Stop'
+          \$sdk='${sdk_win}'
           @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-            \$cmd=[string]\$_.CommandLine
-            (\$cmd -like '*@test_avd*') -or (\$_.Name -in @('emulator.exe','qemu-system-x86_64.exe','qemu-system-x86_64-headless.exe'))
+            \$cmd=[string]\$_.CommandLine; \$path=[string]\$_.ExecutablePath
+            (\$cmd -like '*@test_avd*') -or (\$path -like (\$sdk+'\\emulator\\*')) -or
+            (\$_.Name -in @('emulator.exe','qemu-system-x86_64.exe','qemu-system-x86_64-headless.exe'))
           }) | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }
           Start-Sleep -Seconds 3
-          \$out='C:\\Users\\${win_user}\\AppData\\Local\\Temp\\MRSCRAP\\emu37-ab-host.out.log'
-          \$err='C:\\Users\\${win_user}\\AppData\\Local\\Temp\\MRSCRAP\\emu37-ab-host.err.log'
+          \$out='C:\\Users\\${win_user}\\AppData\\Local\\Temp\\MRSCRAP\\dma-required-host.out.log'
+          \$err='C:\\Users\\${win_user}\\AppData\\Local\\Temp\\MRSCRAP\\dma-required-host.err.log'
           Remove-Item -Force \$out,\$err -ErrorAction SilentlyContinue
-          \$exe='${emu_win}'
+          \$exe=Join-Path \$sdk 'emulator\\emulator.exe'
           \$args='@test_avd -sysdir ${sdk_win}\\system-images\\android-36\\google_apis\\x86_64 -no-audio -no-boot-anim -no-snapshot -gpu swangle_indirect -no-window -verbose'
           \$cmd='cmd.exe /d /s /c ""' + \$exe + '" ' + \$args + ' 1>"' + \$out + '" 2>"' + \$err + '""'
           \$r=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=\$cmd}
@@ -68,8 +86,8 @@ jobs:
           done
           if [ -z "$serial" ]; then
             echo EMULATOR_DEVICE_FOUND=0
-            tail -n 200 "$hostout" 2>/dev/null || true
-            tail -n 200 "$hosterr" 2>/dev/null || true
+            tail -n 250 "$hostout" 2>/dev/null || true
+            tail -n 250 "$hosterr" 2>/dev/null || true
             exit 10
           fi
           echo "SERIAL=$serial"
@@ -81,15 +99,24 @@ jobs:
             sleep 5
           done
           echo "BOOT_AFTER_WAIT=$boot"
-          [ "$boot" = '1' ] || { tail -n 250 "$hosterr" 2>/dev/null || true; exit 11; }
+          [ "$boot" = '1' ] || exit 11
 
-          echo '=== EMULATOR 37 EFFECTIVE FEATURES ==='
+          echo '=== EFFECTIVE HOST FEATURES ==='
           grep -E -i "Android emulator version|Feature '(GLDMA|GLDirectMem|GLESDynamicVersion|HasSharedSlotsHostMemoryAllocator)'|gfxstreamFeature:(GlDma|GlDma2|GlDirectMem|GlesDynamicVersion|HasSharedSlotsHostMemoryAllocator|HostComposition)" "$hostout" "$hosterr" 2>/dev/null | tail -n 180 || true
+          direct="$(cat "$hostout" "$hosterr" 2>/dev/null | sed -nE 's/.*gfxstreamFeature:GlDirectMem[[:space:]]*=[[:space:]]*([01]).*/\1/p' | tail -n1)"
+          shared="$(cat "$hostout" "$hosterr" 2>/dev/null | sed -nE 's/.*gfxstreamFeature:HasSharedSlotsHostMemoryAllocator[[:space:]]*=[[:space:]]*([01]).*/\1/p' | tail -n1)"
+          echo "EFFECTIVE_GL_DIRECT_MEM=${direct:-unknown}"
+          echo "EFFECTIVE_SHARED_SLOTS=${shared:-unknown}"
+          if [ "$direct" != '1' ] || [ "$shared" != '1' ]; then
+            echo READ_COLOR_BUFFER_DMA_PREREQUISITES=FAIL
+            exit 13
+          fi
+          echo READ_COLOR_BUFFER_DMA_PREREQUISITES=PASS
 
           ss0="$($adb -s "$serial" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
           sf0="$($adb -s "$serial" shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true)"
           echo "BASELINE_SS=$ss0 BASELINE_SF=$sf0"
-          [ -n "$ss0" ] && [ -n "$sf0" ] || exit 12
+          [ -n "$ss0" ] && [ -n "$sf0" ] || exit 14
           "$adb" -s "$serial" logcat -b all -c >/dev/null 2>&1 || "$adb" -s "$serial" logcat -c >/dev/null 2>&1 || true
 
           echo '=== SETTINGS CONTROL 60S ==='
@@ -106,17 +133,16 @@ jobs:
           done
           slog="$($adb -s "$serial" logcat -b all -d -v threadtime 2>/dev/null | tr -d '\r' || true)"
           asserts="$(printf '%s\n' "$slog" | grep -c 'hasReadColorBufferDma' || true)"
-          printf '%s\n' "$slog" | grep -E -i 'mapper\.ranchu|GoldfishMapper|RegionSampling|hasReadColorBufferDma|SurfaceFlinger.*(fatal|abort|crash)' | tail -n 400 || true
-          echo "SETTINGS_ASSERT_COUNT=$asserts"
-          echo "SETTINGS_STABLE=$stable"
-          if [ "$stable" != 1 ] || [ "$asserts" != 0 ]; then
-            echo EMULATOR_37_SETTINGS_GATE=FAIL
+          printf '%s\n' "$slog" | grep -E -i 'mapper\.ranchu|GoldfishMapper|RegionSampling|hasReadColorBufferDma|SurfaceFlinger.*(fatal|abort|crash)' | tail -n 450 || true
+          echo "SETTINGS_ASSERT_COUNT=$asserts SETTINGS_STABLE=$stable"
+          if [ "$stable" != '1' ] || [ "$asserts" != '0' ]; then
+            echo SETTINGS_STABILITY_GATE=FAIL
             exit 20
           fi
-          echo EMULATOR_37_SETTINGS_GATE=PASS
+          echo SETTINGS_STABILITY_GATE=PASS
 
           echo '=== APK / MAIN ACTIVITY ==='
-          [ -s "$apk" ] || { echo APK_PRESENT=0; exit 30; }
+          if [ ! -s "$apk" ]; then echo APK_PRESENT=0; exit 30; fi
           echo "APK_PRESENT=1 SIZE=$(stat -c '%s' "$apk")"
           installed="$($adb -s "$serial" shell pm path "$pkg" 2>/dev/null | tr -d '\r' | tail -n1 || true)"
           if [ -z "$installed" ]; then
@@ -125,7 +151,10 @@ jobs:
           else
             echo "PACKAGE_INSTALL_REQUIRED=0 CURRENT_PATH=$installed"
           fi
-          "$adb" -s "$serial" shell pm path "$pkg" 2>/dev/null | tr -d '\r'
+          after_install="$($adb -s "$serial" shell pm path "$pkg" 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+          echo "PACKAGE_PATH_AFTER_INSTALL=$after_install"
+          [ -n "$after_install" ] || exit 31
+
           "$adb" -s "$serial" logcat -b all -c >/dev/null 2>&1 || true
           "$adb" -s "$serial" shell am force-stop "$pkg" >/dev/null 2>&1 || true
           "$adb" -s "$serial" shell am start -W -n "$pkg/$activity" 2>&1 | tr -d '\r' || true
@@ -141,8 +170,18 @@ jobs:
           done
           alog="$($adb -s "$serial" logcat -b all -d -v threadtime 2>/dev/null | tr -d '\r' || true)"
           app_asserts="$(printf '%s\n' "$alog" | grep -c 'hasReadColorBufferDma' || true)"
-          printf '%s\n' "$alog" | grep -E -i 'mapper\.ranchu|GoldfishMapper|RegionSampling|hasReadColorBufferDma|FATAL EXCEPTION|ANR in com\.mrscrap\.socialradar' | tail -n 400 || true
+          printf '%s\n' "$alog" | grep -E -i 'mapper\.ranchu|GoldfishMapper|RegionSampling|hasReadColorBufferDma|FATAL EXCEPTION|ANR in com\.mrscrap\.socialradar' | tail -n 450 || true
           echo "APP_ASSERT_COUNT=$app_asserts APP_STABLE=$app_stable APP_PID=$app_pid"
-          if [ "$app_stable" != 1 ] || [ "$app_asserts" != 0 ]; then echo EMULATOR_37_APP_GATE=FAIL; exit 40; fi
-          echo EMULATOR_37_APP_GATE=PASS
+          if [ "$app_stable" != '1' ] || [ "$app_asserts" != '0' ]; then
+            echo APP_STABILITY_GATE=FAIL
+            exit 40
+          fi
+          echo APP_STABILITY_GATE=PASS
+          echo '=== FINAL ==='
+          echo "BOOT=$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+          echo "SS=$($adb -s "$serial" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
+          echo "SF=$($adb -s "$serial" shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true)"
+          echo "ACTIVITY=$($adb -s "$serial" shell service check activity 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+          echo "PACKAGE=$($adb -s "$serial" shell service check package 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+          echo "APP_PID=$($adb -s "$serial" shell pidof "$pkg" 2>/dev/null | tr -d '\r' || true)"
           echo ANDROID_UI_PROOF_COMPLETE=1
