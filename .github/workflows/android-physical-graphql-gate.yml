@@ -1,0 +1,165 @@
+name: Physical Android GraphQL Gate
+
+on:
+  push:
+    branches:
+      - test/android-physical-fix-20260909
+    paths:
+      - .github/workflows/android-physical-graphql-gate.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: physical-android-graphql
+  cancel-in-progress: true
+
+jobs:
+  validate-install-capture:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 25
+    env:
+      VITE_API_BASE_URL: https://mr-scrap-api-live.onrender.com
+      APP_MODE: production
+      ANDROID_VERSION_CODE: '137'
+      ANDROID_VERSION_NAME: '0.1.137-physical-test3'
+
+    steps:
+      - name: Checkout GraphQL test branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply Facebook GraphQL-first Smart Grab wiring
+        run: python3 scripts/apply-physical-round3.py
+
+      - name: Verify intended diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          git status --short
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run lint
+
+      - name: Unit and architecture tests
+        run: npm test
+
+      - name: Production web bundle
+        run: npm run build
+
+      - name: Sync Capacitor Android
+        run: npx cap sync android
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Configure Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/.android/sdk}}"
+          sdk="$(realpath "$sdk")"
+          test -d "$sdk/platforms/android-36"
+          test -d "$sdk/build-tools/36.0.0"
+          echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$sdk" >> "$GITHUB_ENV"
+          printf 'sdk.dir=%s\n' "$sdk" > android/local.properties
+
+      - name: Use persistent Gradle 8.13
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle_bin="$HOME/.local/share/mrscrap-gradle/gradle-8.13/bin/gradle"
+          test -x "$gradle_bin"
+          echo "GRADLE_BIN=$gradle_bin" >> "$GITHUB_ENV"
+          "$gradle_bin" --version | head -n 8
+
+      - name: Compile signed debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$GRADLE_BIN" -p android :app:assembleDebug --stacktrace
+
+      - name: Commit validated GraphQL production diff on test branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Tariq Ziad"
+          git config user.email "102293222+Tariq990@users.noreply.github.com"
+          git add android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSocialSessionPlugin.java server/tests/androidPhysicalRegression.test.ts
+          git diff --cached --check
+          if ! git diff --cached --quiet; then
+            git commit -m "fix: use Facebook GraphQL timeline for Smart Grab"
+            git push origin HEAD:test/android-physical-fix-20260909
+          fi
+
+      - name: Prepare Windows ADB and wait for phone
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-platform-tools/platform-tools/adb.exe"
+          test -x "$adb"
+          echo "ADB=$adb" >> "$GITHUB_ENV"
+          "$adb" kill-server >/dev/null 2>&1 || true
+          "$adb" start-server >/dev/null 2>&1 || true
+          serial=""
+          for attempt in $(seq 1 60); do
+            snapshot="$($adb devices 2>/dev/null | tr -d '\r' || true)"
+            serial="$(printf '%s\n' "$snapshot" | awk 'NR>1 && $2=="device" {print $1; exit}')"
+            if [ -n "$serial" ]; then break; fi
+            sleep 2
+          done
+          test -n "$serial"
+          echo "SERIAL=$serial" >> "$GITHUB_ENV"
+          echo "AUTHORIZED_ANDROID_DEVICE_FOUND"
+
+      - name: Install GraphQL physical test without clearing app data
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="$GITHUB_WORKSPACE/android/app/build/outputs/apk/debug/app-debug.apk"
+          test -f "$apk"
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          win_tmp="/mnt/c/Users/${win_user}/AppData/Local/Temp/MR-SCRAP-physical-test3.apk"
+          cp "$apk" "$win_tmp"
+          win_apk="$(wslpath -w "$win_tmp")"
+          "$ADB" -s "$SERIAL" install -r "$win_apk" | tr -d '\r'
+          "$ADB" -s "$SERIAL" shell dumpsys package com.mrscrap.socialradar 2>/dev/null | tr -d '\r' | grep -E 'versionCode=|versionName=' | head -n 4
+
+      - name: Measure cold startup and launch GraphQL test app
+        shell: bash
+        run: |
+          set -euo pipefail
+          package=com.mrscrap.socialradar
+          "$ADB" -s "$SERIAL" logcat -c || true
+          "$ADB" -s "$SERIAL" shell am force-stop "$package" || true
+          sleep 1
+          "$ADB" -s "$SERIAL" shell am start -W -n "$package/.MainActivity" 2>&1 | tr -d '\r'
+          sleep 4
+          echo "PHYSICAL_TEST3_APP_LAUNCHED"
+
+      - name: Capture one GraphQL Smart Grab attempt
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "SMART_GRAB_GRAPHQL_READY"
+          "$ADB" -s "$SERIAL" logcat -c || true
+          sleep 240
+          echo "SMART_GRAB_GRAPHQL_LOGS_BEGIN"
+          "$ADB" -s "$SERIAL" logcat -d -v threadtime 2>/dev/null | tr -d '\r' | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' | tail -n 1000 || true
+          echo "SMART_GRAB_GRAPHQL_LOGS_END"
