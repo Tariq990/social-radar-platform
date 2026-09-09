@@ -67,11 +67,13 @@ jobs:
               print('REFERENCE_JSON=INVALID')
               raise SystemExit(4)
           errors = payload.get('errors') or [] if isinstance(payload, dict) else []
+          codes = sorted({str(e.get('code')) for e in errors if isinstance(e, dict) and e.get('code') is not None})
           data = payload.get('data') if isinstance(payload, dict) else None
           node = data.get('node') if isinstance(data, dict) else None
           feed = node.get('timeline_list_feed_units') if isinstance(node, dict) else None
           edges = feed.get('edges') if isinstance(feed, dict) else None
           print(f'REFERENCE_ERRORS={len(errors) if isinstance(errors, list) else 0}')
+          print('REFERENCE_ERROR_CODES=' + ','.join(codes))
           print(f'REFERENCE_DATA_PRESENT={1 if isinstance(data, dict) else 0}')
           print(f'REFERENCE_NODE_PRESENT={1 if isinstance(node, dict) else 0}')
           print(f'REFERENCE_TIMELINE_PRESENT={1 if isinstance(feed, dict) else 0}')
