@@ -90,9 +90,11 @@ jobs:
           echo "::add-mask::$serial"
           echo "ADB=$adb" >> "$GITHUB_ENV"
           echo "SERIAL=$serial" >> "$GITHUB_ENV"
-          WIN_APK="/mnt/c/Users/${win_user}/AppData/Local/Temp/MR-SCRAP-140.apk"
-          cp android/app/build/outputs/apk/debug/app-debug.apk "$WIN_APK"
-          "$adb" -s "$serial" install -r "$WIN_APK" | tr -d '\r'
+          WIN_APK_LINUX="/mnt/c/Users/${win_user}/AppData/Local/Temp/MR-SCRAP-140.apk"
+          WIN_APK_WINDOWS="C:\\Users\\${win_user}\\AppData\\Local\\Temp\\MR-SCRAP-140.apk"
+          cp android/app/build/outputs/apk/debug/app-debug.apk "$WIN_APK_LINUX"
+          test -f "$WIN_APK_LINUX"
+          "$adb" -s "$serial" install -r "$WIN_APK_WINDOWS" | tr -d '\r'
           "$adb" -s "$serial" shell dumpsys package com.mrscrap.socialradar | tr -d '\r' | grep -E 'versionCode=|versionName=' | head -n4
           "$adb" -s "$serial" shell setprop log.tag.MRSCRAP_FLOW I || true
           "$adb" -s "$serial" shell setprop log.tag.MRSCRAP_COLLECTOR I || true
