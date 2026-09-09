@@ -39,8 +39,6 @@ jobs:
           emulator_wsl="${sdk_wsl}/emulator/emulator.exe"
           adb_wsl="${sdk_wsl}/platform-tools/adb.exe"
           image_wsl="${sdk_wsl}/system-images/android-36/google_apis/x86_64/system.img"
-          stdout_wsl="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-emulator.stdout.log"
-          stderr_wsl="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-emulator.stderr.log"
 
           test -s "$android_wsl"
           test -s "$emulator_wsl"
@@ -124,9 +122,6 @@ jobs:
 
           \$env:ANDROID_SDK_ROOT = \$sdk
           \$env:ANDROID_HOME = \$sdk
-          \$stdout = Join-Path \$env:LOCALAPPDATA 'Temp\\mrscrap-emulator.stdout.log'
-          \$stderr = Join-Path \$env:LOCALAPPDATA 'Temp\\mrscrap-emulator.stderr.log'
-          Remove-Item \$stdout,\$stderr -Force -ErrorAction SilentlyContinue
 
           \$killed = 0
           Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
@@ -149,14 +144,20 @@ jobs:
           Remove-Item (Join-Path \$avdDir 'multiinstance.lock') -Recurse -Force -ErrorAction SilentlyContinue
           Write-Output 'AVD_LOCKS_CLEANED=1'
 
-          \$args = @('@' + \$avdName,'-sysdir',\$imageDir,'-no-audio','-no-boot-anim','-no-snapshot','-gpu','swiftshader_indirect','-verbose')
+          \$args = @('@' + \$avdName,'-sysdir',\$imageDir,'-no-audio','-no-boot-anim','-no-snapshot','-gpu','swiftshader_indirect')
           if (\$needsRebase) { \$args += '-wipe-data' }
           if ('${launch_headless}' -eq 'true') { \$args += '-no-window' }
-          \$windowStyle = if ('${launch_headless}' -eq 'true') { 'Hidden' } else { 'Normal' }
-          \$p = Start-Process -FilePath \$emulator -ArgumentList \$args -WindowStyle \$windowStyle -RedirectStandardOutput \$stdout -RedirectStandardError \$stderr -PassThru
+          \$quoted = @(\$args | ForEach-Object {
+            \$value = [string]\$_
+            if (\$value -match '[\\s"]') { '"' + (\$value -replace '"','\\"') + '"' } else { \$value }
+          })
+          \$commandLine = '"' + \$emulator + '" ' + (\$quoted -join ' ')
+          \$created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = \$commandLine }
+          if ([int]\$created.ReturnValue -ne 0 -or [int]\$created.ProcessId -le 0) { throw 'EMULATOR_PROCESS_CREATE_FAILED' }
           Start-Sleep -Seconds 3
+          \$alive = [bool](Get-Process -Id ([int]\$created.ProcessId) -ErrorAction SilentlyContinue)
           Write-Output 'EMULATOR_PROCESS_STARTED=1'
-          Write-Output ("EMULATOR_WRAPPER_ALIVE=" + [int](-not \$p.HasExited))
+          Write-Output ("EMULATOR_WRAPPER_ALIVE=" + [int]\$alive)
           POWERSHELL
 
             ps1_win="$(wslpath -w "$ps1")"
@@ -178,22 +179,18 @@ jobs:
             done
           fi
 
-          dump_logs() {
-            echo EMULATOR_STDERR_TAIL_BEGIN
-            if [ -f "$stderr_wsl" ]; then
-              tail -n 120 "$stderr_wsl" | tr -d '\r' | sed "s#${win_user}#[USER]#g" | sed -E 's/([0-9]{5,})/[number]/g'
-            fi
-            echo EMULATOR_STDERR_TAIL_END
-            echo EMULATOR_STDOUT_TAIL_BEGIN
-            if [ -f "$stdout_wsl" ]; then
-              tail -n 120 "$stdout_wsl" | tr -d '\r' | sed "s#${win_user}#[USER]#g" | sed -E 's/([0-9]{5,})/[number]/g'
-            fi
-            echo EMULATOR_STDOUT_TAIL_END
+          dump_safe_state() {
+            states="$($adb_wsl devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ {c[$2]++} END {for (s in c) printf "%s=%d ",s,c[s]}')"
+            echo "EMULATOR_STATES=${states:-none}"
+            /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe \
+              -NoLogo -NoProfile -NonInteractive -Command \
+              "\$sdk='${sdk_win}'; \$count=@(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { ([string]\$_.ExecutablePath) -like (\$sdk + '\\emulator\\*') -and ((\$_.Name -eq 'emulator.exe') -or (\$_.Name -like 'qemu-system-x86_64*')) }).Count; Write-Output ('EMULATOR_WINDOWS_PROCESS_COUNT=' + \$count)" |
+              tr -d '\r' || true
           }
 
           if [ -z "${serial:-}" ]; then
             echo EMULATOR_ADB_READY=0
-            dump_logs
+            dump_safe_state
             exit 1
           fi
           echo EMULATOR_ADB_READY=1
@@ -207,7 +204,7 @@ jobs:
           done
           if [ "$boot" != '1' ]; then
             echo EMULATOR_BOOT_READY=0
-            dump_logs
+            dump_safe_state
             exit 1
           fi
 
