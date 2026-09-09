@@ -34,6 +34,8 @@ jobs:
           emulator_wsl="${sdk_wsl}/emulator/emulator.exe"
           adb_wsl="${sdk_wsl}/platform-tools/adb.exe"
           image_wsl="${sdk_wsl}/system-images/android-36/google_apis/x86_64/system.img"
+          stdout_wsl="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-emulator.stdout.log"
+          stderr_wsl="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-emulator.stderr.log"
 
           test -s "$android_wsl"
           test -s "$emulator_wsl"
@@ -75,16 +77,33 @@ jobs:
             echo EMULATOR_SERIAL_PRESENT=1
           else
             echo EMULATOR_START_REQUIRED=1
+
+            launch_headless=true
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.headless }}" != "true" ]; then
+              launch_headless=false
+            fi
+
             ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-start-emulator.ps1"
             cat > "$ps1" <<POWERSHELL
           \$ErrorActionPreference = 'Stop'
           \$env:ANDROID_SDK_ROOT = '${sdk_win}'
           \$env:ANDROID_HOME = '${sdk_win}'
           \$emulator = '${sdk_win}\\emulator\\emulator.exe'
-          \$args = @('@${avd_name}','-no-audio','-no-boot-anim','-gpu','auto')
-          if ('${{ inputs.headless }}' -eq 'true') { \$args += '-no-window' }
-          Start-Process -FilePath \$emulator -ArgumentList \$args -WindowStyle Normal
+          \$stdout = Join-Path \$env:LOCALAPPDATA 'Temp\\mrscrap-emulator.stdout.log'
+          \$stderr = Join-Path \$env:LOCALAPPDATA 'Temp\\mrscrap-emulator.stderr.log'
+          Remove-Item \$stdout,\$stderr -Force -ErrorAction SilentlyContinue
+
+          Get-CimInstance Win32_Process -Filter "Name='emulator.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { \$_.ExecutablePath -eq \$emulator } |
+            ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }
+          Start-Sleep -Seconds 1
+
+          \$args = @('@${avd_name}','-no-audio','-no-boot-anim','-no-snapshot','-gpu','swiftshader_indirect','-verbose')
+          if ('${launch_headless}' -eq 'true') { \$args += '-no-window' }
+          \$windowStyle = if ('${launch_headless}' -eq 'true') { 'Hidden' } else { 'Normal' }
+          \$p = Start-Process -FilePath \$emulator -ArgumentList \$args -WindowStyle \$windowStyle -RedirectStandardOutput \$stdout -RedirectStandardError \$stderr -PassThru
           Write-Output 'EMULATOR_PROCESS_STARTED=1'
+          Write-Output ("EMULATOR_PROCESS_ALIVE=" + [int](-not \$p.HasExited))
           POWERSHELL
 
             ps1_win="$(wslpath -w "$ps1")"
@@ -105,6 +124,16 @@ jobs:
           if [ -z "$serial" ]; then
             echo EMULATOR_ADB_READY=0
             "$emulator_wsl" -accel-check 2>&1 | tr -d '\r' | sed 's/^/ACCEL_CHECK=/' || true
+            echo EMULATOR_STDERR_TAIL_BEGIN
+            if [ -f "$stderr_wsl" ]; then
+              tail -n 120 "$stderr_wsl" | tr -d '\r' | sed "s#${win_user}#[USER]#g" | sed -E 's/([0-9]{5,})/[number]/g'
+            fi
+            echo EMULATOR_STDERR_TAIL_END
+            echo EMULATOR_STDOUT_TAIL_BEGIN
+            if [ -f "$stdout_wsl" ]; then
+              tail -n 120 "$stdout_wsl" | tr -d '\r' | sed "s#${win_user}#[USER]#g" | sed -E 's/([0-9]{5,})/[number]/g'
+            fi
+            echo EMULATOR_STDOUT_TAIL_END
             exit 1
           fi
           echo EMULATOR_ADB_READY=1
