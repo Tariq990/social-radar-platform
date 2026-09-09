@@ -1,4 +1,4 @@
-name: Current Android Context Resolver Probe
+name: Current Android Collector Surface Trace
 
 on:
   push:
@@ -9,11 +9,11 @@ permissions:
   contents: read
 
 jobs:
-  probe:
+  trace:
     runs-on: [self-hosted, Linux]
     timeout-minutes: 4
     steps:
-      - name: Invoke installed context resolver safely
+      - name: Invoke collector and trace safe WebView surface categories
         shell: bash
         run: |
           set -euo pipefail
@@ -47,52 +47,81 @@ jobs:
           "$adb" -s "$serial" forward --remove tcp:19222 >/dev/null 2>&1 || true
           "$adb" -s "$serial" forward tcp:19222 "localabstract:${socket_name}" >/dev/null
 
-          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-context-ready-probe.ps1"
+          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-surface-trace.ps1"
           cat > "$ps1" <<'PS'
           $ErrorActionPreference='Stop'
+          function Get-Targets {
+            try { return @(Invoke-RestMethod -Uri 'http://127.0.0.1:19222/json' -TimeoutSec 3) } catch { return @() }
+          }
+          function Category([string]$raw) {
+            if([string]::IsNullOrWhiteSpace($raw)){return 'blank'}
+            try {
+              $uri=[Uri]$raw
+              $h=[string]$uri.Host
+              if($uri.Scheme -eq 'about' -or [string]::IsNullOrWhiteSpace($h)){return 'blank'}
+              if($h -eq 'localhost' -or $h -eq '127.0.0.1'){return 'localhost'}
+              if($h -match '(^|\.)facebook\.com$'){return 'facebook'}
+              if($h -match '(^|\.)instagram\.com$'){return 'instagram'}
+              return 'other'
+            } catch { return 'other' }
+          }
           $main=$null
           $deadline=[DateTime]::UtcNow.AddSeconds(25)
           while([DateTime]::UtcNow -lt $deadline -and -not $main){
-            try{
-              $targets=@(Invoke-RestMethod -Uri 'http://127.0.0.1:19222/json' -TimeoutSec 3)
-              $main=$targets|Where-Object {
-                $_.type -eq 'page' -and
-                (([string]$_.url).StartsWith('https://localhost') -or ([string]$_.url).StartsWith('http://localhost'))
-              }|Select-Object -First 1
-            }catch{}
+            $targets=Get-Targets
+            $main=$targets|Where-Object {
+              $_.type -eq 'page' -and (Category([string]$_.url)) -eq 'localhost'
+            }|Select-Object -First 1
             if(-not $main){Start-Sleep -Milliseconds 500}
           }
           if(-not $main){throw 'LOCALHOST_TARGET_NOT_READY'}
           Write-Output LOCALHOST_TARGET_READY
-          $u=([string]$main.webSocketDebuggerUrl) -replace '^ws://localhost:','ws://127.0.0.1:'
+          $wsurl=([string]$main.webSocketDebuggerUrl) -replace '^ws://localhost:','ws://127.0.0.1:'
           $ws=[System.Net.WebSockets.ClientWebSocket]::new();$ws.Options.Proxy=$null
-          [void]$ws.ConnectAsync([Uri]$u,[Threading.CancellationToken]::None).GetAwaiter().GetResult()
-          $expr="(() => { window.Capacitor.nativePromise('AuthenticatedSocialSession','collectSource',{sourceId:'context-ready-diagnostic',url:'https://www.facebook.com/tarik.ziad.3914',platform:'facebook',limit:10}).catch(()=>null); return 'started'; })()"
+          [void]$ws.ConnectAsync([Uri]$wsurl,[Threading.CancellationToken]::None).GetAwaiter().GetResult()
+          $expr="(() => { window.Capacitor.nativePromise('AuthenticatedSocialSession','collectSource',{sourceId:'surface-trace-diagnostic',url:'https://www.facebook.com/tarik.ziad.3914',platform:'facebook',limit:10}).catch(()=>null); return 'started'; })()"
           $payload=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true}}|ConvertTo-Json -Depth 10 -Compress
           $bytes=[Text.Encoding]::UTF8.GetBytes($payload);$seg=[ArraySegment[byte]]::new($bytes)
           [void]$ws.SendAsync($seg,[Net.WebSockets.WebSocketMessageType]::Text,$true,[Threading.CancellationToken]::None).GetAwaiter().GetResult()
           Start-Sleep -Milliseconds 350
           $ws.Dispose()
-          Write-Output CONTEXT_RESOLVER_INVOKED
-          PS
-          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\\Users\\${win_user}\\AppData\\Local\\Temp\\mrscrap-context-ready-probe.ps1"
+          Write-Output COLLECTOR_INVOKED
 
-          terminal=0
-          logs=""
-          for i in $(seq 1 65); do
-            logs="$($adb -s "$serial" logcat -d -v brief -s MRSCRAP_FLOW:I MRSCRAP_COLLECTOR:I '*:S' 2>/dev/null | tr -d '\r' || true)"
-            if printf '%s\n' "$logs" | grep -Eq 'event=collect_source_(success|error) platform=facebook'; then terminal=1; break; fi
-            sleep 1
-          done
-          echo CONTEXT_READY_SAFE_TRACE_BEGIN
-          printf '%s\n' "$logs" | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' | grep -E 'collect_source_|graphql_(load_start|page_started|page_finished|stage|result|error|timeout)' | tail -n180 || true
-          echo CONTEXT_READY_SAFE_TRACE_END
+          $traceDeadline=[DateTime]::UtcNow.AddSeconds(34)
+          $last=''
+          $states=0
+          $maxTargets=0
+          $sawFacebook=$false
+          $sawBlank=$false
+          $sawOther=$false
+          while([DateTime]::UtcNow -lt $traceDeadline){
+            $targets=Get-Targets
+            if($targets.Count -gt $maxTargets){$maxTargets=$targets.Count}
+            $cats=@()
+            foreach($t in $targets){
+              if($t.type -ne 'page'){continue}
+              $c=Category([string]$t.url)
+              $cats += $c
+              if($c -eq 'facebook'){$sawFacebook=$true}
+              elseif($c -eq 'blank'){$sawBlank=$true}
+              elseif($c -eq 'other'){$sawOther=$true}
+            }
+            $signature=(($cats|Sort-Object) -join ',')
+            if($signature -ne $last -and $states -lt 20){
+              $states++
+              Write-Output ('TARGET_STATE_' + $states + '=' + $(if($signature){$signature}else{'none'}))
+              $last=$signature
+            }
+            Start-Sleep -Milliseconds 250
+          }
+          Write-Output ('TARGET_MAX=' + $maxTargets)
+          Write-Output ('TARGET_SAW_FACEBOOK=' + $(if($sawFacebook){1}else{0}))
+          Write-Output ('TARGET_SAW_BLANK=' + $(if($sawBlank){1}else{0}))
+          Write-Output ('TARGET_SAW_OTHER=' + $(if($sawOther){1}else{0}))
+          PS
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\\Users\\${win_user}\\AppData\\Local\\Temp\\mrscrap-surface-trace.ps1"
+
+          echo NATIVE_SAFE_TRACE_BEGIN
+          "$adb" -s "$serial" logcat -d -v brief -s MRSCRAP_FLOW:I MRSCRAP_COLLECTOR:I '*:S' 2>/dev/null | tr -d '\r' | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' | grep -E 'collect_source_|graphql_(load_start|page_started|page_finished|stage|result|error|timeout)' | tail -n200 || true
+          echo NATIVE_SAFE_TRACE_END
           "$adb" -s "$serial" forward --remove tcp:19222 >/dev/null 2>&1 || true
-          test "$terminal" = 1
-          if printf '%s\n' "$logs" | grep -Eq 'event=graphql_result posts=[1-9][0-9]*'; then
-            printf '%s\n' "$logs" | grep -q 'event=collect_source_success platform=facebook'
-            echo CONTEXT_READY_PHYSICAL_COLLECTOR_PASS
-          else
-            echo CONTEXT_READY_NO_POSTS
-            exit 1
-          fi
