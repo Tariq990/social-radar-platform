@@ -89,7 +89,10 @@ jobs:
           "$gradle_bin" --version | head -n 8
 
       - name: Compile signed debug APK
-        run: "$GRADLE_BIN" -p android :app:assembleDebug --stacktrace
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$GRADLE_BIN" -p android :app:assembleDebug --stacktrace
 
       - name: Commit validated round-2 production diff on test branch
         shell: bash
