@@ -37,78 +37,19 @@ jobs:
           from pathlib import Path
           p=Path('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedPostDetailCollector.java')
           s=p.read_text()
-          reps={
-            'import android.os.Looper;\nimport android.view.View;':'import android.os.Looper;\nimport android.util.Log;\nimport android.view.View;',
-            'private static final long TIMEOUT_MS = 40_000;':'private static final long TIMEOUT_MS = 75_000;',
-            'private static final int MAX_ALL_ATTEMPTS = 18;':'private static final int MAX_ALL_ATTEMPTS = 18;\n    private static final String TAG = "MRSCRAP_DETAIL";'
-          }
-          for old,new in reps.items():
-              assert s.count(old)==1,(old,s.count(old)); s=s.replace(old,new)
-          anchor='            settings.setOffscreenPreRaster(true);'
-          assert s.count(anchor)==1,s.count(anchor)
-          s=s.replace(anchor,anchor+'\n            settings.setUserAgentString("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36");\n            Log.i(TAG, "event=user_agent mode=desktop");')
-          old='''            final Runnable[] runner = new Runnable[1];
-            runner[0] = () -> {
-                if (finished.get()) return;
-                attempts[0]++;'''
-          new='''            final Runnable[] runner = new Runnable[1];
-            runner[0] = () -> {
-                if (finished.get()) return;
-                String currentUrl = webView.getUrl();
-                if (currentUrl == null || !AuthenticatedWebCollector.isAllowedSocialUrl(currentUrl)) {
-                    Log.i(TAG, "event=wait_for_social_page");
-                    main.postDelayed(runner[0], RETRY_DELAY_MS);
-                    return;
-                }
-                attempts[0]++;
-                Log.i(TAG, "event=extract_start attempt=" + attempts[0] + " progress=" + webView.getProgress());'''
-          assert s.count(old)==1,s.count(old); s=s.replace(old,new)
-          old='''                                boolean hasMore = diagnostics != null && diagnostics.optBoolean("hasMoreControls", false);
-
-                                if (count == lastCommentCount[0]) stablePasses[0]++;'''
-          new='''                                boolean hasMore = diagnostics != null && diagnostics.optBoolean("hasMoreControls", false);
-                                JSONArray media = result.optJSONArray("media");
-                                int mediaCount = media == null ? 0 : media.length();
-                                Log.i(TAG, "event=eval_result attempt=" + attempts[0] + " comments=" + count +
-                                    " media=" + mediaCount + " hasMore=" + hasMore);
-
-                                if (count == lastCommentCount[0]) stablePasses[0]++;'''
-          assert s.count(old)==1,s.count(old); s=s.replace(old,new)
-          old='''                private void schedule(long delay) {
-                    if (finished.get()) return;
-                    main.removeCallbacks(runner[0]);
-                    main.postDelayed(runner[0], delay);
-                }
-
-                @Override
-                public boolean shouldOverrideUrlLoading'''
-          new='''                private void schedule(long delay) {
-                    if (finished.get()) return;
-                    main.postDelayed(runner[0], delay);
-                }
-
-                @Override
-                public boolean shouldOverrideUrlLoading'''
-          assert s.count(old)==1,s.count(old); s=s.replace(old,new)
-          anchor='''                @Override
-                public void onPageCommitVisible(WebView view, String loadedUrl) {'''
-          insert='''                @Override
-                public void onPageStarted(WebView view, String loadedUrl, android.graphics.Bitmap favicon) {
-                    super.onPageStarted(view, loadedUrl, favicon);
-                    if (!AuthenticatedWebCollector.isAllowedSocialUrl(loadedUrl) || finished.get()) return;
-                    Log.i(TAG, "event=page_started progress=" + view.getProgress());
-                    schedule(3_000);
-                }
-
-'''+anchor
-          assert s.count(anchor)==1,s.count(anchor); s=s.replace(anchor,insert)
-          old='''            webView.loadUrl(targetUrl);
-        });'''
-          new='''            Log.i(TAG, "event=load_start");
-            webView.loadUrl(targetUrl);
-            main.postDelayed(runner[0], 3_000);
-        });'''
-          assert s.count(old)==1,s.count(old); s=s.replace(old,new)
+          reps=[
+            ('import android.os.Looper;\nimport android.view.View;', 'import android.os.Looper;\nimport android.util.Log;\nimport android.view.View;'),
+            ('private static final long TIMEOUT_MS = 40_000;', 'private static final long TIMEOUT_MS = 75_000;'),
+            ('private static final int MAX_ALL_ATTEMPTS = 18;', 'private static final int MAX_ALL_ATTEMPTS = 18;\n    private static final String TAG = "MRSCRAP_DETAIL";'),
+            ('            settings.setOffscreenPreRaster(true);', '            settings.setOffscreenPreRaster(true);\n            settings.setUserAgentString("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36");\n            Log.i(TAG, "event=user_agent mode=desktop");'),
+            ('            final Runnable[] runner = new Runnable[1];\n            runner[0] = () -> {\n                if (finished.get()) return;\n                attempts[0]++;', '            final Runnable[] runner = new Runnable[1];\n            runner[0] = () -> {\n                if (finished.get()) return;\n                String currentUrl = webView.getUrl();\n                if (currentUrl == null || !AuthenticatedWebCollector.isAllowedSocialUrl(currentUrl)) {\n                    Log.i(TAG, "event=wait_for_social_page");\n                    main.postDelayed(runner[0], RETRY_DELAY_MS);\n                    return;\n                }\n                attempts[0]++;\n                Log.i(TAG, "event=extract_start attempt=" + attempts[0] + " progress=" + webView.getProgress());'),
+            ('                                boolean hasMore = diagnostics != null && diagnostics.optBoolean("hasMoreControls", false);\n\n                                if (count == lastCommentCount[0]) stablePasses[0]++;', '                                boolean hasMore = diagnostics != null && diagnostics.optBoolean("hasMoreControls", false);\n                                JSONArray media = result.optJSONArray("media");\n                                int mediaCount = media == null ? 0 : media.length();\n                                Log.i(TAG, "event=eval_result attempt=" + attempts[0] + " comments=" + count + " media=" + mediaCount + " hasMore=" + hasMore);\n\n                                if (count == lastCommentCount[0]) stablePasses[0]++;'),
+            ('                private void schedule(long delay) {\n                    if (finished.get()) return;\n                    main.removeCallbacks(runner[0]);\n                    main.postDelayed(runner[0], delay);\n                }', '                private void schedule(long delay) {\n                    if (finished.get()) return;\n                    main.postDelayed(runner[0], delay);\n                }'),
+            ('                @Override\n                public void onPageCommitVisible(WebView view, String loadedUrl) {', '                @Override\n                public void onPageStarted(WebView view, String loadedUrl, android.graphics.Bitmap favicon) {\n                    super.onPageStarted(view, loadedUrl, favicon);\n                    if (!AuthenticatedWebCollector.isAllowedSocialUrl(loadedUrl) || finished.get()) return;\n                    Log.i(TAG, "event=page_started progress=" + view.getProgress());\n                    schedule(3_000);\n                }\n\n                @Override\n                public void onPageCommitVisible(WebView view, String loadedUrl) {'),
+            ('            webView.loadUrl(targetUrl);\n        });', '            Log.i(TAG, "event=load_start");\n            webView.loadUrl(targetUrl);\n            main.postDelayed(runner[0], 3_000);\n        });')
+          ]
+          for old,new in reps:
+              assert s.count(old)==1,(old[:80],s.count(old)); s=s.replace(old,new)
           p.write_text(s)
           for token in ['TIMEOUT_MS = 75_000','event=user_agent mode=desktop','event=page_started','event=wait_for_social_page','main.postDelayed(runner[0], 3_000)','MRSCRAP_DETAIL']:
               assert token in s,token
@@ -162,8 +103,8 @@ jobs:
           cat > "$ps1" <<'PS'
           $ErrorActionPreference='Stop'
           function Targets { for($i=0;$i -lt 30;$i++){ try{$t=@(Invoke-RestMethod -Uri 'http://127.0.0.1:9223/json/list' -TimeoutSec 2);if($t.Count -gt 0){return $t}}catch{}; Start-Sleep -Milliseconds 250 }; throw 'targets unavailable' }
-          function AppTarget { $a=@(Targets|Where-Object{$_.type -eq 'page' -and [string]$_.url -like 'https://localhost*'}|Select-Object -First 1);if($a.Count-eq 0){throw 'app target missing'};$a[0] }
-          function Eval([string]$raw,[string]$expr,[int]$seconds=120){$u=[Uri]$raw;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($seconds));$ws.ConnectAsync([Uri]('ws://127.0.0.1:9223'+$u.PathAndQuery),$cts.Token).GetAwaiter().GetResult()|Out-Null;$p=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 8;$b=[Text.Encoding]::UTF8.GetBytes($p);$ws.SendAsync([ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null;$buf=New-Object byte[] 131072;$sb=[Text.StringBuilder]::new();while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id-ne 1){continue};if($m.result.exceptionDetails){throw 'runtime eval exception'};$v=$m.result.result.value;try{$ws.Abort()}catch{};return $v}}
+          function AppTarget { $a=@(Targets|Where-Object{$_.type -eq 'page' -and [string]$_.url -like 'https://localhost*'}|Select-Object -First 1);if($a.Count -eq 0){throw 'app target missing'};$a[0] }
+          function Eval([string]$raw,[string]$expr,[int]$seconds=120){$u=[Uri]$raw;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($seconds));$ws.ConnectAsync([Uri]('ws://127.0.0.1:9223'+$u.PathAndQuery),$cts.Token).GetAwaiter().GetResult()|Out-Null;$p=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 8;$b=[Text.Encoding]::UTF8.GetBytes($p);$ws.SendAsync([ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null;$buf=New-Object byte[] 131072;$sb=[Text.StringBuilder]::new();while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id -ne 1){continue};if($m.result.exceptionDetails){throw 'runtime eval exception'};$v=$m.result.result.value;try{$ws.Abort()}catch{};return $v}}
           $app=AppTarget
           $expr=@'
           (async()=>{const cap=globalThis.Capacitor?.Plugins?.AuthenticatedSocialSession;if(!cap)return{plugin:false};const sr=await fetch('https://mr-scrap-api-live.onrender.com/api/sources',{credentials:'include'});if(!sr.ok)return{plugin:true,source:false,http:sr.status};const ss=await sr.json();const s=(Array.isArray(ss)?ss:[]).find(x=>x&&x.platform==='facebook'&&!Boolean(x.is_paused??x.isPaused)&&(x.connector_type||x.connectorType||'device_session')==='device_session');if(!s)return{plugin:true,source:false};let col;try{col=await cap.collectSource({sourceId:s.id,url:s.url,platform:'facebook',limit:1})}catch(e){return{plugin:true,source:true,collect:false}}const p=Array.isArray(col?.posts)?col.posts[0]:null;if(!p)return{plugin:true,source:true,collect:true,posts:0};try{const r=await cap.collectPostDetails({url:p.originalUrl,sourceUrl:s.url,platform:'facebook',publisherName:p.authorName||'',commentsMode:'none',commentLimit:1,includeReplies:true});const m=Array.isArray(r?.media)?r.media:[];return{plugin:true,source:true,collect:true,posts:1,detail:true,media:m.length,images:m.filter(x=>x?.type==='image').length,videos:m.filter(x=>x?.type==='video').length,videoPresent:r?.videoPresent===true,commentArticles:Number(r?.diagnostics?.commentArticles||0)}}catch(e){const x=String(e?.message||'');return{plugin:true,source:true,collect:true,posts:1,detail:false,timeout:/timed out/i.test(x),session:/SESSION_REQUIRED|SESSION_CHECKPOINT/i.test(x)}}})()
