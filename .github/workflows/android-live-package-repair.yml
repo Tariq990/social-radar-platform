@@ -30,7 +30,7 @@ jobs:
           command -v mkfs.ext4 >/dev/null
           test -s "$data"
 
-          echo "=== STOP OLD EMULATOR ==="
+          echo "=== STOP ALL AVD HOLDER PROCESSES ==="
           "$adb" kill-server >/dev/null 2>&1 || true
           preserve_ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-preserve-userdata.ps1"
           data_win="$(wslpath -w "$data")"
@@ -38,15 +38,41 @@ jobs:
           avd_win="$(wslpath -w "$avd_dir")"
           cat > "$preserve_ps1" <<POWERSHELL
           \$ErrorActionPreference = 'Stop'
-          Get-Process emulator,qemu-system-x86_64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-          for (\$i = 0; \$i -lt 20; \$i++) {
-            \$left = @(Get-Process emulator,qemu-system-x86_64 -ErrorAction SilentlyContinue).Count
-            if (\$left -eq 0) { break }
-            Start-Sleep -Milliseconds 500
-          }
+          \$sdk = '${sdk_win}'
+          \$avd = '${avd_win}'
           \$data = '${data_win}'
           \$backup = '${backup_win}'
-          \$avd = '${avd_win}'
+
+          function Get-AvdHolders {
+            @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+              \$path = [string]\$_.ExecutablePath
+              \$cmd = [string]\$_.CommandLine
+              (\$path -like (\$sdk + '\\emulator\\*')) -or
+              (\$_.Name -eq 'adb.exe') -or
+              (\$cmd -like '*@test_avd*') -or
+              (\$cmd -like '*userdata-qemu.img*')
+            })
+          }
+
+          \$holders = Get-AvdHolders
+          foreach (\$p in \$holders) {
+            Write-Output ('KILL_PROCESS=' + \$p.ProcessId + ':' + \$p.Name)
+            Stop-Process -Id \$p.ProcessId -Force -ErrorAction SilentlyContinue
+          }
+
+          for (\$i = 0; \$i -lt 30; \$i++) {
+            Start-Sleep -Milliseconds 500
+            \$left = Get-AvdHolders
+            if (\$left.Count -eq 0) { break }
+            foreach (\$p in \$left) { Stop-Process -Id \$p.ProcessId -Force -ErrorAction SilentlyContinue }
+          }
+          \$left = Get-AvdHolders
+          Write-Output ('AVD_HOLDERS_REMAINING=' + \$left.Count)
+          if (\$left.Count -ne 0) {
+            foreach (\$p in \$left) { Write-Output ('REMAINING_PROCESS=' + \$p.ProcessId + ':' + \$p.Name) }
+            throw 'AVD_PROCESS_STILL_RUNNING'
+          }
+
           if (-not (Test-Path -LiteralPath \$data)) { throw 'USERDATA_MISSING' }
           if (Test-Path -LiteralPath \$backup) { Remove-Item -LiteralPath \$backup -Force }
           Move-Item -LiteralPath \$data -Destination \$backup -Force
