@@ -277,8 +277,13 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
                     terminal.onError(message);
                     return;
                 }
+                final long fallbackDelayMs = 750L;
                 Log.w(FLOW_TAG, "event=collect_source_fallback platform=facebook from=graphql to=dom code=" + code);
-                AuthenticatedWebCollector.collect(foregroundContext(), url, limit, terminal);
+                Log.i(FLOW_TAG, "event=collect_source_fallback_delay platform=facebook ms=" + fallbackDelayMs);
+                new Handler(Looper.getMainLooper()).postDelayed(
+                    () -> AuthenticatedWebCollector.collect(foregroundContext(), url, limit, terminal),
+                    fallbackDelayMs
+                );
             }
         });
     }
