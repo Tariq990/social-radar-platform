@@ -1,0 +1,120 @@
+name: Android Persistent Emulator Runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      headless:
+        description: Start without an emulator window
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  runtime:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 12
+    steps:
+      - name: Create or reuse persistent AVD and start it on Windows
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          test -n "$win_user"
+
+          android_wsl="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidCLI/android.exe"
+          sdk_wsl="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk"
+          sdk_win="C:\\Users\\${win_user}\\AppData\\Local\\MRSCRAP\\AndroidSdk"
+          emulator_wsl="${sdk_wsl}/emulator/emulator.exe"
+          adb_wsl="${sdk_wsl}/platform-tools/adb.exe"
+          image_wsl="${sdk_wsl}/system-images/android-36/google_apis/x86_64/system.img"
+
+          test -s "$android_wsl"
+          test -s "$emulator_wsl"
+          test -s "$adb_wsl"
+          test -s "$image_wsl"
+
+          export ANDROID_SDK_ROOT="$sdk_win"
+          export ANDROID_HOME="$sdk_win"
+
+          echo RUNTIME_SDK_READY=1
+
+          avds="$($emulator_wsl -list-avds 2>/dev/null | tr -d '\r' || true)"
+          if ! grep -Fxq 'medium_phone' <<<"$avds"; then
+            echo AVD_CREATE_REQUIRED=1
+            set +e
+            "$android_wsl" --no-metrics --sdk="$sdk_win" emulator create --profile=medium_phone 2>&1 |
+              tr -d '\r' |
+              sed -E 's/([0-9]{5,})/[number]/g'
+            create_rc=("${PIPESTATUS[@]}")
+            set -e
+            echo "AVD_CREATE_RC=${create_rc[0]}"
+          else
+            echo AVD_REUSED=1
+          fi
+
+          avds="$($emulator_wsl -list-avds 2>/dev/null | tr -d '\r' || true)"
+          if ! grep -Fxq 'medium_phone' <<<"$avds"; then
+            echo AVD_VERIFY=FAIL
+            echo AVAILABLE_AVD_COUNT="$(grep -cve '^$' <<<"$avds" || true)"
+            exit 1
+          fi
+          echo AVD_READY=1
+
+          existing="$($adb_wsl devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
+          if [ -n "$existing" ]; then
+            echo EMULATOR_REUSED=1
+            echo EMULATOR_SERIAL_PRESENT=1
+          else
+            echo EMULATOR_START_REQUIRED=1
+            ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-start-emulator.ps1"
+            cat > "$ps1" <<POWERSHELL
+          \$ErrorActionPreference = 'Stop'
+          \$env:ANDROID_SDK_ROOT = '${sdk_win}'
+          \$env:ANDROID_HOME = '${sdk_win}'
+          \$emulator = '${sdk_win}\\emulator\\emulator.exe'
+          \$args = @('@medium_phone','-no-audio','-no-boot-anim','-gpu','auto')
+          if ('${{ inputs.headless }}' -eq 'true') { \$args += '-no-window' }
+          Start-Process -FilePath \$emulator -ArgumentList \$args -WindowStyle Normal
+          Write-Output 'EMULATOR_PROCESS_STARTED=1'
+          POWERSHELL
+
+            ps1_win="$(wslpath -w "$ps1")"
+            /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe \
+              -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+              -File "$ps1_win" | tr -d '\r'
+          fi
+
+          "$adb_wsl" start-server >/dev/null 2>&1 || true
+
+          serial=''
+          for i in $(seq 1 48); do
+            serial="$($adb_wsl devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
+            if [ -n "$serial" ]; then break; fi
+            sleep 5
+          done
+
+          if [ -z "$serial" ]; then
+            echo EMULATOR_ADB_READY=0
+            "$emulator_wsl" -accel-check 2>&1 | tr -d '\r' | sed 's/^/ACCEL_CHECK=/' || true
+            exit 1
+          fi
+          echo EMULATOR_ADB_READY=1
+
+          boot=''
+          for i in $(seq 1 60); do
+            boot="$($adb_wsl -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+            if [ "$boot" = '1' ]; then break; fi
+            sleep 5
+          done
+
+          if [ "$boot" != '1' ]; then
+            echo EMULATOR_BOOT_READY=0
+            exit 1
+          fi
+
+          echo EMULATOR_BOOT_READY=1
+          echo PERSISTENT_EMULATOR_RUNTIME=PASS
