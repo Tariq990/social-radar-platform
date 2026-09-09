@@ -260,10 +260,10 @@ final class FacebookGraphqlWebViewCollector {
               const metaApp = document.querySelector('meta[property="al:ios:url"], meta[property="al:android:url"]')?.content || '';
               const html = document.documentElement?.innerHTML || '';
               const idPatterns = [
-                /fb:\/\/(?:profile|page)\/(\d{5,})/i,
-                /["']profile_id["']\s*[:=]\s*["']?(\d{5,})/i,
-                /["']pageID["']\s*:\s*["'](\d{5,})["']/i,
-                /profile_id=(\d{5,})/i
+                /fb:\\/\\/(?:profile|page)\\/(\\d{5,})/i,
+                /["']profile_id["']\\s*[:=]\\s*["']?(\\d{5,})/i,
+                /["']pageID["']\\s*:\\s*["'](\\d{5,})["']/i,
+                /profile_id=(\\d{5,})/i
               ];
               if (!sourceId) {
                 for (const pattern of idPatterns) {
@@ -271,11 +271,11 @@ final class FacebookGraphqlWebViewCollector {
                   if (match?.[1]) { sourceId = match[1]; break; }
                 }
               }
-              if (!/^\d{5,}$/.test(sourceId)) {
+              if (!/^\\d{5,}$/.test(sourceId)) {
                 return JSON.stringify({pending:true, diagnostics:{collector:'graphql', surface:host, waitingFor:'source_id'}});
               }
 
-              const cleanTitle = (raw) => String(raw || '').replace(/\s*[|·-]\s*Facebook\s*$/i, '').trim();
+              const cleanTitle = (raw) => String(raw || '').replace(/\\s*[|·-]\\s*Facebook\\s*$/i, '').trim();
               const title = cleanTitle(
                 document.querySelector('meta[property="og:title"]')?.content ||
                 document.querySelector('h1')?.innerText || document.title
