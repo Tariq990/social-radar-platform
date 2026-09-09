@@ -1,0 +1,62 @@
+name: Android Facebook Live Collector Probe
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-facebook-live-log-probe.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-facebook-live-log-probe
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 3
+    steps:
+      - name: Read safe live collector diagnostics only
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          sdk="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk"
+          adb="${sdk}/platform-tools/adb.exe"
+          pkg="com.mrscrap.socialradar"
+          test -s "$adb"
+
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1; exit}')"
+          if [ -z "$serial" ]; then
+            echo LIVE_EMULATOR_FOUND=0
+            exit 2
+          fi
+          echo LIVE_EMULATOR_FOUND=1
+          echo "SERIAL=$serial"
+          echo "BOOT=$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+          echo "PACKAGE_PRESENT=$([ -n "$($adb -s "$serial" shell pm path "$pkg" 2>/dev/null | tr -d '\r' | head -n1 || true)" ] && echo 1 || echo 0)"
+          echo "APP_PID=$($adb -s "$serial" shell pidof "$pkg" 2>/dev/null | tr -d '\r' || true)"
+          echo "TOP_ACTIVITY=$($adb -s "$serial" shell dumpsys activity activities 2>/dev/null | tr -d '\r' | grep -m1 'mResumedActivity' | sed -E 's/.* ([A-Za-z0-9._]+\/[A-Za-z0-9._$]+).*/\1/' || true)"
+
+          if $adb -s "$serial" shell "run-as $pkg cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' | grep -q 'facebook_connected_at'; then
+            echo FACEBOOK_SESSION_METADATA=1
+          else
+            echo FACEBOOK_SESSION_METADATA=0
+          fi
+
+          echo '=== SAFE MRSCRAP COLLECTOR EVENTS ==='
+          $adb -s "$serial" logcat -b all -d -v threadtime 2>/dev/null | tr -d '\r' |
+            grep -E 'MRSCRAP_(FLOW|COLLECTOR)' |
+            sed -E 's/(https?:\/\/)[^ ]+/\1[redacted]/g' |
+            tail -n 300 || true
+
+          echo '=== SAFE WEBVIEW ERRORS AROUND APP ==='
+          $adb -s "$serial" logcat -b all -d -v threadtime 2>/dev/null | tr -d '\r' |
+            grep -E -i 'chromium|cr_AwContents|Capacitor' |
+            grep -E -i 'ERR_|graphql|network|ssl|certificate|net::|console|uncaught|exception' |
+            sed -E 's/(https?:\/\/)[^ ]+/\1[redacted]/g; s/(Cookie:|cookie=)[^ ]+/\1[redacted]/Ig' |
+            tail -n 180 || true
+
+          echo LIVE_COLLECTOR_LOG_PROBE_COMPLETE=1
