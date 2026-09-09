@@ -34,10 +34,10 @@ jobs:
           test -s "$android"
           echo ANDROID_CLI_PRESENT=1
 
-          "$android" --version 2>&1 | tr -d '\r' | sed 's/^/ANDROID_CLI_VERSION=/'
-          "$android" --sdk="$sdk_dir_win" info 2>&1 | tr -d '\r' | sed 's/^/ANDROID_INFO=/'
+          ANDROID_CLI_FRESH_INSTALL=1 "$android" --version 2>&1 | tr -d '\r' | sed 's/^/ANDROID_CLI_VERSION=/'
+          "$android" --no-metrics --sdk="$sdk_dir_win" info 2>&1 | tr -d '\r' | sed 's/^/ANDROID_INFO=/'
 
-          "$android" --sdk="$sdk_dir_win" sdk list --all 2>&1 | tr -d '\r' |
+          "$android" --no-metrics --sdk="$sdk_dir_win" sdk list --all 2>&1 | tr -d '\r' |
             grep -Ei '(^|[ /])(emulator|platform-tools|system-images/android-3[5-7].*(x86_64|x86_6))' |
             head -n 40 |
             sed 's/^/SDK_MATCH=/' || true
