@@ -145,10 +145,19 @@ jobs:
           Remove-Item (Join-Path \$avdDir 'multiinstance.lock') -Recurse -Force -ErrorAction SilentlyContinue
           Write-Output 'AVD_LOCKS_CLEANED=1'
 
-          \$args = @('@' + \$avdName,'-sysdir',\$imageDir,'-no-audio','-no-boot-anim','-no-snapshot','-gpu','swiftshader_indirect')
-          if (\$needsRebase) { \$args += '-wipe-data' }
-          if ('${launch_headless}' -eq 'true') { \$args += '-no-window' }
-          \$quoted = @(\$args | ForEach-Object {
+          \$emuArgs = @(
+            ('@' + \$avdName)
+            '-sysdir'
+            \$imageDir
+            '-no-audio'
+            '-no-boot-anim'
+            '-no-snapshot'
+            '-gpu'
+            'swiftshader_indirect'
+          )
+          if (\$needsRebase) { \$emuArgs += '-wipe-data' }
+          if ('${launch_headless}' -eq 'true') { \$emuArgs += '-no-window' }
+          \$quoted = @(\$emuArgs | ForEach-Object {
             \$value = [string]\$_
             if (\$value -match '[\\s"]') { '"' + (\$value -replace '"','\\"') + '"' } else { \$value }
           })
