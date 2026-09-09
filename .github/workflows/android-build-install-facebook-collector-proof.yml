@@ -1,0 +1,348 @@
+name: Android Build Install Facebook Collector Proof
+
+on:
+  push:
+    branches:
+      - test/android-headless-emulator-20260909
+    paths:
+      - .github/workflows/android-build-install-facebook-collector-proof.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  build-install-proof:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 45
+    env:
+      VITE_API_BASE_URL: https://mr-scrap-api-live.onrender.com
+      APP_MODE: production
+      ANDROID_VERSION_CODE: '143'
+      ANDROID_VERSION_NAME: '0.1.143-emulator-test'
+      PKG: com.mrscrap.socialradar
+
+    steps:
+      - name: Checkout exact test lane without cleaning emulator workspace data
+        uses: actions/checkout@v4
+        with:
+          ref: test/android-headless-emulator-20260909
+          fetch-depth: 1
+          clean: false
+
+      - name: Verify collector source fix is present
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java')
+          s = p.read_text()
+          fixed = "for (const line of String(text || '').split('\\\\n')) {"
+          vulnerable = "for (const line of String(text || '').split('\\n')) {"
+          print('FIXED_SOURCE_MATCH_COUNT=' + str(s.count(fixed)))
+          print('VULNERABLE_SOURCE_MATCH_COUNT=' + str(s.count(vulnerable)))
+          assert s.count(fixed) == 1
+          assert s.count(vulnerable) == 0
+          PY
+          echo COLLECTOR_SOURCE_FIX_GATE=PASS
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Production web bundle
+        run: npm run build
+
+      - name: Sync Capacitor Android
+        run: npx cap sync android
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Configure Linux Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/.android/sdk}}"
+          sdk="$(realpath "$sdk")"
+          test -d "$sdk/platforms/android-36"
+          test -d "$sdk/build-tools/36.0.0"
+          echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$sdk" >> "$GITHUB_ENV"
+          printf 'sdk.dir=%s\n' "$sdk" > android/local.properties
+
+      - name: Resolve persistent Gradle 8.13
+        shell: bash
+        run: |
+          set -euo pipefail
+          persistent_root="$HOME/.local/share/mrscrap-gradle"
+          persistent_bin="$persistent_root/gradle-8.13/bin/gradle"
+          action_bin="${RUNNER_TEMP:-/home/tarik/actions-runnerr/_work/_temp}/.gradle-actions/gradle-installations/installs/gradle-8.13/bin/gradle"
+          cache_dir="$HOME/.cache/mrscrap-gradle"
+          zip="$cache_dir/gradle-8.13-bin.zip"
+
+          selected=""
+          for candidate in "$persistent_bin" "$action_bin"; do
+            if [ -x "$candidate" ]; then
+              selected="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$selected" ] && command -v gradle >/dev/null 2>&1; then
+            candidate="$(command -v gradle)"
+            if "$candidate" --version 2>/dev/null | grep -q 'Gradle 8.13'; then
+              selected="$candidate"
+            fi
+          fi
+
+          if [ -z "$selected" ]; then
+            mkdir -p "$cache_dir" "$persistent_root"
+            rm -f "$zip.part"
+            curl --fail --location \
+              --connect-timeout 20 --max-time 420 \
+              --retry 3 --retry-delay 2 --retry-all-errors \
+              -o "$zip.part" \
+              https://downloads.gradle.org/distributions/gradle-8.13-bin.zip
+            mv "$zip.part" "$zip"
+            rm -rf "$persistent_root/gradle-8.13"
+            unzip -q -o "$zip" -d "$persistent_root"
+            selected="$persistent_bin"
+          fi
+
+          test -x "$selected"
+          echo "GRADLE_BIN=$selected" >> "$GITHUB_ENV"
+          echo GRADLE_813_READY=1
+
+      - name: Compile debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$GRADLE_BIN" -p android :app:assembleDebug --stacktrace
+          apk="$GITHUB_WORKSPACE/android/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$apk"
+          echo "APK_SIZE=$(stat -c '%s' "$apk")"
+          echo APK_BUILD_GATE=PASS
+
+      - name: Resolve running emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          test -n "$win_user"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"
+          test -s "$adb"
+          "$adb" start-server >/dev/null 2>&1 || true
+
+          serial=''
+          for i in $(seq 1 24); do
+            serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
+            [ -n "$serial" ] && break
+            sleep 5
+          done
+          test -n "$serial"
+          echo "ADB=$adb" >> "$GITHUB_ENV"
+          echo "SERIAL=$serial" >> "$GITHUB_ENV"
+          echo "WIN_USER=$win_user" >> "$GITHUB_ENV"
+          boot="$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1)"
+          echo "BOOT=$boot"
+          test "$boot" = '1'
+          echo EMULATOR_DEVICE_FOUND=1
+
+      - name: Prove Facebook session exists before replacement install
+        shell: bash
+        run: |
+          set -euo pipefail
+          marker="$($ADB -s "$SERIAL" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          if printf '%s' "$marker" | grep -q 'facebook_connected_at'; then
+            echo FACEBOOK_SESSION_METADATA_BEFORE_INSTALL=1
+          else
+            echo FACEBOOK_SESSION_METADATA_BEFORE_INSTALL=0
+            exit 20
+          fi
+          echo FACEBOOK_PREINSTALL_GATE=PASS
+
+      - name: Install rebuilt APK with app data preserved
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="$GITHUB_WORKSPACE/android/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$apk"
+          win_tmp="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/MR-SCRAP-emulator-test-143.apk"
+          cp "$apk" "$win_tmp"
+          win_apk="$(wslpath -w "$win_tmp")"
+          install_out="$($ADB -s "$SERIAL" install -r "$win_apk" 2>&1 | tr -d '\r')"
+          printf '%s\n' "$install_out"
+          printf '%s' "$install_out" | grep -q 'Success'
+          "$ADB" -s "$SERIAL" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' \
+            | grep -E 'versionCode=|versionName=' | head -n 4
+          echo EMULATOR_APK_INSTALLED_WITH_R=1
+
+      - name: Prove Facebook session survived replacement install
+        shell: bash
+        run: |
+          set -euo pipefail
+          marker="$($ADB -s "$SERIAL" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          if printf '%s' "$marker" | grep -q 'facebook_connected_at'; then
+            echo FACEBOOK_SESSION_METADATA_AFTER_INSTALL=1
+          else
+            echo FACEBOOK_SESSION_METADATA_AFTER_INSTALL=0
+            exit 21
+          fi
+          echo FACEBOOK_POSTINSTALL_SESSION_GATE=PASS
+
+      - name: Launch rebuilt MR SCRAP
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$ADB" -s "$SERIAL" shell am force-stop "$PKG" >/dev/null 2>&1 || true
+          "$ADB" -s "$SERIAL" shell am start -W -n "$PKG/.MainActivity" 2>&1 | tr -d '\r'
+          sleep 5
+          pid="$($ADB -s "$SERIAL" shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"
+          echo "APP_PID=$pid"
+          test -n "$pid"
+          echo EMULATOR_APP_LAUNCHED=1
+
+      - name: Find and press Grab latest 10 through the real app UI
+        shell: bash
+        run: |
+          set -euo pipefail
+          size="$($ADB -s "$SERIAL" shell wm size 2>/dev/null | tr -d '\r' | sed -n 's/.*size: \([0-9][0-9]*\)x\([0-9][0-9]*\).*/\1 \2/p' | tail -n1)"
+          read -r width height <<< "$size"
+          test -n "${width:-}" && test -n "${height:-}"
+          x=$((width / 2))
+          y1=$((height * 4 / 5))
+          y2=$((height / 3))
+          found=0
+          for attempt in $(seq 1 10); do
+            "$ADB" -s "$SERIAL" shell uiautomator dump /sdcard/mrscrap-ui.xml >/dev/null 2>&1 || true
+            "$ADB" -s "$SERIAL" shell cat /sdcard/mrscrap-ui.xml 2>/dev/null | tr -d '\r' > /tmp/mrscrap-ui.xml || true
+            python3 - <<'PY' > /tmp/mrscrap-tap.coords || true
+          import re
+          from pathlib import Path
+          text = Path('/tmp/mrscrap-ui.xml').read_text(errors='ignore') if Path('/tmp/mrscrap-ui.xml').exists() else ''
+          needles = ('اجلب آخر 10 وحللها', 'Grab latest 10 and analyze')
+          for match in re.finditer(r'<node\b[^>]*>', text):
+              node = match.group(0)
+              if not any(needle in node for needle in needles):
+                  continue
+              bounds = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', node)
+              if not bounds:
+                  continue
+              x1, y1, x2, y2 = map(int, bounds.groups())
+              print((x1 + x2) // 2, (y1 + y2) // 2)
+              raise SystemExit(0)
+          raise SystemExit(1)
+          PY
+            if [ -s /tmp/mrscrap-tap.coords ]; then
+              read -r tap_x tap_y < /tmp/mrscrap-tap.coords
+              echo GRAB_10_BUTTON_FOUND=1
+              echo "GRAB_10_BUTTON_CENTER=${tap_x},${tap_y}"
+              "$ADB" -s "$SERIAL" logcat -c >/dev/null 2>&1 || true
+              "$ADB" -s "$SERIAL" shell input tap "$tap_x" "$tap_y"
+              found=1
+              break
+            fi
+            "$ADB" -s "$SERIAL" shell input swipe "$x" "$y1" "$x" "$y2" 450 >/dev/null 2>&1 || true
+            sleep 1
+          done
+          if [ "$found" -ne 1 ]; then
+            echo GRAB_10_BUTTON_FOUND=0
+            exit 22
+          fi
+          echo GRAB_10_UI_TRIGGER_GATE=PASS
+
+      - name: Prove real Facebook collector no longer hits JavaScript syntax timeout
+        shell: bash
+        run: |
+          set -euo pipefail
+          success=''
+          failure=''
+          for i in $(seq 1 70); do
+            events="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' || true)"
+            success="$(printf '%s\n' "$events" | grep -E 'event=collect_source_success platform=facebook posts=[0-9]+' | tail -n1 || true)"
+            failure="$(printf '%s\n' "$events" | grep -E 'event=collect_source_error platform=facebook code=' | tail -n1 || true)"
+            if [ -n "$success" ] || [ -n "$failure" ]; then
+              break
+            fi
+            sleep 1
+          done
+
+          echo '=== SAFE FINAL COLLECTOR EVENTS ==='
+          $ADB -s "$SERIAL" logcat -b all -d -v threadtime 2>/dev/null | tr -d '\r' \
+            | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' \
+            | sed -E 's/(https?:\/\/)[^ ]+/\1[redacted]/g' \
+            | tail -n 120 || true
+
+          syntax_count="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -c 'Uncaught SyntaxError: Invalid or unexpected token' || true)"
+          echo "INVALID_JS_SYNTAX_COUNT=$syntax_count"
+          test "$syntax_count" -eq 0
+
+          if [ -n "$failure" ]; then
+            code="$(printf '%s' "$failure" | sed -n 's/.*code=\([^ ]*\).*/\1/p')"
+            echo "FACEBOOK_COLLECTOR_FAILURE_CODE=${code:-unknown}"
+            exit 23
+          fi
+          if [ -z "$success" ]; then
+            echo FACEBOOK_COLLECTOR_TERMINAL_EVENT=missing
+            exit 24
+          fi
+
+          posts="$(printf '%s' "$success" | sed -n 's/.*posts=\([0-9][0-9]*\).*/\1/p')"
+          echo "REQUESTED_POSTS=10"
+          echo "FACEBOOK_POSTS_COLLECTED=$posts"
+          test -n "$posts"
+          test "$posts" -gt 0
+          echo FACEBOOK_REAL_COLLECTION_GATE=PASS
+
+      - name: Capture safe analysis UI outcome
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          outcome=''
+          for i in $(seq 1 35); do
+            "$ADB" -s "$SERIAL" shell uiautomator dump /sdcard/mrscrap-ui-final.xml >/dev/null 2>&1
+            "$ADB" -s "$SERIAL" shell cat /sdcard/mrscrap-ui-final.xml 2>/dev/null | tr -d '\r' > /tmp/mrscrap-ui-final.xml
+            outcome="$(python3 - <<'PY'
+          import html, re
+          from pathlib import Path
+          raw = Path('/tmp/mrscrap-ui-final.xml').read_text(errors='ignore') if Path('/tmp/mrscrap-ui-final.xml').exists() else ''
+          values = [html.unescape(x) for x in re.findall(r'(?:text|content-desc)="([^"]*)"', raw)]
+          for value in values:
+              if re.search(r'تم تحليل \d+ منشور حقيقي', value) or re.search(r'Analyzed \d+ real post', value):
+                  print('ANALYSIS_SUCCESS_TEXT=' + value)
+                  raise SystemExit
+          for value in values:
+              if value.startswith('تعذر ') or value.startswith('Could not '):
+                  print('ANALYSIS_ERROR_TEXT=' + value[:220])
+                  raise SystemExit
+          PY
+          )"
+            [ -n "$outcome" ] && break
+            sleep 1
+          done
+          if [ -n "$outcome" ]; then
+            printf '%s\n' "$outcome"
+          else
+            echo ANALYSIS_UI_OUTCOME=not_observed
+          fi
+          echo FACEBOOK_BUILD_INSTALL_COLLECTOR_PROOF_COMPLETE=1
