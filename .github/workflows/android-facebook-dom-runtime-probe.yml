@@ -35,22 +35,54 @@ jobs:
           echo "ADB=$adb" >> "$GITHUB_ENV"; echo "SERIAL=$serial" >> "$GITHUB_ENV"; echo "WIN_USER=$win_user" >> "$GITHUB_ENV"
           echo RUNTIME_PROBE_PREP=PASS
 
-      - name: Trigger Grab and sample target/runtime classes
+      - name: Trigger Grab and sample target runtime
         shell: bash
         run: |
           set -euo pipefail
           ps1="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-dom-runtime-probe.ps1"
           cat > "$ps1" <<'PS'
           $ErrorActionPreference='Stop'
-          function Targets {for($i=0;$i -lt 20;$i++){try{$t=@(Invoke-RestMethod -Uri 'http://127.0.0.1:9223/json/list' -TimeoutSec 2);if($t.Count -gt 0){return $t}}catch{};Start-Sleep -Milliseconds 200};throw 'targets unavailable'}
-          function AppTarget {$a=@(Targets|Where-Object{$_.type -eq 'page' -and [string]$_.url -like 'https://localhost*'}|Select-Object -First 1);if($a.Count -eq 0){throw 'app target missing'};$a[0]}
-          function Eval([string]$raw,[string]$expr,[int]$seconds=4){$u=[Uri]$raw;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($seconds));$ws.ConnectAsync([Uri]('ws://127.0.0.1:9223'+$u.PathAndQuery),$cts.Token).GetAwaiter().GetResult()|Out-Null;$p=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 8;$b=[Text.Encoding]::UTF8.GetBytes($p);$ws.SendAsync([ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null;$buf=New-Object byte[] 131072;$sb=[Text.StringBuilder]::new();while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id -ne 1){continue};if($m.result.exceptionDetails){throw 'runtime eval exception'};$v=$m.result.result.value;try{$ws.Abort()}catch{};return $v}}
-          function TargetClass([string]$raw){if([string]::IsNullOrWhiteSpace($raw)-or$raw-eq'about:blank'){return'blank'};try{$h=([Uri]$raw).Host.ToLowerInvariant();if($h-eq'localhost'){return'app'};if($h-eq'facebook.com'-or$h.EndsWith('.facebook.com')-or$h-eq'fb.com'-or$h.EndsWith('.fb.com')-or$h-eq'fb.watch'){return'facebook'};return'other'}catch{return'other'}}
-          $app=AppTarget;$null=Eval ([string]$app.webSocketDebuggerUrl) "(()=>{window.dispatchEvent(new CustomEvent('mrscrap:navigate',{detail:{screen:'radar'}}));return true})()"
+          function Targets {
+            for($i=0;$i -lt 20;$i++){
+              try{$t=@(Invoke-RestMethod -Uri 'http://127.0.0.1:9223/json/list' -TimeoutSec 2);if($t.Count -gt 0){return $t}}catch{}
+              Start-Sleep -Milliseconds 200
+            }
+            throw 'targets unavailable'
+          }
+          function AppTarget {
+            $a=@(Targets|Where-Object{$_.type -eq 'page' -and [string]$_.url -like 'https://localhost*'}|Select-Object -First 1)
+            if($a.Count -eq 0){throw 'app target missing'}
+            return $a[0]
+          }
+          function Eval([string]$raw,[string]$expr,[int]$seconds=4){
+            $u=[Uri]$raw;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($seconds));
+            $ws.ConnectAsync([Uri]('ws://127.0.0.1:9223'+$u.PathAndQuery),$cts.Token).GetAwaiter().GetResult()|Out-Null
+            $p=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 8
+            $b=[Text.Encoding]::UTF8.GetBytes($p);$ws.SendAsync([ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null
+            $buf=New-Object byte[] 131072;$sb=[Text.StringBuilder]::new()
+            while($true){
+              $r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue}
+              $m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id -ne 1){continue};if($m.result.exceptionDetails){throw 'runtime eval exception'}
+              $v=$m.result.result.value;try{$ws.Abort()}catch{};return $v
+            }
+          }
+          function TargetClass([string]$raw){
+            if([string]::IsNullOrWhiteSpace($raw) -or $raw -eq 'about:blank'){ return 'blank' }
+            try{
+              $h=([Uri]$raw).Host.ToLowerInvariant()
+              if($h -eq 'localhost'){ return 'app' }
+              if($h -eq 'facebook.com' -or $h.EndsWith('.facebook.com') -or $h -eq 'fb.com' -or $h.EndsWith('.fb.com') -or $h -eq 'fb.watch'){ return 'facebook' }
+              return 'other'
+            }catch{ return 'other' }
+          }
+          $app=AppTarget
+          $null=Eval ([string]$app.webSocketDebuggerUrl) "(()=>{window.dispatchEvent(new CustomEvent('mrscrap:navigate',{detail:{screen:'radar'}}));return true})()"
           $find=@'
           (()=>{const n=s=>String(s||'').replace(/\s+/g,' ').trim();const b=[...document.querySelectorAll('button')].find(x=>{const t=n(x.innerText||x.textContent);return t.includes('\u0627\u062c\u0644\u0628 \u0622\u062e\u0631 10 \u0648\u062d\u0644\u0644\u0647\u0627')||/Grab latest 10 and analyze/i.test(t)});return{found:Boolean(b),enabled:Boolean(b&&!b.disabled)}})()
           '@
-          $s=$null;for($i=0;$i -lt 60;$i++){Start-Sleep -Milliseconds 300;$app=AppTarget;$s=Eval ([string]$app.webSocketDebuggerUrl) $find;if($s.found-and$s.enabled){break}};if(!$s.found-or!$s.enabled){exit 160}
+          $s=$null
+          for($i=0;$i -lt 60;$i++){Start-Sleep -Milliseconds 300;$app=AppTarget;$s=Eval ([string]$app.webSocketDebuggerUrl) $find;if($s.found -and $s.enabled){break}}
+          if(!$s.found -or !$s.enabled){exit 160}
           $click=@'
           (()=>{const n=s=>String(s||'').replace(/\s+/g,' ').trim();const b=[...document.querySelectorAll('button')].find(x=>{const t=n(x.innerText||x.textContent);return t.includes('\u0627\u062c\u0644\u0628 \u0622\u062e\u0631 10 \u0648\u062d\u0644\u0644\u0647\u0627')||/Grab latest 10 and analyze/i.test(t)});if(!b||b.disabled)return false;b.click();return true})()
           '@
@@ -59,11 +91,23 @@ jobs:
           $runtimeFacebook=0;$runtimeBlank=0;$facebookComplete=0;$facebookInteractive=0;$maxFbBody=0;$maxFbHtml=0
           for($sample=1;$sample -le 36;$sample++){
             Start-Sleep -Milliseconds 250
-            $pages=@(Targets|Where-Object{$_.type -eq 'page'});$t=$pages|Select-Object -First 1;$tc=if($null-ne$t){TargetClass([string]$t.url)}else{'none'};$rc='eval_fail';$ready='';$body=-1;$html=-1
-            if($null-ne$t){try{$d=Eval ([string]$t.webSocketDebuggerUrl) $diag 3;$rc=[string]$d.c;$ready=[string]$d.ready;$body=[int]$d.body;$html=[int]$d.html;if($rc-eq'facebook'){$runtimeFacebook=1;if($ready-eq'complete'){$facebookComplete=1};if($ready-eq'interactive'){$facebookInteractive=1};if($body-gt$maxFbBody){$maxFbBody=$body};if($html-gt$maxFbHtml){$maxFbHtml=$html}};if($rc-eq'blank'){$runtimeBlank=1}}catch{}}
+            $pages=@(Targets|Where-Object{$_.type -eq 'page'});$t=$pages|Select-Object -First 1
+            $tc=if($null -ne $t){TargetClass([string]$t.url)}else{'none'};$rc='eval_fail';$ready='';$body=-1;$html=-1
+            if($null -ne $t){
+              try{
+                $d=Eval ([string]$t.webSocketDebuggerUrl) $diag 3;$rc=[string]$d.c;$ready=[string]$d.ready;$body=[int]$d.body;$html=[int]$d.html
+                if($rc -eq 'facebook'){$runtimeFacebook=1;if($ready -eq 'complete'){$facebookComplete=1};if($ready -eq 'interactive'){$facebookInteractive=1};if($body -gt $maxFbBody){$maxFbBody=$body};if($html -gt $maxFbHtml){$maxFbHtml=$html}}
+                if($rc -eq 'blank'){$runtimeBlank=1}
+              }catch{}
+            }
             Write-Output "RUNTIME_SAMPLE=$sample target=$tc runtime=$rc ready=$ready body=$body html=$html"
           }
-          Write-Output "RUNTIME_FACEBOOK_SEEN=$runtimeFacebook";Write-Output "RUNTIME_BLANK_SEEN=$runtimeBlank";Write-Output "FACEBOOK_READY_COMPLETE_SEEN=$facebookComplete";Write-Output "FACEBOOK_READY_INTERACTIVE_SEEN=$facebookInteractive";Write-Output "MAX_FACEBOOK_BODY_LENGTH=$maxFbBody";Write-Output "MAX_FACEBOOK_HTML_LENGTH=$maxFbHtml"
+          Write-Output "RUNTIME_FACEBOOK_SEEN=$runtimeFacebook"
+          Write-Output "RUNTIME_BLANK_SEEN=$runtimeBlank"
+          Write-Output "FACEBOOK_READY_COMPLETE_SEEN=$facebookComplete"
+          Write-Output "FACEBOOK_READY_INTERACTIVE_SEEN=$facebookInteractive"
+          Write-Output "MAX_FACEBOOK_BODY_LENGTH=$maxFbBody"
+          Write-Output "MAX_FACEBOOK_HTML_LENGTH=$maxFbHtml"
           PS
           /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
           echo DOM_RUNTIME_PROBE=PASS
@@ -73,6 +117,9 @@ jobs:
         shell: bash
         run: |
           set +e
-          echo '=== SAFE COLLECTOR TRACE ==='; $ADB -s "$SERIAL" logcat -b all -d -v threadtime 2>/dev/null | tr -d '\r' | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' | tail -n 220 || true
-          marker="$($ADB -s "$SERIAL" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"; if printf '%s' "$marker" | grep -q facebook_connected_at; then echo FACEBOOK_SESSION_METADATA_FINAL=1; else echo FACEBOOK_SESSION_METADATA_FINAL=0; fi
-          $ADB -s "$SERIAL" forward --remove tcp:9223 >/dev/null 2>&1 || true; rm -f "/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-dom-runtime-probe.ps1" 2>/dev/null || true
+          echo '=== SAFE COLLECTOR TRACE ==='
+          $ADB -s "$SERIAL" logcat -b all -d -v threadtime 2>/dev/null | tr -d '\r' | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' | tail -n 220 || true
+          marker="$($ADB -s "$SERIAL" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          if printf '%s' "$marker" | grep -q facebook_connected_at; then echo FACEBOOK_SESSION_METADATA_FINAL=1; else echo FACEBOOK_SESSION_METADATA_FINAL=0; fi
+          $ADB -s "$SERIAL" forward --remove tcp:9223 >/dev/null 2>&1 || true
+          rm -f "/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-dom-runtime-probe.ps1" 2>/dev/null || true
