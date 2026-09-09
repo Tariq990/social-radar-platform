@@ -9,7 +9,9 @@ test('foreground Meta collector stays fully renderable and starts DOM polling be
   const host = read('android/app/src/main/java/com/mrscrap/socialradar/ForegroundWebViewHost.java');
   const collector = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedWebCollector.java');
 
-  assert.match(host, /root\.addView\(webView, 0, params\)/);
+  assert.match(host, /root\.addView\(host, hostParams\)/);
+  assert.match(host, /host\.addView\(webView, webParams\)/);
+  assert.match(host, /new FrameLayout\.LayoutParams\(1, 1\)/);
   assert.match(host, /webView\.setAlpha\(1f\)/);
   assert.match(host, /webView\.setLayerType\(View\.LAYER_TYPE_HARDWARE, null\)/);
   assert.match(host, /webView\.resumeTimers\(\)/);
@@ -17,14 +19,18 @@ test('foreground Meta collector stays fully renderable and starts DOM polling be
 
   assert.match(collector, /TIMEOUT_MS = 45_000/);
   assert.match(collector, /PAGE_STARTED_EXTRACTION_DELAY_MS = 900/);
+  assert.match(collector, /EVALUATION_WATCHDOG_MS = 2_500/);
+  assert.match(collector, /evaluationInFlight/);
   assert.match(collector, /void onPageStarted\(WebView view, String loadedUrl/);
   assert.match(collector, /scheduleExtraction\(PAGE_STARTED_EXTRACTION_DELAY_MS\)/);
+  assert.match(collector, /main\.postDelayed\(extractionRunner\[0\], PAGE_STARTED_EXTRACTION_DELAY_MS\)/);
 });
 
 test('Android update check keeps the app bootstrap mounted instead of serializing startup behind a dark screen', () => {
   const gate = read('src/components/ForceUpdateGate.tsx');
   const marker = 'Keep children mounted while the update check runs so auth/session bootstrap happens in parallel instead of serially.';
   assert.match(gate, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(gate, /const \[checking, setChecking\] = useState\(false\)/);
   assert.match(gate, /fixed inset-0 z-\[100\]/);
   assert.match(gate, /MR SCRAP/);
 
