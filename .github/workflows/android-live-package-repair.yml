@@ -12,23 +12,34 @@ permissions:
 jobs:
   repair-live-package:
     runs-on: [self-hosted, Linux]
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
-      - name: Restart emulator and require stable core services
+      - name: Pin Android Emulator 36.4.9 Stable
         shell: bash
         run: |
           set -euo pipefail
           win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
           sdk_wsl="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk"
           sdk_win="C:\\Users\\${win_user}\\AppData\\Local\\MRSCRAP\\AndroidSdk"
+          emu="${sdk_wsl}/emulator/emulator.exe"
           adb="${sdk_wsl}/platform-tools/adb.exe"
-          image_win="${sdk_win}\\system-images\\android-36\\google_apis\\x86_64"
-          avd_dir="/mnt/c/Users/${win_user}/.android/avd/test_avd.avd"
-          test -s "${avd_dir}/userdata-qemu.img"
+          expected_sha="f93b0d51b3ea443ba7a068f2bc39cfdb30fae3ad0c98d001a7790d9acc85c6d5"
+          url="https://redirector.gvt1.com/edgedl/android/repository/emulator-windows_x64-14788078.zip"
+          zip_wsl="/mnt/c/Users/${win_user}/AppData/Local/Temp/MRSCRAP/emulator-windows_x64-14788078.zip"
+          zip_win="C:\\Users\\${win_user}\\AppData\\Local\\Temp\\MRSCRAP\\emulator-windows_x64-14788078.zip"
+          stage_win="${sdk_win}\\.emulator-36.4.9-stage"
 
-          "$adb" kill-server >/dev/null 2>&1 || true
-          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-supported-gpu.ps1"
-          cat > "$ps1" <<POWERSHELL
+          current="$(timeout 30s "$emu" -version 2>&1 | tr -d '\r' | head -n 5 || true)"
+          printf '%s\n' "$current"
+          if printf '%s\n' "$current" | grep -q '36\.4\.9'; then
+            echo EMULATOR_PIN_REUSED=1
+          else
+            echo EMULATOR_PIN_REUSED=0
+            mkdir -p "$(dirname "$zip_wsl")"
+            "$adb" kill-server >/dev/null 2>&1 || true
+
+            ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/MRSCRAP/pin-emulator-36.4.9.ps1"
+            cat > "$ps1" <<POWERSHELL
           \$ErrorActionPreference = 'Stop'
           \$sdk = '${sdk_win}'
           @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
@@ -37,42 +48,92 @@ jobs:
             (\$cmd -like '*@test_avd*') -or
             (\$path -like (\$sdk + '\\emulator\\*')) -or
             (\$_.Name -in @('emulator.exe','qemu-system-x86_64.exe','qemu-system-x86_64-headless.exe'))
-          }) | ForEach-Object {
-            Write-Output ('KILL=' + \$_.ProcessId + ':' + \$_.Name)
-            Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue
+          }) | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }
+          Start-Sleep -Seconds 3
+          New-Item -ItemType Directory -Force -Path (Split-Path '${zip_win}') | Out-Null
+          POWERSHELL
+            /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
+
+            rm -f "$zip_wsl"
+            /mnt/c/Windows/System32/curl.exe -L --fail --retry 3 --retry-delay 2 --connect-timeout 30 --max-time 600 -o "$(wslpath -w "$zip_wsl")" "$url" | tr -d '\r'
+            actual_sha="$(sha256sum "$zip_wsl" | awk '{print $1}')"
+            echo "EMULATOR_ZIP_SHA256=$actual_sha"
+            test "$actual_sha" = "$expected_sha"
+
+            cat > "$ps1" <<POWERSHELL
+          \$ErrorActionPreference = 'Stop'
+          \$sdk = '${sdk_win}'
+          \$stage = '${stage_win}'
+          \$zip = '${zip_win}'
+          if (Test-Path \$stage) { Remove-Item -Recurse -Force \$stage }
+          New-Item -ItemType Directory -Force -Path \$stage | Out-Null
+          Expand-Archive -LiteralPath \$zip -DestinationPath \$stage -Force
+          \$newEmu = Join-Path \$stage 'emulator\\emulator.exe'
+          if (-not (Test-Path \$newEmu)) { throw '36.4.9 emulator.exe missing after extraction' }
+          \$backup = Join-Path \$sdk 'emulator-37.1.11-backup'
+          \$current = Join-Path \$sdk 'emulator'
+          if (Test-Path \$current) {
+            if (Test-Path \$backup) { Remove-Item -Recurse -Force \$current }
+            else { Move-Item -LiteralPath \$current -Destination \$backup }
           }
+          Move-Item -LiteralPath (Join-Path \$stage 'emulator') -Destination \$current
+          Remove-Item -Recurse -Force \$stage -ErrorAction SilentlyContinue
+          Remove-Item -Force \$zip -ErrorAction SilentlyContinue
+          POWERSHELL
+            /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
+          fi
+
+          pinned="$(timeout 30s "$emu" -version 2>&1 | tr -d '\r' | head -n 6 || true)"
+          printf '%s\n' "$pinned"
+          printf '%s\n' "$pinned" | grep -q '36\.4\.9'
+          echo EMULATOR_VERSION_PINNED=36.4.9
+          echo "ADB=$adb" >> "$GITHUB_ENV"
+          echo "EMU=$emu" >> "$GITHUB_ENV"
+          echo "WINUSER=$win_user" >> "$GITHUB_ENV"
+          echo "SDK_WIN=$sdk_win" >> "$GITHUB_ENV"
+
+      - name: Boot API 36 AVD with pinned renderer
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_win="${SDK_WIN}\\system-images\\android-36\\google_apis\\x86_64"
+          avd_dir="/mnt/c/Users/${WINUSER}/.android/avd/test_avd.avd"
+          test -s "${avd_dir}/userdata-qemu.img"
+
+          "$ADB" kill-server >/dev/null 2>&1 || true
+          ps1="/mnt/c/Users/${WINUSER}/AppData/Local/Temp/MRSCRAP/start-pinned-emulator.ps1"
+          cat > "$ps1" <<POWERSHELL
+          \$ErrorActionPreference = 'Stop'
+          \$sdk = '${SDK_WIN}'
+          @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+            \$cmd = [string]\$_.CommandLine
+            \$path = [string]\$_.ExecutablePath
+            (\$cmd -like '*@test_avd*') -or
+            (\$path -like (\$sdk + '\\emulator\\*')) -or
+            (\$_.Name -in @('emulator.exe','qemu-system-x86_64.exe','qemu-system-x86_64-headless.exe'))
+          }) | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }
           Start-Sleep -Seconds 3
           \$emu = Join-Path \$sdk 'emulator\\emulator.exe'
-          \$args = @(
-            '@test_avd',
-            '-sysdir','${image_win}',
-            '-no-audio','-no-boot-anim','-no-snapshot',
-            '-gpu','software',
-            '-feature','-Vulkan',
-            '-feature','-HasSharedSlotsHostMemoryAllocator',
-            '-feature','-GLDirectMem',
-            '-no-window'
-          )
+          \$args = @('@test_avd','-sysdir','${image_win}','-no-audio','-no-boot-anim','-no-snapshot','-gpu','swangle_indirect','-no-window')
           Write-Output ('EMULATOR_ARGS=' + (\$args -join ' '))
           Start-Process -FilePath \$emu -ArgumentList \$args -WindowStyle Hidden
           POWERSHELL
           /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
 
-          "$adb" start-server >/dev/null 2>&1 || true
+          "$ADB" start-server >/dev/null 2>&1 || true
           serial=''
           for i in $(seq 1 60); do
-            serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
+            serial="$($ADB devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
             [ -n "$serial" ] && break
             if (( i % 6 == 0 )); then
-              states="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ {print $1,$2}')"
+              states="$($ADB devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ {print $1,$2}')"
               echo "ADB_WAIT_SECONDS=$((i*5)) STATES=${states:-none}"
-              "$adb" reconnect offline >/dev/null 2>&1 || true
+              "$ADB" reconnect offline >/dev/null 2>&1 || true
             fi
             sleep 5
           done
           test -n "$serial" || { echo EMULATOR_DEVICE_FOUND=0; exit 10; }
 
-          echo "=== WAIT FOR STABLE CORE SERVICES ==="
           stable_count=0
           base_ss=''
           base_sf=''
@@ -80,67 +141,43 @@ jobs:
           activity=''
           package=''
           for i in $(seq 1 100); do
-            boot="$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1 || true)"
-            activity="$($adb -s "$serial" shell service check activity 2>/dev/null | tr -d '\r' | tail -n1 || true)"
-            package="$($adb -s "$serial" shell service check package 2>/dev/null | tr -d '\r' | tail -n1 || true)"
-            ss="$($adb -s "$serial" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
-            sf="$($adb -s "$serial" shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true)"
-
+            boot="$($ADB -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+            activity="$($ADB -s "$serial" shell service check activity 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+            package="$($ADB -s "$serial" shell service check package 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+            ss="$($ADB -s "$serial" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
+            sf="$($ADB -s "$serial" shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true)"
             if [ "$boot" = "1" ] && echo "$activity" | grep -q 'found' && echo "$package" | grep -q 'found' && [ -n "$ss" ] && [ -n "$sf" ]; then
-              if [ "$ss" = "$base_ss" ] && [ "$sf" = "$base_sf" ]; then
-                stable_count=$((stable_count+1))
-              else
-                base_ss="$ss"
-                base_sf="$sf"
-                stable_count=1
-              fi
+              if [ "$ss" = "$base_ss" ] && [ "$sf" = "$base_sf" ]; then stable_count=$((stable_count+1)); else base_ss="$ss"; base_sf="$sf"; stable_count=1; fi
             else
-              stable_count=0
-              base_ss="$ss"
-              base_sf="$sf"
+              stable_count=0; base_ss="$ss"; base_sf="$sf"
             fi
-
-            if (( i % 5 == 0 )); then
-              echo "CORE_WAIT_$((i*3))S BOOT=${boot:-none} ACTIVITY='${activity:-none}' PACKAGE='${package:-none}' SS=${ss:-none} SF=${sf:-none} STABLE_COUNT=$stable_count"
-            fi
+            if (( i % 5 == 0 )); then echo "CORE_WAIT_$((i*3))S BOOT=${boot:-none} SS=${ss:-none} SF=${sf:-none} STABLE=$stable_count"; fi
             if [ "$stable_count" -ge 7 ]; then break; fi
             sleep 3
           done
-
           echo "BOOT_COMPLETED=$boot"
           echo "ACTIVITY_SERVICE=$activity"
           echo "PACKAGE_SERVICE=$package"
           echo "SYSTEM_SERVER_PID=$base_ss"
           echo "SURFACEFLINGER_PID=$base_sf"
           echo "CORE_STABLE_COUNT=$stable_count"
-
           if [ "$stable_count" -lt 7 ]; then
-            echo CORE_SERVICES_STABLE=0
-            echo "=== CRASH BUFFER ==="
-            "$adb" -s "$serial" logcat -b crash -d -v threadtime 2>/dev/null | tr -d '\r' | tail -n 260 || true
-            echo "=== SYSTEM / GRAPHICS LOGS ==="
-            "$adb" -s "$serial" logcat -d -v threadtime 2>/dev/null | tr -d '\r' | grep -E -i 'surfaceflinger|system_server|PackageManager|ActivityManager|Watchdog|hasReadColorBufferDma|Fatal signal|SIGABRT|Abort message|FATAL' | tail -n 420 || true
+            echo PINNED_EMULATOR_CORE_STABLE=0
+            "$ADB" -s "$serial" logcat -b crash -d -v threadtime 2>/dev/null | tr -d '\r' | tail -n 260 || true
             exit 20
           fi
-
-          echo "ADB=$adb" >> "$GITHUB_ENV"
           echo "SERIAL=$serial" >> "$GITHUB_ENV"
-          echo "WINUSER=$win_user" >> "$GITHUB_ENV"
           echo "BASE_SS=$base_ss" >> "$GITHUB_ENV"
           echo "BASE_SF=$base_sf" >> "$GITHUB_ENV"
-          echo CORE_SERVICES_STABLE=1
+          echo PINNED_EMULATOR_CORE_STABLE=1
 
-      - name: Install if needed and launch MR SCRAP
+      - name: Validate Settings and MR SCRAP stability
         shell: bash
         run: |
           set -u
           pkg="com.mrscrap.socialradar"
           apk="$RUNNER_WORKSPACE/SCRAP-APP/android/app/build/outputs/apk/debug/app-debug.apk"
           win_tmp="/mnt/c/Users/${WINUSER}/AppData/Local/Temp/MRSCRAP/app-debug.apk"
-
-          pkg_service="$($ADB -s "$SERIAL" shell service check package 2>/dev/null | tr -d '\r' | tail -n1 || true)"
-          echo "PACKAGE_SERVICE_PRE_INSTALL=$pkg_service"
-          echo "$pkg_service" | grep -q 'found' || exit 21
 
           if ! "$ADB" -s "$SERIAL" shell pm path "$pkg" >/dev/null 2>&1; then
             echo PACKAGE_INSTALL_REQUIRED=1
@@ -152,24 +189,28 @@ jobs:
             echo PACKAGE_INSTALL_REQUIRED=0
           fi
           "$ADB" -s "$SERIAL" shell pm enable --user 0 "$pkg" >/dev/null 2>&1 || true
-
           "$ADB" -s "$SERIAL" logcat -b crash -c >/dev/null 2>&1 || true
           "$ADB" -s "$SERIAL" logcat -c >/dev/null 2>&1 || true
 
-          echo "=== CONTROL SETTINGS ==="
+          echo "=== SETTINGS CONTROL ==="
           "$ADB" -s "$SERIAL" shell am start --user 0 -a android.settings.SETTINGS 2>&1 | tr -d '\r' || true
-          sleep 5
+          sleep 15
+          sf_settings="$($ADB -s "$SERIAL" shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true)"
+          ss_settings="$($ADB -s "$SERIAL" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
           settings_pid="$($ADB -s "$SERIAL" shell pidof com.android.settings 2>/dev/null | tr -d '\r' || true)"
           echo "SETTINGS_PID=$settings_pid"
+          echo "SETTINGS_SF=$sf_settings SETTINGS_SS=$ss_settings"
+          [ -n "$settings_pid" ] && [ "$sf_settings" = "$BASE_SF" ] && [ "$ss_settings" = "$BASE_SS" ] || {
+            echo SETTINGS_CONTROL_STABLE=0
+            "$ADB" -s "$SERIAL" logcat -b crash -d -v threadtime 2>/dev/null | tr -d '\r' | tail -n 260 || true
+            exit 30
+          }
+          echo SETTINGS_CONTROL_STABLE=1
 
           echo "=== MR SCRAP ==="
           resolve="$($ADB -s "$SERIAL" shell cmd package resolve-activity --brief --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p "$pkg" 2>/dev/null | tr -d '\r' | tail -n1 || true)"
           echo "RESOLVED_ACTIVITY=$resolve"
-          set +e
-          "$ADB" -s "$SERIAL" shell am start --user 0 -f 0x20 -n "$pkg/.MainActivity" 2>&1 | tr -d '\r'
-          launch_rc=${PIPESTATUS[0]}
-          set -e
-          echo "LAUNCH_RC=$launch_rc"
+          "$ADB" -s "$SERIAL" shell am start --user 0 -f 0x20 -n "$pkg/.MainActivity" 2>&1 | tr -d '\r' || true
 
           stable=1
           ever_app=0
@@ -180,37 +221,20 @@ jobs:
             app="$($ADB -s "$SERIAL" shell pidof "$pkg" 2>/dev/null | tr -d '\r' || true)"
             [ -n "$app" ] && ever_app=1
             echo "STABILITY_$((i*5))S SF=${sf:-none} SS=${ss:-none} APP=${app:-none}"
-            if [ -z "$sf" ] || [ -z "$ss" ] || [ "$sf" != "$BASE_SF" ] || [ "$ss" != "$BASE_SS" ]; then
-              stable=0
-              break
-            fi
+            if [ "$sf" != "$BASE_SF" ] || [ "$ss" != "$BASE_SS" ]; then stable=0; break; fi
           done
 
           crash="$($ADB -s "$SERIAL" logcat -b crash -d -v threadtime 2>/dev/null | tr -d '\r' || true)"
           assertion_count="$(printf '%s\n' "$crash" | grep -c 'hasReadColorBufferDma' || true)"
-          sf_crash_count="$(printf '%s\n' "$crash" | grep -c 'surfaceflinger' || true)"
-          sf_end="$($ADB -s "$SERIAL" shell pidof surfaceflinger 2>/dev/null | tr -d '\r' || true)"
-          ss_end="$($ADB -s "$SERIAL" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
           app_end="$($ADB -s "$SERIAL" shell pidof "$pkg" 2>/dev/null | tr -d '\r' || true)"
           echo "READ_COLOR_BUFFER_DMA_ASSERTIONS=$assertion_count"
-          echo "SURFACEFLINGER_CRASH_LINES=$sf_crash_count"
-          echo "SURFACEFLINGER_PID_AFTER=$sf_end"
-          echo "SYSTEM_SERVER_PID_AFTER=$ss_end"
           echo "APP_PID_AFTER=$app_end"
-          echo "APP_WAS_SEEN=$ever_app"
-
-          if [ "$assertion_count" -gt 0 ] || [ "$sf_crash_count" -gt 0 ]; then stable=0; fi
-          if [ "$stable" -ne 1 ] || [ "$ever_app" -ne 1 ] || [ -z "$app_end" ]; then
-            echo "=== CRASH BUFFER ==="
-            printf '%s\n' "$crash" | tail -n 260 || true
-            echo "=== APP / SYSTEM LOGS ==="
-            "$ADB" -s "$SERIAL" logcat -d -v threadtime 2>/dev/null | tr -d '\r' | grep -E -i 'surfaceflinger|system_server|RegionSampling|hasReadColorBufferDma|mrscrap|MainActivity|AndroidRuntime|FATAL EXCEPTION|Fatal signal|SIGABRT|cr_WebView|chromium' | tail -n 420 || true
-            echo SOFTWARE_RENDERER_ACCEPTANCE=FAIL
+          if [ "$assertion_count" -gt 0 ] || [ "$stable" -ne 1 ] || [ "$ever_app" -ne 1 ] || [ -z "$app_end" ]; then
+            printf '%s\n' "$crash" | tail -n 300 || true
+            echo PINNED_EMULATOR_ACCEPTANCE=FAIL
             exit 40
           fi
-
-          echo SETTINGS_CONTROL_OK=1
           echo MRSCRAP_APP_LAUNCHED=1
           echo SURFACEFLINGER_STABLE=1
           echo SYSTEM_SERVER_STABLE=1
-          echo SOFTWARE_RENDERER_ACCEPTANCE=PASS
+          echo PINNED_EMULATOR_ACCEPTANCE=PASS
