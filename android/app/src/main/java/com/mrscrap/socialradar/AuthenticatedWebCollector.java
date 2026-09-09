@@ -29,13 +29,13 @@ final class AuthenticatedWebCollector {
         void onError(String message);
     }
 
-    private static final long TIMEOUT_MS = 45_000;
-    private static final long PAGE_STARTED_EXTRACTION_DELAY_MS = 900;
+    private static final long TIMEOUT_MS = 75_000;
+    private static final long PAGE_STARTED_EXTRACTION_DELAY_MS = 3_000;
     private static final long FIRST_EXTRACTION_DELAY_MS = 450;
     private static final long RETRY_DELAY_MS = 750;
-    private static final long EVALUATION_WATCHDOG_MS = 2_500;
-    private static final int SURFACE_FALLBACK_ATTEMPT = 4;
-    private static final int MAX_EXTRACTION_ATTEMPTS = 12;
+    private static final long EVALUATION_WATCHDOG_MS = 10_000;
+    private static final int SURFACE_FALLBACK_ATTEMPT = 20;
+    private static final int MAX_EXTRACTION_ATTEMPTS = 30;
     private static final int DEFAULT_LIMIT = 10;
     private static final int MAX_LIMIT = 20;
     private static final String TAG = "MRSCRAP_COLLECTOR";
@@ -93,6 +93,8 @@ final class AuthenticatedWebCollector {
             settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
             settings.setLoadsImagesAutomatically(true);
             settings.setOffscreenPreRaster(true);
+            settings.setUserAgentString("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36");
+            Log.i(TAG, "event=user_agent mode=desktop");
 
             // Detached WebViews can otherwise have a zero-sized viewport. Meta feeds lazily render
             // based on viewport/scroll state, so give the headless collector a real layout.
