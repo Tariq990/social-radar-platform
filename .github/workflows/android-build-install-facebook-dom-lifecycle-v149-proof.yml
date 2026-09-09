@@ -1,4 +1,4 @@
-name: Android Build Install Facebook DOM Lifecycle v149 Proof
+name: Android Build Install Facebook DOM Desktop UA v150 Proof
 
 on:
   push:
@@ -18,8 +18,8 @@ jobs:
     runs-on: [self-hosted, Linux]
     timeout-minutes: 30
     env:
-      ANDROID_VERSION_CODE: '149'
-      ANDROID_VERSION_NAME: '0.1.149-emulator-test'
+      ANDROID_VERSION_CODE: '150'
+      ANDROID_VERSION_NAME: '0.1.150-emulator-test'
       PKG: com.mrscrap.socialradar
 
     steps:
@@ -30,7 +30,7 @@ jobs:
           fetch-depth: 1
           clean: false
 
-      - name: Apply workspace-only DOM lifecycle experiment
+      - name: Apply workspace-only desktop UA experiment
         shell: bash
         run: |
           set -euo pipefail
@@ -41,22 +41,32 @@ jobs:
           delay='private static final long PAGE_STARTED_EXTRACTION_DELAY_MS = 900;'
           assert s.count(delay)==1, s.count(delay)
           s=s.replace(delay, 'private static final long PAGE_STARTED_EXTRACTION_DELAY_MS = 3_000;')
+          ua='            settings.setOffscreenPreRaster(true);'
+          assert s.count(ua)==1, s.count(ua)
+          ua_repl='\n'.join([
+              ua,
+              '            settings.setUserAgentString("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36");',
+              '            Log.i(TAG, "event=user_agent mode=desktop");'
+          ])
+          s=s.replace(ua,ua_repl)
           nav='                    return !isAllowedSocialUrl(request.getUrl().toString());'
           assert s.count(nav)==1, s.count(nav)
-          repl='\n'.join([
+          nav_repl='\n'.join([
               '                    String target = request.getUrl().toString();',
               '                    boolean allowed = isAllowedSocialUrl(target);',
               '                    Log.i(TAG, "event=navigation_request main=" + request.isForMainFrame() +',
-              '                        " allowed=" + allowed + " host=" + String.valueOf(request.getUrl().getHost()));',
+              '                        " allowed=" + allowed + " scheme=" + String.valueOf(request.getUrl().getScheme()) +',
+              '                        " host=" + String.valueOf(request.getUrl().getHost()));',
               '                    return !allowed;'
           ])
-          s=s.replace(nav,repl)
+          s=s.replace(nav,nav_repl)
           p.write_text(s)
           assert 'PAGE_STARTED_EXTRACTION_DELAY_MS = 3_000' in s
-          assert 'event=navigation_request' in s
-          print('V149_WORKSPACE_PATCH=PASS')
+          assert 'event=user_agent mode=desktop' in s
+          assert 'scheme=' in s
+          print('V150_WORKSPACE_PATCH=PASS')
           PY
-          git diff -- android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedWebCollector.java | sed -n '1,140p'
+          git diff -- android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedWebCollector.java | sed -n '1,170p'
 
       - name: Setup Java 21
         uses: actions/setup-java@v4
@@ -75,14 +85,14 @@ jobs:
           gradle="$HOME/.local/share/mrscrap-gradle/gradle-8.13/bin/gradle"; test -x "$gradle"
           echo "GRADLE_BIN=$gradle" >> "$GITHUB_ENV"
 
-      - name: Compile workspace-only v149 debug APK
+      - name: Compile workspace-only v150 debug APK
         shell: bash
         run: |
           set -euo pipefail
           "$GRADLE_BIN" -p android :app:assembleDebug --stacktrace
           apk="$GITHUB_WORKSPACE/android/app/build/outputs/apk/debug/app-debug.apk"; test -s "$apk"
           echo "APK_SIZE=$(stat -c '%s' "$apk")"
-          echo V149_APK_BUILD_GATE=PASS
+          echo V150_APK_BUILD_GATE=PASS
 
       - name: Resolve emulator and preserve Facebook session
         shell: bash
@@ -97,15 +107,15 @@ jobs:
           echo FACEBOOK_SESSION_METADATA_BEFORE_INSTALL=1
           echo "ADB=$adb" >> "$GITHUB_ENV"; echo "SERIAL=$serial" >> "$GITHUB_ENV"; echo "WIN_USER=$win_user" >> "$GITHUB_ENV"
 
-      - name: Install and launch v149 preserving app data
+      - name: Install and launch v150 preserving app data
         shell: bash
         run: |
           set -euo pipefail
           apk="$GITHUB_WORKSPACE/android/app/build/outputs/apk/debug/app-debug.apk"
-          win_tmp="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/MR-SCRAP-emulator-test-149.apk"; cp "$apk" "$win_tmp"
+          win_tmp="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/MR-SCRAP-emulator-test-150.apk"; cp "$apk" "$win_tmp"
           out="$($ADB -s "$SERIAL" install -r "$(wslpath -w "$win_tmp")" 2>&1 | tr -d '\r')"; printf '%s\n' "$out"; printf '%s' "$out" | grep -q Success
           version="$($ADB -s "$SERIAL" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"
-          echo "INSTALLED_VERSION_CODE=$version"; test "$version" = 149
+          echo "INSTALLED_VERSION_CODE=$version"; test "$version" = 150
           marker="$($ADB -s "$SERIAL" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"; printf '%s' "$marker" | grep -q facebook_connected_at
           echo FACEBOOK_SESSION_METADATA_AFTER_INSTALL=1
           for i in $(seq 1 12); do code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 https://mr-scrap-api-live.onrender.com/api/health || true)"; [ "$code" = 200 ] && break; sleep 5; done
@@ -115,7 +125,7 @@ jobs:
           sleep 10
           pid="$($ADB -s "$SERIAL" shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"; test -n "$pid"
           echo "APP_PID=$pid" >> "$GITHUB_ENV"
-          echo V149_APP_LAUNCHED=1
+          echo V150_APP_LAUNCHED=1
 
       - name: Trigger real Grab through app UI
         shell: bash
@@ -125,7 +135,7 @@ jobs:
           [ -n "$socket" ] || socket="$($ADB -s "$SERIAL" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | head -n1 || true)"; test -n "$socket"
           $ADB -s "$SERIAL" forward --remove tcp:9223 >/dev/null 2>&1 || true
           $ADB -s "$SERIAL" forward tcp:9223 "localabstract:$socket" >/dev/null
-          ps1="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-v149-grab.ps1"
+          ps1="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-v150-grab.ps1"
           cat > "$ps1" <<'PS'
           $ErrorActionPreference='Stop'
           function Targets { for($i=0;$i -lt 20;$i++){ try{$t=@(Invoke-RestMethod -Uri 'http://127.0.0.1:9223/json/list' -TimeoutSec 2);if($t.Count -gt 0){return $t}}catch{}; Start-Sleep -Milliseconds 300 }; throw 'targets unavailable' }
@@ -138,18 +148,18 @@ jobs:
           '@
           $s=$null
           for($i=0;$i -lt 80;$i++){Start-Sleep -Milliseconds 400;$app=AppTarget;$s=Eval ([string]$app.webSocketDebuggerUrl) $find 8;if($s.found -and $s.enabled){break}}
-          Write-Output ('RADAR_GRAB_BUTTON_FOUND='+$(if($s.found){'1'}else{'0'}));Write-Output ('RADAR_GRAB_BUTTON_ENABLED='+$(if($s.enabled){'1'}else{'0'}));if(!$s.found -or !$s.enabled){exit 149}
+          Write-Output ('RADAR_GRAB_BUTTON_FOUND='+$(if($s.found){'1'}else{'0'}));Write-Output ('RADAR_GRAB_BUTTON_ENABLED='+$(if($s.enabled){'1'}else{'0'}));if(!$s.found -or !$s.enabled){exit 150}
           $click=@'
           (()=>{const n=s=>String(s||'').replace(/\s+/g,' ').trim();const b=[...document.querySelectorAll('button')].find(x=>{const t=n(x.innerText||x.textContent);return t.includes('\u0627\u062c\u0644\u0628 \u0622\u062e\u0631 10 \u0648\u062d\u0644\u0644\u0647\u0627')||/Grab latest 10 and analyze/i.test(t)});if(!b||b.disabled)return false;b.click();return true})()
           '@
           $clicked=Eval ([string]$app.webSocketDebuggerUrl) $click 8
-          Write-Output ('REAL_GRAB_CLICKED='+$(if($clicked){'1'}else{'0'}));if(!$clicked){exit 150}
+          Write-Output ('REAL_GRAB_CLICKED='+$(if($clicked){'1'}else{'0'}));if(!$clicked){exit 151}
           PS
           $ADB -s "$SERIAL" logcat -c >/dev/null 2>&1 || true
           /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
-          echo V149_REAL_GRAB_TRIGGER=PASS
+          echo V150_REAL_GRAB_TRIGGER=PASS
 
-      - name: Prove lifecycle behavior and collection
+      - name: Prove desktop UA navigation and collection
         shell: bash
         run: |
           set -euo pipefail
@@ -161,18 +171,21 @@ jobs:
             [ -n "$success" ] || [ -n "$failure" ] || { sleep 1; continue; }
             break
           done
-          echo '=== SAFE V149 LIFECYCLE TRACE ==='
-          $ADB -s "$SERIAL" logcat -b all -d -v threadtime 2>/dev/null | tr -d '\r' | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' | tail -n 320 || true
+          echo '=== SAFE V150 DESKTOP-UA TRACE ==='
+          $ADB -s "$SERIAL" logcat -b all -d -v threadtime 2>/dev/null | tr -d '\r' | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' | tail -n 340 || true
+          ua_count="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -c 'MRSCRAP_COLLECTOR.*event=user_agent mode=desktop' || true)"
+          deep_count="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -Ec 'MRSCRAP_COLLECTOR.*event=navigation_request main=true allowed=false scheme=fb host=profile' || true)"
+          fb_nav="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -Ec 'MRSCRAP_COLLECTOR.*event=navigation_request main=true allowed=true scheme=https host=.*facebook.com' || true)"
           started="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -c 'MRSCRAP_COLLECTOR.*event=page_started' || true)"
           finished="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -c 'MRSCRAP_COLLECTOR.*event=page_finished' || true)"
-          requests="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -c 'MRSCRAP_COLLECTOR.*event=navigation_request' || true)"
           max_body="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | sed -n 's/.*event=eval_result.* body=\([0-9][0-9]*\).*/\1/p' | sort -n | tail -n1)"
-          echo "DOM_PAGE_STARTED_COUNT=$started"; echo "DOM_PAGE_FINISHED_COUNT=$finished"; echo "DOM_NAVIGATION_REQUEST_COUNT=$requests"; echo "MAX_DOM_BODY_TEXT_LENGTH=${max_body:-0}"
-          if [ -n "$failure" ]; then code="$(printf '%s' "$failure" | sed -n 's/.*code=\([^ ]*\).*/\1/p')"; echo "FACEBOOK_COLLECTOR_FAILURE_CODE=${code:-unknown}"; exit 151; fi
+          echo "DESKTOP_UA_COUNT=$ua_count"; echo "FB_PROFILE_DEEPLINK_COUNT=$deep_count"; echo "ALLOWED_FACEBOOK_NAV_COUNT=$fb_nav"; echo "DOM_PAGE_STARTED_COUNT=$started"; echo "DOM_PAGE_FINISHED_COUNT=$finished"; echo "MAX_DOM_BODY_TEXT_LENGTH=${max_body:-0}"
+          test "$ua_count" -gt 0
+          if [ -n "$failure" ]; then code="$(printf '%s' "$failure" | sed -n 's/.*code=\([^ ]*\).*/\1/p')"; echo "FACEBOOK_COLLECTOR_FAILURE_CODE=${code:-unknown}"; exit 152; fi
           test -n "$success"
           posts="$(printf '%s' "$success" | sed -n 's/.*posts=\([0-9][0-9]*\).*/\1/p')"
           echo REQUESTED_POSTS=10; echo "FACEBOOK_POSTS_COLLECTED=$posts"; test -n "$posts"; test "$posts" -gt 0
-          echo FACEBOOK_V149_COLLECTION_GATE=PASS
+          echo FACEBOOK_V150_COLLECTION_GATE=PASS
 
       - name: Prove Facebook session survives app restart
         if: always()
@@ -188,5 +201,5 @@ jobs:
           echo FACEBOOK_SESSION_METADATA_AFTER_APP_RESTART=1
           test -n "$($ADB -s "$SERIAL" shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"
           $ADB -s "$SERIAL" forward --remove tcp:9223 >/dev/null 2>&1 || true
-          rm -f "/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-v149-grab.ps1" 2>/dev/null || true
+          rm -f "/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-v150-grab.ps1" 2>/dev/null || true
           echo FACEBOOK_SESSION_RESTART_GATE=PASS
