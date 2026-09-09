@@ -12,120 +12,135 @@ permissions:
 jobs:
   repair-live-package:
     runs-on: [self-hosted, Linux]
-    timeout-minutes: 8
+    timeout-minutes: 10
     steps:
-      - name: Ensure emulator is running
+      - name: Reset AVD data once and boot clean
         shell: bash
         run: |
-          set -u
+          set -euo pipefail
           win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
           sdk_wsl="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk"
           sdk_win="C:\\Users\\${win_user}\\AppData\\Local\\MRSCRAP\\AndroidSdk"
           adb="${sdk_wsl}/platform-tools/adb.exe"
           image_win="${sdk_win}\\system-images\\android-36\\google_apis\\x86_64"
           avd_dir="/mnt/c/Users/${win_user}/.android/avd/test_avd.avd"
+          data="${avd_dir}/userdata-qemu.img"
+          backup="${avd_dir}/userdata-qemu.pre-clean.img"
 
-          "$adb" start-server >/dev/null 2>&1 || true
-          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
+          command -v mkfs.ext4 >/dev/null
+          test -s "$data"
 
-          if [ -z "$serial" ]; then
-            echo EMULATOR_RESTART_REQUIRED=1
-            /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -Command "Get-Process emulator,qemu-system-x86_64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue" >/dev/null 2>&1 || true
-            sleep 2
-            rm -rf "$avd_dir"/*.lock "$avd_dir"/multiinstance.lock 2>/dev/null || true
+          echo "=== STOP OLD EMULATOR ==="
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -Command "Get-Process emulator,qemu-system-x86_64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue" >/dev/null 2>&1 || true
+          sleep 3
+          "$adb" kill-server >/dev/null 2>&1 || true
 
-            ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-live-start.ps1"
-            cat > "$ps1" <<POWERSHELL
+          echo "=== PRESERVE OLD USERDATA ==="
+          rm -f "$backup"
+          mv "$data" "$backup"
+          rm -f "${avd_dir}/userdata-qemu.img.qcow2" "${avd_dir}/cache.img" "${avd_dir}/cache.img.qcow2" || true
+          rm -rf "${avd_dir}/snapshots" "${avd_dir}"/*.lock "${avd_dir}/multiinstance.lock" 2>/dev/null || true
+          ls -lh "$backup"
+
+          echo "=== CREATE CLEAN 4GB EXT4 USERDATA ==="
+          truncate -s 4G "$data"
+          mkfs.ext4 -F -L userdata "$data"
+          sed -i 's/^disk.dataPartition.size=.*/disk.dataPartition.size=4096M/' "${avd_dir}/config.ini"
+          grep '^disk.dataPartition.size=' "${avd_dir}/config.ini"
+          echo AVD_DATA_RESET_READY=1
+
+          echo "=== START CLEAN EMULATOR ==="
+          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-clean-start.ps1"
+          cat > "$ps1" <<POWERSHELL
           \$ErrorActionPreference = 'Stop'
           \$sdk = '${sdk_win}'
           \$emu = Join-Path \$sdk 'emulator\\emulator.exe'
           \$args = @('@test_avd','-sysdir','${image_win}','-no-audio','-no-boot-anim','-no-snapshot','-gpu','swiftshader_indirect','-no-window')
           Start-Process -FilePath \$emu -ArgumentList \$args -WindowStyle Hidden
           POWERSHELL
-            /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
 
-            for i in $(seq 1 36); do
-              serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
-              [ -n "$serial" ] && break
-              if (( i % 6 == 0 )); then
-                echo "ADB_WAIT_SECONDS=$((i*5))"
-                "$adb" reconnect offline >/dev/null 2>&1 || true
-              fi
-              sleep 5
-            done
-          fi
-
-          test -n "$serial" || { echo EMULATOR_DEVICE_FOUND=0; exit 10; }
-          echo "SERIAL=$serial" >> "$GITHUB_ENV"
-          echo "ADB=$adb" >> "$GITHUB_ENV"
-          echo EMULATOR_DEVICE_FOUND=1
+          "$adb" start-server >/dev/null 2>&1 || true
+          serial=''
+          for i in $(seq 1 48); do
+            serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
+            [ -n "$serial" ] && break
+            if (( i % 6 == 0 )); then
+              states="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ {print $1,$2}')"
+              echo "ADB_WAIT_SECONDS=$((i*5)) STATES=${states:-none}"
+              "$adb" reconnect offline >/dev/null 2>&1 || true
+            fi
+            sleep 5
+          done
+          test -n "$serial" || { echo CLEAN_EMULATOR_ADB_READY=0; exit 10; }
+          echo CLEAN_EMULATOR_ADB_READY=1
 
           boot=''
-          for i in $(seq 1 30); do
+          for i in $(seq 1 45); do
             boot="$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1 || true)"
             [ "$boot" = "1" ] && break
             sleep 4
           done
           echo "BOOT_COMPLETED=$boot"
-          test "$boot" = "1" || exit 11
+          test "$boot" = "1" || { echo CLEAN_EMULATOR_BOOT_READY=0; exit 11; }
+          echo CLEAN_EMULATOR_BOOT_READY=1
 
-      - name: Diagnose package and launch app
+          echo "ADB=$adb" >> "$GITHUB_ENV"
+          echo "SERIAL=$serial" >> "$GITHUB_ENV"
+          echo "AVD_BACKUP=$backup" >> "$GITHUB_ENV"
+
+      - name: Install existing APK and launch
         shell: bash
         run: |
           set -u
           pkg="com.mrscrap.socialradar"
           apk="$RUNNER_WORKSPACE/SCRAP-APP/android/app/build/outputs/apk/debug/app-debug.apk"
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          win_tmp="/mnt/c/Users/${win_user}/AppData/Local/Temp/MRSCRAP/app-debug.apk"
 
-          if ! "$ADB" -s "$SERIAL" shell pm path "$pkg" >/dev/null 2>&1; then
-            echo PACKAGE_INSTALL_REQUIRED=1
-            win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
-            win_tmp="/mnt/c/Users/${win_user}/AppData/Local/Temp/MRSCRAP/app-debug.apk"
-            mkdir -p "$(dirname "$win_tmp")"
-            cp -f "$apk" "$win_tmp"
-            "$ADB" -s "$SERIAL" install "$(wslpath -w "$win_tmp")" | tr -d '\r'
-          fi
+          test -s "$apk"
+          mkdir -p "$(dirname "$win_tmp")"
+          cp -f "$apk" "$win_tmp"
 
-          echo "=== PACKAGE / USER STATE ==="
-          "$ADB" -s "$SERIAL" shell am get-current-user 2>&1 | tr -d '\r' || true
-          "$ADB" -s "$SERIAL" shell pm path "$pkg" 2>&1 | tr -d '\r' || true
-          "$ADB" -s "$SERIAL" shell dumpsys package "$pkg" 2>/dev/null | tr -d '\r' | grep -E 'versionCode=|versionName=|User 0:|installed=|hidden=|suspended=|stopped=|notLaunched=|enabled=|MainActivity|android.intent.action.MAIN|android.intent.category.LAUNCHER' | head -n 140 || true
+          echo "=== INSTALL ==="
+          "$ADB" -s "$SERIAL" install "$(wslpath -w "$win_tmp")" 2>&1 | tr -d '\r'
+          install_rc=${PIPESTATUS[0]}
+          test "$install_rc" -eq 0 || exit "$install_rc"
 
-          echo "=== COMPONENT ENABLE STATE ==="
-          "$ADB" -s "$SERIAL" shell cmd package get-component-enabled-setting --user 0 "$pkg/.MainActivity" 2>&1 | tr -d '\r' || true
+          echo "=== PACKAGE ==="
+          "$ADB" -s "$SERIAL" shell pm path "$pkg" 2>&1 | tr -d '\r'
+          "$ADB" -s "$SERIAL" shell cmd package query-activities --brief --components --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p "$pkg" 2>&1 | tr -d '\r' || true
           "$ADB" -s "$SERIAL" shell pm enable --user 0 "$pkg" 2>&1 | tr -d '\r' || true
 
-          echo "=== QUERY LAUNCHER ==="
-          "$ADB" -s "$SERIAL" shell cmd package query-activities --brief --components --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p "$pkg" 2>&1 | tr -d '\r' || true
-          "$ADB" -s "$SERIAL" shell cmd package resolve-activity --brief --user 0 -n "$pkg/.MainActivity" 2>&1 | tr -d '\r' || true
+          echo "=== SYSTEM_SERVER BEFORE ==="
+          ss_before="$($ADB -s "$SERIAL" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
+          echo "SYSTEM_SERVER_PID_BEFORE=$ss_before"
+          "$ADB" -s "$SERIAL" logcat -c >/dev/null 2>&1 || true
 
-          echo "=== START EXACT INCLUDE STOPPED ==="
+          echo "=== LAUNCH ==="
           set +e
           "$ADB" -s "$SERIAL" shell am start --user 0 -W -f 0x20 -n "$pkg/.MainActivity" 2>&1 | tr -d '\r'
-          exact_rc=${PIPESTATUS[0]}
-          echo "EXACT_RC=$exact_rc"
-
-          echo "=== START IMPLICIT INCLUDE STOPPED ==="
-          "$ADB" -s "$SERIAL" shell am start --user 0 -W -f 0x20 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p "$pkg" 2>&1 | tr -d '\r'
-          implicit_rc=${PIPESTATUS[0]}
-          echo "IMPLICIT_RC=$implicit_rc"
-
-          echo "=== MONKEY LAUNCH ==="
-          "$ADB" -s "$SERIAL" shell monkey --user 0 -p "$pkg" -c android.intent.category.LAUNCHER 1 2>&1 | tr -d '\r'
-          monkey_rc=${PIPESTATUS[0]}
-          echo "MONKEY_RC=$monkey_rc"
+          launch_rc=${PIPESTATUS[0]}
           set -e
+          echo "LAUNCH_RC=$launch_rc"
 
-          sleep 3
+          sleep 5
           pid="$($ADB -s "$SERIAL" shell pidof "$pkg" 2>/dev/null | tr -d '\r' || true)"
-          echo "PID=$pid"
+          ss_after="$($ADB -s "$SERIAL" shell pidof system_server 2>/dev/null | tr -d '\r' || true)"
+          echo "APP_PID=$pid"
+          echo "SYSTEM_SERVER_PID_AFTER=$ss_after"
 
-          if [ -z "$pid" ]; then
-            echo "=== FAILURE DIAGNOSTICS ==="
-            "$ADB" -s "$SERIAL" shell dumpsys package "$pkg" 2>/dev/null | tr -d '\r' | grep -A40 'User 0:' | head -n 60 || true
-            "$ADB" -s "$SERIAL" shell dumpsys package "$pkg" 2>/dev/null | tr -d '\r' | grep -A35 -B12 'MainActivity' | head -n 200 || true
-            "$ADB" -s "$SERIAL" logcat -d -t 600 2>/dev/null | tr -d '\r' | grep -E -i 'mrscrap|MainActivity|ActivityTaskManager|PackageManager|FATAL EXCEPTION|AndroidRuntime' | tail -n 260 || true
-            echo EMULATOR_APP_LAUNCHED=0
-            exit 20
+          if [ "$launch_rc" -eq 0 ] && [ -n "$pid" ]; then
+            echo EMULATOR_APP_LAUNCHED=1
+            rm -f "$AVD_BACKUP"
+            echo OLD_USERDATA_BACKUP_REMOVED=1
+            exit 0
           fi
 
-          echo EMULATOR_APP_LAUNCHED=1
+          echo "=== FAILURE LOGCAT ==="
+          "$ADB" -s "$SERIAL" logcat -b all -d -v threadtime 2>/dev/null | tr -d '\r' | tail -n 900 || true
+          echo "=== DROPBOX SYSTEM SERVER ==="
+          "$ADB" -s "$SERIAL" shell dumpsys dropbox --print system_server_crash 2>/dev/null | tr -d '\r' | tail -n 400 || true
+          "$ADB" -s "$SERIAL" shell dumpsys dropbox --print system_server_wtf 2>/dev/null | tr -d '\r' | tail -n 300 || true
+          echo EMULATOR_APP_LAUNCHED=0
+          exit 20
