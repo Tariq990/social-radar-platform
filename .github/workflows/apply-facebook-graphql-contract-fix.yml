@@ -1,0 +1,50 @@
+name: Apply Facebook GraphQL Contract Fix
+
+on:
+  push:
+    branches: [test/android-physical-fix-20260909]
+    paths: [.github/workflows/apply-facebook-graphql-contract-fix.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch recovered native source only
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin test/android-physical-local-recovery-20260909
+          git checkout -B physical-code-fix FETCH_HEAD
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java')
+          s=p.read_text(encoding='utf-8')
+          old='''            settings.setLoadsImagesAutomatically(true);\n            settings.setOffscreenPreRaster(true);\n'''
+          new='''            settings.setLoadsImagesAutomatically(true);\n            settings.setOffscreenPreRaster(true);\n            // Facebook aborted this collector surface with Android WebView's default identity on the\n            // physical phone. The same authenticated WebView navigates successfully as a desktop\n            // Chromium client; keep this scoped to the Facebook collector only.\n            settings.setUserAgentString(\n                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +\n                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"\n            );\n'''
+          if s.count(old)!=1: raise SystemExit('UA_PATCH_ANCHOR_MISMATCH')
+          s=s.replace(old,new,1)
+          old_vars='''              const variablesFor = (cursor, count) => ({\n                afterTime:null, beforeTime:null, count, cursor,\n                feedLocation:'TIMELINE', feedbackSource:0, focusCommentID:null,\n                memorializedSplitTimeFilter:null, omitPinnedPost:true,\n                postedBy:{group:'OWNER'}, privacy:null,\n                privacySelectorRenderLocation:'COMET_STREAM', referringStoryRenderLocation:null,\n                renderLocation:'timeline', scale:1, stream_count:1, taggedInOnly:null,\n                trackingCode:null, useDefaultActor:false, id:sourceId,\n                __relay_internal__pv__IsWorkUserrelayprovider:false,\n                __relay_internal__pv__CometUFICommentActionLinksRewriteEnabledrelayprovider:true,\n                __relay_internal__pv__CometUFISingleLineUFIrelayprovider:true\n              });\n'''
+          new_vars='''              // Keep the timeline variables byte-for-byte equivalent in meaning to\n              // facebook-graphql-scraper/scrapers/facebook_client/graphql.py::build_variables.\n              const variablesFor = (cursor, count) => ({\n                afterTime:null, beforeTime:null, count, cursor,\n                feedLocation:'TIMELINE', feedbackSource:0, focusCommentID:null,\n                memorializedSplitTimeFilter:null, omitPinnedPost:true,\n                postedBy:{group:'OWNER'}, privacy:null,\n                privacySelectorRenderLocation:'COMET_STREAM', referringStoryRenderLocation:null,\n                renderLocation:'timeline', scale:1, stream_count:1, taggedInOnly:null,\n                trackingCode:null, useDefaultActor:false, id:sourceId,\n                __relay_internal__pv__GHLShouldChangeAdIdFieldNamerelayprovider:false,\n                __relay_internal__pv__GHLShouldChangeSponsoredDataFieldNamerelayprovider:false,\n                __relay_internal__pv__CometFeedStory_enable_reactor_facepilerelayprovider:false,\n                __relay_internal__pv__CometFeedStory_enable_social_bubblesrelayprovider:false,\n                __relay_internal__pv__CometFeedStory_enable_post_permalink_white_space_clickrelayprovider:false,\n                __relay_internal__pv__CometUFICommentActionLinksRewriteEnabledrelayprovider:true,\n                __relay_internal__pv__CometUFICommentAvatarStickerAnimatedImagerelayprovider:false,\n                __relay_internal__pv__IsWorkUserrelayprovider:false,\n                __relay_internal__pv__TestPilotShouldIncludeDemoAdUseCaserelayprovider:false,\n                __relay_internal__pv__FBReels_deprecate_short_form_video_context_gkrelayprovider:true,\n                __relay_internal__pv__FBReels_enable_view_dubbed_audio_type_gkrelayprovider:true,\n                __relay_internal__pv__CometFeedShareMedia_shouldPrefetchShareImagerelayprovider:false,\n                __relay_internal__pv__CometImmersivePhotoCanUserDisable3DMotionrelayprovider:false,\n                __relay_internal__pv__WorkCometIsEmployeeGKProviderrelayprovider:false,\n                __relay_internal__pv__IsMergQAPollsrelayprovider:false,\n                __relay_internal__pv__FBReelsMediaFooter_comet_enable_reels_ads_gkrelayprovider:true,\n                __relay_internal__pv__CometUFIReactionsEnableShortNamerelayprovider:false,\n                __relay_internal__pv__CometUFICommentAutoTranslationTyperelayprovider:'AUTO_TRANSLATE',\n                __relay_internal__pv__CometUFIShareActionMigrationrelayprovider:true,\n                __relay_internal__pv__CometUFISingleLineUFIrelayprovider:true,\n                __relay_internal__pv__relay_provider_comet_ufi_ssr_seo_deferrelayprovider:true,\n                __relay_internal__pv__CometUFI_dedicated_comment_routable_dialog_gkrelayprovider:true,\n                __relay_internal__pv__ReelsIFUCard_reelsIFULikeCountrelayprovider:false,\n                __relay_internal__pv__FBReelsIFUTileContent_reelsIFUPlayOnHoverrelayprovider:true,\n                __relay_internal__pv__GroupsCometGYSJFeedItemHeightrelayprovider:206,\n                __relay_internal__pv__ShouldEnableBakedInTextStoriesrelayprovider:false,\n                __relay_internal__pv__StoriesShouldIncludeFbNotesrelayprovider:true\n              });\n'''
+          if s.count(old_vars)!=1: raise SystemExit('VARIABLE_PATCH_ANCHOR_MISMATCH')
+          p.write_text(s.replace(old_vars,new_vars,1),encoding='utf-8')
+          PY
+          git diff --check
+          grep -q 'GHLShouldChangeAdIdFieldNamerelayprovider' android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java
+          grep -q 'setUserAgentString' android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java
+          if [ -f scripts/verify-facebook-script.py ]; then
+            export JAVA_HOME=/home/tarik/actions-runnerr/_work/_tool/Java_Temurin-Hotspot_jdk/21.0.12-101.0.LTS/x64
+            export PATH="$JAVA_HOME/bin:/home/tarik/actions-runnerr/_work/_tool/node/22.23.2/x64/bin:$PATH"
+            python3 scripts/verify-facebook-script.py
+          fi
+          git config user.name 'MR SCRAP Physical Fix'
+          git config user.email 'actions@users.noreply.github.com'
+          git add android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java
+          git commit -m 'fix: match working Facebook timeline GraphQL contract'
+          git push origin HEAD:test/android-physical-local-recovery-20260909
