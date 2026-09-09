@@ -15,6 +15,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: android-persistent-emulator-runtime
+  cancel-in-progress: true
+
 jobs:
   runtime:
     runs-on: [self-hosted, Linux]
@@ -124,10 +128,26 @@ jobs:
           \$stderr = Join-Path \$env:LOCALAPPDATA 'Temp\\mrscrap-emulator.stderr.log'
           Remove-Item \$stdout,\$stderr -Force -ErrorAction SilentlyContinue
 
-          Get-CimInstance Win32_Process -Filter "Name='emulator.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { \$_.ExecutablePath -eq \$emulator } |
-            ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }
-          Start-Sleep -Seconds 1
+          \$killed = 0
+          Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object {
+              \$path = [string]\$_.ExecutablePath
+              \$cmd = [string]\$_.CommandLine
+              (\$path -like (\$sdk + '\\emulator\\*')) -and
+              ((\$_.Name -eq 'emulator.exe') -or (\$_.Name -like 'qemu-system-x86_64*')) -and
+              ((\$cmd -like ('*@' + \$avdName + '*')) -or (\$_.Name -eq 'emulator.exe'))
+            } |
+            ForEach-Object {
+              Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue
+              \$killed++
+            }
+          Write-Output ("STALE_EMULATOR_PROCESSES_KILLED=" + \$killed)
+          Start-Sleep -Seconds 2
+
+          Get-ChildItem -Path \$avdDir -Filter '*.lock' -Force -ErrorAction SilentlyContinue |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path \$avdDir 'multiinstance.lock') -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Output 'AVD_LOCKS_CLEANED=1'
 
           \$args = @('@' + \$avdName,'-sysdir',\$imageDir,'-no-audio','-no-boot-anim','-no-snapshot','-gpu','swiftshader_indirect','-verbose')
           if (\$needsRebase) { \$args += '-wipe-data' }
@@ -136,8 +156,7 @@ jobs:
           \$p = Start-Process -FilePath \$emulator -ArgumentList \$args -WindowStyle \$windowStyle -RedirectStandardOutput \$stdout -RedirectStandardError \$stderr -PassThru
           Start-Sleep -Seconds 3
           Write-Output 'EMULATOR_PROCESS_STARTED=1'
-          Write-Output ("EMULATOR_PROCESS_ALIVE=" + [int](-not \$p.HasExited))
-          if (\$p.HasExited) { Write-Output ("EMULATOR_PROCESS_EXIT_CODE=" + \$p.ExitCode) }
+          Write-Output ("EMULATOR_WRAPPER_ALIVE=" + [int](-not \$p.HasExited))
           POWERSHELL
 
             ps1_win="$(wslpath -w "$ps1")"
@@ -145,14 +164,15 @@ jobs:
               -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
               -File "$ps1_win" | tr -d '\r'
 
+            "$adb_wsl" kill-server >/dev/null 2>&1 || true
             "$adb_wsl" start-server >/dev/null 2>&1 || true
             serial=''
             for i in $(seq 1 24); do
               serial="$($adb_wsl devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2 == "device" {print $1; exit}')"
               [ -n "$serial" ] && break
               if (( i % 6 == 0 )); then
-                count="$($adb_wsl devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ {c++} END {print c+0}')"
-                echo "ADB_WAIT_SECONDS=$((i * 5)) EMULATOR_ROWS=${count}"
+                states="$($adb_wsl devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ {c[$2]++} END {for (s in c) printf "%s=%d ",s,c[s]}')"
+                echo "ADB_WAIT_SECONDS=$((i * 5)) EMULATOR_STATES=${states:-none}"
               fi
               sleep 5
             done
