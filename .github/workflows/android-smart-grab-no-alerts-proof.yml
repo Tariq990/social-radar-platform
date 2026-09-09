@@ -84,10 +84,9 @@ jobs:
           function AppTarget { $a=@(Targets|Where-Object{$_.type -eq 'page' -and [string]$_.url -like 'https://localhost*'}|Select-Object -First 1);if($a.Count -eq 0){throw 'app target missing'};$a[0] }
           function Eval([string]$raw,[string]$expr,[int]$seconds=240){$u=[Uri]$raw;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($seconds));$ws.ConnectAsync([Uri]('ws://127.0.0.1:9224'+$u.PathAndQuery),$cts.Token).GetAwaiter().GetResult()|Out-Null;$p=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 8;$b=[Text.Encoding]::UTF8.GetBytes($p);$ws.SendAsync([ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null;$buf=New-Object byte[] 131072;$sb=[Text.StringBuilder]::new();while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id -ne 1){continue};if($m.result.exceptionDetails){throw 'runtime eval exception'};$v=$m.result.result.value;try{$ws.Abort()}catch{};return $v}}
           $app=AppTarget
-          $backend=$env:BACKEND
-          $expr=@"
+          $expr=@'
           (async()=>{
-            const base=${backend@Q};
+            const base='https://mr-scrap-api-live.onrender.com';
             const safeJson=async(r)=>{try{return await r.json()}catch{return null}};
             const getAlerts=async()=>{const r=await fetch(base+'/api/alerts',{credentials:'include'});const b=await safeJson(r);return{ok:r.ok,status:r.status,rows:Array.isArray(b)?b:[]}};
             const before=await getAlerts();
@@ -118,7 +117,7 @@ jobs:
             const sameSet=beforeIds.length===afterIds.length&&beforeIds.every((v,i)=>v===afterIds[i]);
             return{stage:'done',before:beforeIds.length,after:afterIds.length,sameSet,posts:posts.length,explore:true,postsAnalyzed:Number(eb?.postsAnalyzed||0),accepted:Number(eb?.accepted||0),duplicates:Number(eb?.duplicates||0),rejected:Number(eb?.rejected||0),items:Array.isArray(eb?.items)?eb.items.length:0};
           })()
-          "@
+          '@
           $r=Eval ([string]$app.webSocketDebuggerUrl) $expr 240
           Write-Output ('SMART_GRAB_STAGE='+[string]$r.stage)
           Write-Output ('ALERTS_BEFORE='+[int]$r.before)
