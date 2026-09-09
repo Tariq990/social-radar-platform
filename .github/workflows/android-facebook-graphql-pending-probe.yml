@@ -1,0 +1,289 @@
+name: Android Facebook GraphQL Pending Probe
+
+on:
+  push:
+    branches:
+      - test/android-headless-emulator-20260909
+    paths:
+      - .github/workflows/android-facebook-graphql-pending-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 8
+    env:
+      PKG: com.mrscrap.socialradar
+
+    steps:
+      - name: Resolve live rebuilt app and forward WebView DevTools
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1; exit}')"
+          test -s "$adb"
+          test -n "$serial"
+          pid="$($adb -s "$serial" shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"
+          test -n "$pid"
+          version="$($adb -s "$serial" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"
+          echo "INSTALLED_VERSION_CODE=$version"
+          test "$version" = '143'
+          marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          printf '%s' "$marker" | grep -q 'facebook_connected_at'
+          echo FACEBOOK_SESSION_METADATA=1
+
+          sockets="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' || true)"
+          socket="$(printf '%s\n' "$sockets" | grep -E "${pid}$|_${pid}($|_)" | head -n1 || true)"
+          [ -n "$socket" ] || socket="$(printf '%s\n' "$sockets" | head -n1 || true)"
+          test -n "$socket"
+          $adb -s "$serial" forward --remove tcp:9223 >/dev/null 2>&1 || true
+          $adb -s "$serial" forward tcp:9223 "localabstract:$socket" >/dev/null
+          echo "ADB=$adb" >> "$GITHUB_ENV"
+          echo "SERIAL=$serial" >> "$GITHUB_ENV"
+          echo "WIN_USER=$win_user" >> "$GITHUB_ENV"
+          echo LIVE_PROBE_PREREQUISITES=PASS
+
+      - name: Trigger real Grab 10 and inspect the live Facebook collector target
+        shell: bash
+        run: |
+          set -euo pipefail
+          $ADB -s "$SERIAL" logcat -c >/dev/null 2>&1 || true
+          ps1="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-graphql-pending-probe.ps1"
+          cat > "$ps1" <<'PS'
+          $ErrorActionPreference = 'Stop'
+
+          function Get-Targets {
+            for ($i = 0; $i -lt 20; $i++) {
+              try {
+                $targets = @(Invoke-RestMethod -Uri 'http://127.0.0.1:9223/json/list' -TimeoutSec 2)
+                if ($targets.Count -gt 0) { return $targets }
+              } catch {}
+              Start-Sleep -Milliseconds 250
+            }
+            throw 'CDP target list unavailable'
+          }
+
+          function Invoke-CdpEval([string]$wsRaw, [string]$expression, [int]$timeoutSeconds = 12) {
+            $uri = [Uri]$wsRaw
+            $wsUrl = 'ws://127.0.0.1:9223' + $uri.PathAndQuery
+            $ws = [System.Net.WebSockets.ClientWebSocket]::new()
+            $cts = [Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($timeoutSeconds))
+            $ws.ConnectAsync([Uri]$wsUrl, $cts.Token).GetAwaiter().GetResult() | Out-Null
+            $payload = @{ id = 1; method = 'Runtime.evaluate'; params = @{ expression = $expression; returnByValue = $true; awaitPromise = $true } } | ConvertTo-Json -Compress -Depth 12
+            $bytes = [Text.Encoding]::UTF8.GetBytes($payload)
+            $ws.SendAsync([ArraySegment[byte]]::new($bytes), [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts.Token).GetAwaiter().GetResult() | Out-Null
+            $buffer = New-Object byte[] 131072
+            $builder = [Text.StringBuilder]::new()
+            while ($true) {
+              $received = $ws.ReceiveAsync([ArraySegment[byte]]::new($buffer), $cts.Token).GetAwaiter().GetResult()
+              if ($received.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close) { throw 'CDP closed before response' }
+              [void]$builder.Append([Text.Encoding]::UTF8.GetString($buffer, 0, $received.Count))
+              if (-not $received.EndOfMessage) { continue }
+              $message = $builder.ToString() | ConvertFrom-Json
+              $builder.Clear() | Out-Null
+              if ($message.id -ne 1) { continue }
+              if ($message.result.exceptionDetails) { throw 'Runtime.evaluate exception' }
+              $value = $message.result.result.value
+              try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, 'done', [Threading.CancellationToken]::None).GetAwaiter().GetResult() | Out-Null } catch {}
+              return $value
+            }
+          }
+
+          $targets = Get-Targets
+          $app = @($targets | Where-Object { $_.type -eq 'page' -and [string]$_.url -like 'https://localhost*' } | Select-Object -First 1)
+          if ($app.Count -eq 0) { throw 'Capacitor app target not found' }
+          $clickExpression = @'
+          (() => {
+            const buttons = [...document.querySelectorAll('button')];
+            const ar = '\u0627\u062c\u0644\u0628 \u0622\u062e\u0631 10 \u0648\u062d\u0644\u0644\u0647\u0627';
+            const target = buttons.find(b => {
+              const t = String(b.innerText || b.textContent || '').replace(/\s+/g,' ').trim();
+              return t.includes(ar) || /Grab latest 10 and analyze/i.test(t);
+            });
+            if (!target) return {clicked:false};
+            target.click();
+            return {clicked:true};
+          })()
+          '@
+          $click = Invoke-CdpEval ([string]$app[0].webSocketDebuggerUrl) $clickExpression 10
+          Write-Output ('REAL_GRAB_BUTTON_CLICKED=' + ($(if ($click.clicked) {'1'} else {'0'})))
+          if (-not $click.clicked) { exit 40 }
+
+          $facebook = @()
+          for ($i = 0; $i -lt 24; $i++) {
+            Start-Sleep -Milliseconds 250
+            $targets = Get-Targets
+            $facebook = @($targets | Where-Object {
+              $_.type -eq 'page' -and [string]$_.url -match '^https?://([^.]+\.)*facebook\.com/'
+            } | Select-Object -First 1)
+            if ($facebook.Count -gt 0) { break }
+          }
+          Write-Output ('CDP_TARGET_COUNT_AFTER_CLICK=' + $targets.Count)
+          Write-Output ('FACEBOOK_COLLECTOR_TARGET_FOUND=' + ($(if ($facebook.Count -gt 0) {'1'} else {'0'})))
+          if ($facebook.Count -eq 0) { exit 41 }
+
+          $stateExpression = @'
+          (() => {
+            const KEY='__mrscrapFacebookTimelineGraphqlV1';
+            const s=window[KEY]||{};
+            const req=(name)=>{try{return typeof window.require==='function'?window.require(name):null}catch(_){return null}};
+            const dtsg=req('DTSGInitialData');
+            const lsd=req('LSD');
+            const user=req('CurrentUserInitialData');
+            const p=String(location.pathname||'').toLowerCase();
+            return {
+              hostFacebook:/facebook\.com$/i.test(location.hostname),
+              pathClass:p.includes('/checkpoint')?'checkpoint':(p.includes('/login')?'login':'content'),
+              ready:String(document.readyState||''),
+              loginForm:Boolean(document.querySelector('form[action*="login"],input[name="email"],input[name="pass"]')),
+              graphState:String(s.status||'none'),
+              graphCode:String(s.code||''),
+              dtsgAvailable:Boolean(dtsg&&dtsg.token),
+              lsdAvailable:Boolean(lsd&&lsd.token),
+              currentUserAvailable:Boolean(user&&user.USER_ID)
+            };
+          })()
+          '@
+          $state = Invoke-CdpEval ([string]$facebook[0].webSocketDebuggerUrl) $stateExpression 10
+          Write-Output ('FB_HOST_OK=' + ($(if ($state.hostFacebook) {'1'} else {'0'})))
+          Write-Output ('FB_PATH_CLASS=' + [string]$state.pathClass)
+          Write-Output ('FB_READY_STATE=' + [string]$state.ready)
+          Write-Output ('FB_LOGIN_FORM=' + ($(if ($state.loginForm) {'1'} else {'0'})))
+          Write-Output ('GRAPH_WINDOW_STATE=' + [string]$state.graphState)
+          Write-Output ('GRAPH_WINDOW_CODE=' + [string]$state.graphCode)
+          Write-Output ('DTSG_AVAILABLE=' + ($(if ($state.dtsgAvailable) {'1'} else {'0'})))
+          Write-Output ('LSD_AVAILABLE=' + ($(if ($state.lsdAvailable) {'1'} else {'0'})))
+          Write-Output ('CURRENT_USER_AVAILABLE=' + ($(if ($state.currentUserAvailable) {'1'} else {'0'})))
+
+          $probeExpression = @'
+          (async () => {
+            const DOC_ID='27465012859856795';
+            const FRIENDLY='ProfileCometTimelineFeedRefetchQuery';
+            const html=document.documentElement?.innerHTML||'';
+            const metaApp=document.querySelector('meta[property="al:ios:url"],meta[property="al:android:url"]')?.content||'';
+            let sourceId='';
+            try { sourceId=(new URL(location.href)).searchParams.get('id')||''; } catch(_) {}
+            for (const pattern of [/fb:\/\/(?:profile|page)\/(\d{5,})/i,/["']profile_id["']\s*[:=]\s*["']?(\d{5,})/i,/["']pageID["']\s*:\s*["'](\d{5,})["']/i,/profile_id=(\d{5,})/i]) {
+              if(sourceId) break;
+              const m=String(metaApp).match(pattern)||html.match(pattern);
+              if(m?.[1]) sourceId=m[1];
+            }
+            const resolved=/^\d{5,}$/.test(sourceId);
+            if(!resolved) return {sourceIdResolved:false};
+            const variables={afterTime:null,beforeTime:null,count:10,cursor:null,feedLocation:'TIMELINE',feedbackSource:0,focusCommentID:null,memorializedSplitTimeFilter:null,omitPinnedPost:true,postedBy:{group:'OWNER'},privacy:null,privacySelectorRenderLocation:'COMET_STREAM',referringStoryRenderLocation:null,renderLocation:'timeline',scale:1,stream_count:1,taggedInOnly:null,trackingCode:null,useDefaultActor:false,id:sourceId,__relay_internal__pv__IsWorkUserrelayprovider:false,__relay_internal__pv__CometUFICommentActionLinksRewriteEnabledrelayprovider:true,__relay_internal__pv__CometUFISingleLineUFIrelayprovider:true};
+            const body=new URLSearchParams();
+            body.set('doc_id',DOC_ID); body.set('fb_api_req_friendly_name',FRIENDLY); body.set('variables',JSON.stringify(variables));
+            const controller=new AbortController();
+            const timer=setTimeout(()=>controller.abort(),6000);
+            const started=performance.now();
+            try {
+              const response=await fetch('/api/graphql/',{method:'POST',credentials:'include',headers:{'Content-Type':'application/x-www-form-urlencoded','X-FB-Friendly-Name':FRIENDLY},body:body.toString(),signal:controller.signal});
+              const fetchMs=Math.round(performance.now()-started);
+              const ct=String(response.headers.get('content-type')||'').toLowerCase();
+              const ctClass=ct.includes('json')?'json':(ct.includes('text')?'text':(ct.includes('multipart')?'multipart':'other'));
+              let firstChunk=false,firstDone=false,chunkBytes=0;
+              if(response.body?.getReader){
+                const reader=response.body.getReader();
+                const read=await Promise.race([reader.read(),new Promise(resolve=>setTimeout(()=>resolve(null),2500))]);
+                if(read){ firstChunk=true; firstDone=Boolean(read.done); chunkBytes=read.value?.byteLength||0; }
+                try{await reader.cancel()}catch(_){}
+              }
+              clearTimeout(timer);
+              return {sourceIdResolved:true,fetchResolved:true,status:response.status,fetchMs,ctClass,firstChunk,firstDone,chunkBytes};
+            } catch(e) {
+              clearTimeout(timer);
+              return {sourceIdResolved:true,fetchResolved:false,errorName:String(e?.name||'Error'),elapsedMs:Math.round(performance.now()-started)};
+            }
+          })()
+          '@
+          $probe = Invoke-CdpEval ([string]$facebook[0].webSocketDebuggerUrl) $probeExpression 15
+          Write-Output ('SOURCE_ID_RESOLVED=' + ($(if ($probe.sourceIdResolved) {'1'} else {'0'})))
+          Write-Output ('BASE_FETCH_RESOLVED=' + ($(if ($probe.fetchResolved) {'1'} else {'0'})))
+          if ($probe.fetchResolved) {
+            Write-Output ('BASE_HTTP_STATUS=' + [string]$probe.status)
+            Write-Output ('BASE_FETCH_MS=' + [string]$probe.fetchMs)
+            Write-Output ('BASE_CONTENT_TYPE_CLASS=' + [string]$probe.ctClass)
+            Write-Output ('BASE_FIRST_CHUNK=' + ($(if ($probe.firstChunk) {'1'} else {'0'})))
+            Write-Output ('BASE_FIRST_DONE=' + ($(if ($probe.firstDone) {'1'} else {'0'})))
+            Write-Output ('BASE_FIRST_CHUNK_BYTES=' + [string]$probe.chunkBytes)
+          } else {
+            Write-Output ('BASE_FETCH_ERROR_NAME=' + [string]$probe.errorName)
+            Write-Output ('BASE_FETCH_ELAPSED_MS=' + [string]$probe.elapsedMs)
+          }
+
+          $enrichedExpression = @'
+          (async () => {
+            const req=(name)=>{try{return typeof window.require==='function'?window.require(name):null}catch(_){return null}};
+            const dtsg=String(req('DTSGInitialData')?.token||'');
+            const lsd=String(req('LSD')?.token||'');
+            const userId=String(req('CurrentUserInitialData')?.USER_ID||'');
+            const tokens=Boolean(dtsg&&lsd&&userId);
+            const html=document.documentElement?.innerHTML||'';
+            const metaApp=document.querySelector('meta[property="al:ios:url"],meta[property="al:android:url"]')?.content||'';
+            let sourceId='';
+            try { sourceId=(new URL(location.href)).searchParams.get('id')||''; } catch(_) {}
+            for (const pattern of [/fb:\/\/(?:profile|page)\/(\d{5,})/i,/["']profile_id["']\s*[:=]\s*["']?(\d{5,})/i,/["']pageID["']\s*:\s*["'](\d{5,})["']/i,/profile_id=(\d{5,})/i]) {
+              if(sourceId) break;
+              const m=String(metaApp).match(pattern)||html.match(pattern);
+              if(m?.[1]) sourceId=m[1];
+            }
+            if(!tokens||!/^\d{5,}$/.test(sourceId)) return {tokensAvailable:tokens,sourceIdResolved:/^\d{5,}$/.test(sourceId),skipped:true};
+            const vars={afterTime:null,beforeTime:null,count:10,cursor:null,feedLocation:'TIMELINE',feedbackSource:0,focusCommentID:null,memorializedSplitTimeFilter:null,omitPinnedPost:true,postedBy:{group:'OWNER'},privacy:null,privacySelectorRenderLocation:'COMET_STREAM',referringStoryRenderLocation:null,renderLocation:'timeline',scale:1,stream_count:1,taggedInOnly:null,trackingCode:null,useDefaultActor:false,id:sourceId,__relay_internal__pv__IsWorkUserrelayprovider:false,__relay_internal__pv__CometUFICommentActionLinksRewriteEnabledrelayprovider:true,__relay_internal__pv__CometUFISingleLineUFIrelayprovider:true};
+            const body=new URLSearchParams();
+            body.set('av',userId); body.set('__user',userId); body.set('__a','1'); body.set('fb_api_caller_class','RelayModern'); body.set('fb_api_req_friendly_name','ProfileCometTimelineFeedRefetchQuery'); body.set('variables',JSON.stringify(vars)); body.set('doc_id','27465012859856795'); body.set('fb_dtsg',dtsg); body.set('jazoest','2'+[...dtsg].map(c=>c.charCodeAt(0)).join('')); body.set('lsd',lsd);
+            const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),6000); const started=performance.now();
+            try {
+              const response=await fetch('/api/graphql/',{method:'POST',credentials:'include',headers:{'Content-Type':'application/x-www-form-urlencoded','X-FB-Friendly-Name':'ProfileCometTimelineFeedRefetchQuery','X-FB-LSD':lsd},body:body.toString(),signal:controller.signal});
+              const fetchMs=Math.round(performance.now()-started); const ct=String(response.headers.get('content-type')||'').toLowerCase(); const ctClass=ct.includes('json')?'json':(ct.includes('text')?'text':(ct.includes('multipart')?'multipart':'other'));
+              let firstChunk=false,firstDone=false,chunkBytes=0;
+              if(response.body?.getReader){ const reader=response.body.getReader(); const read=await Promise.race([reader.read(),new Promise(resolve=>setTimeout(()=>resolve(null),2500))]); if(read){firstChunk=true;firstDone=Boolean(read.done);chunkBytes=read.value?.byteLength||0;} try{await reader.cancel()}catch(_){} }
+              clearTimeout(timer); return {tokensAvailable:true,sourceIdResolved:true,fetchResolved:true,status:response.status,fetchMs,ctClass,firstChunk,firstDone,chunkBytes};
+            } catch(e){ clearTimeout(timer); return {tokensAvailable:true,sourceIdResolved:true,fetchResolved:false,errorName:String(e?.name||'Error'),elapsedMs:Math.round(performance.now()-started)}; }
+          })()
+          '@
+          $enriched = Invoke-CdpEval ([string]$facebook[0].webSocketDebuggerUrl) $enrichedExpression 15
+          Write-Output ('ENRICHED_TOKENS_AVAILABLE=' + ($(if ($enriched.tokensAvailable) {'1'} else {'0'})))
+          Write-Output ('ENRICHED_FETCH_RESOLVED=' + ($(if ($enriched.fetchResolved) {'1'} else {'0'})))
+          if ($enriched.fetchResolved) {
+            Write-Output ('ENRICHED_HTTP_STATUS=' + [string]$enriched.status)
+            Write-Output ('ENRICHED_FETCH_MS=' + [string]$enriched.fetchMs)
+            Write-Output ('ENRICHED_CONTENT_TYPE_CLASS=' + [string]$enriched.ctClass)
+            Write-Output ('ENRICHED_FIRST_CHUNK=' + ($(if ($enriched.firstChunk) {'1'} else {'0'})))
+            Write-Output ('ENRICHED_FIRST_DONE=' + ($(if ($enriched.firstDone) {'1'} else {'0'})))
+            Write-Output ('ENRICHED_FIRST_CHUNK_BYTES=' + [string]$enriched.chunkBytes)
+          } else {
+            Write-Output ('ENRICHED_FETCH_ERROR_NAME=' + [string]$enriched.errorName)
+            Write-Output ('ENRICHED_FETCH_ELAPSED_MS=' + [string]$enriched.elapsedMs)
+          }
+          Write-Output 'GRAPHQL_PENDING_RUNTIME_PROBE=PASS'
+          PS
+          ps_win="$(wslpath -w "$ps1")"
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$ps_win" | tr -d '\r'
+
+      - name: Capture terminal collector code and session state
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          sleep 20
+          echo '=== SAFE TERMINAL EVENTS ==='
+          $ADB -s "$SERIAL" logcat -b all -d -v threadtime 2>/dev/null | tr -d '\r' \
+            | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' \
+            | sed -E 's/(https?:\/\/)[^ ]+/\1[redacted]/g' \
+            | tail -n 80 || true
+          syntax_count="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -c 'Uncaught SyntaxError: Invalid or unexpected token' || true)"
+          echo "INVALID_JS_SYNTAX_COUNT=$syntax_count"
+          marker="$($ADB -s "$SERIAL" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          if printf '%s' "$marker" | grep -q 'facebook_connected_at'; then echo FACEBOOK_SESSION_METADATA_FINAL=1; else echo FACEBOOK_SESSION_METADATA_FINAL=0; fi
+          $ADB -s "$SERIAL" forward --remove tcp:9223 >/dev/null 2>&1 || true
+          rm -f "/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-graphql-pending-probe.ps1" 2>/dev/null || true
+          echo GRAPHQL_PENDING_PROBE_COMPLETE=1
