@@ -42,21 +42,38 @@ jobs:
             sleep 2
           done
           test -n "$serial"
+          echo "AUTHORIZED_ANDROID_DEVICE_FOUND"
           echo "ADB=$adb" >> "$GITHUB_ENV"
           echo "SERIAL=$serial" >> "$GITHUB_ENV"
           echo "NODE=$NODE" >> "$GITHUB_ENV"
           "$adb" -s "$serial" shell setprop log.tag.MRSCRAP_FLOW I || true
           "$adb" -s "$serial" shell setprop log.tag.MRSCRAP_COLLECTOR I || true
           "$adb" -s "$serial" shell am start -n com.mrscrap.socialradar/.MainActivity >/dev/null 2>&1 || true
-          sleep 3
-          pid="$($adb -s "$serial" shell pidof com.mrscrap.socialradar 2>/dev/null | tr -d '\r' | awk '{print $1}')"
+          "$adb" -s "$serial" shell dumpsys package com.mrscrap.socialradar 2>/dev/null | tr -d '\r' | grep -E 'versionCode=|versionName=' | head -n4
+          pid=""
+          socket=""
+          for attempt in $(seq 1 60); do
+            pid="$($adb -s "$serial" shell pidof com.mrscrap.socialradar 2>/dev/null | tr -d '\r' | awk '{print $1}')"
+            if [ -n "$pid" ]; then
+              socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | grep -o "webview_devtools_remote_${pid}" | head -n1 || true)"
+              [ -n "$socket" ] && break
+            fi
+            sleep 1
+          done
           test -n "$pid"
-          socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | grep -o "webview_devtools_remote_${pid}" | head -n1)"
           test -n "$socket"
+          echo "WEBVIEW_DEBUG_SOCKET_FOUND"
           "$adb" -s "$serial" forward --remove tcp:19222 >/dev/null 2>&1 || true
           "$adb" -s "$serial" forward tcp:19222 "localabstract:${socket}" >/dev/null
-          "$adb" -s "$serial" shell dumpsys package com.mrscrap.socialradar 2>/dev/null | tr -d '\r' | grep -E 'versionCode=|versionName=' | head -n4
-          echo "WEBVIEW_DEBUGGER_READY"
+          for attempt in $(seq 1 30); do
+            if "$NODE" -e "fetch('http://127.0.0.1:19222/json').then(r=>{if(!r.ok)process.exit(2);return r.json()}).then(x=>{if(!Array.isArray(x)||!x.length)process.exit(3)})" >/dev/null 2>&1; then
+              echo "WEBVIEW_DEBUGGER_READY"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "WEBVIEW_DEBUGGER_HTTP_NOT_READY"
+          exit 1
 
       - name: Monitor one real Smart Grab safely
         shell: bash
