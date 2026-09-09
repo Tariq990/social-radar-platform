@@ -1,0 +1,181 @@
+name: Android CDP Facebook Collector Proof
+
+on:
+  push:
+    branches:
+      - test/android-headless-emulator-20260909
+    paths:
+      - .github/workflows/android-cdp-facebook-collector-proof.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  cdp-proof:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 12
+    env:
+      PKG: com.mrscrap.socialradar
+    steps:
+      - name: Resolve live rebuilt app and preserved Facebook session
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"
+          test -s "$adb"
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1; exit}')"
+          test -n "$serial"
+          pid="$($adb -s "$serial" shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"
+          if [ -z "$pid" ]; then
+            $adb -s "$serial" shell am start -W -n "$PKG/.MainActivity" >/dev/null
+            sleep 4
+            pid="$($adb -s "$serial" shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"
+          fi
+          test -n "$pid"
+          version="$($adb -s "$serial" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"
+          echo "INSTALLED_VERSION_CODE=$version"
+          test "$version" = '143'
+          marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          printf '%s' "$marker" | grep -q 'facebook_connected_at'
+          echo FACEBOOK_SESSION_METADATA=1
+          echo "ADB=$adb" >> "$GITHUB_ENV"
+          echo "SERIAL=$serial" >> "$GITHUB_ENV"
+          echo "APP_PID=$pid" >> "$GITHUB_ENV"
+          echo LIVE_REBUILT_APP_GATE=PASS
+
+      - name: Discover and forward the app WebView DevTools socket
+        shell: bash
+        run: |
+          set -euo pipefail
+          sockets="$($ADB -s "$SERIAL" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' || true)"
+          count="$(printf '%s\n' "$sockets" | sed '/^$/d' | wc -l)"
+          echo "WEBVIEW_DEVTOOLS_SOCKET_COUNT=$count"
+          socket="$(printf '%s\n' "$sockets" | grep -E "${APP_PID}$|_${APP_PID}($|_)" | head -n1 || true)"
+          if [ -z "$socket" ]; then
+            socket="$(printf '%s\n' "$sockets" | head -n1 || true)"
+          fi
+          if [ -z "$socket" ]; then
+            echo WEBVIEW_DEVTOOLS_SOCKET_FOUND=0
+            exit 30
+          fi
+          echo WEBVIEW_DEVTOOLS_SOCKET_FOUND=1
+          $ADB -s "$SERIAL" forward --remove tcp:9223 >/dev/null 2>&1 || true
+          $ADB -s "$SERIAL" forward tcp:9223 "localabstract:$socket" >/dev/null
+          for i in $(seq 1 10); do
+            if curl -fsS http://127.0.0.1:9223/json/list > /tmp/mrscrap-pages.json; then
+              break
+            fi
+            sleep 1
+          done
+          test -s /tmp/mrscrap-pages.json
+          python3 - <<'PY'
+          import json
+          pages = json.load(open('/tmp/mrscrap-pages.json'))
+          print('CDP_PAGE_COUNT=' + str(len(pages)))
+          candidates = [p for p in pages if p.get('type') == 'page' and p.get('webSocketDebuggerUrl')]
+          if not candidates:
+              raise SystemExit('no debuggable WebView page target')
+          page = next((p for p in candidates if str(p.get('url','')).startswith('https://localhost')), candidates[0])
+          open('/tmp/mrscrap-ws.txt','w').write(page['webSocketDebuggerUrl'])
+          print('CDP_APP_PAGE_FOUND=1')
+          PY
+          echo CDP_FORWARD_GATE=PASS
+
+      - name: Click Grab latest 10 inside the real Capacitor WebView
+        shell: bash
+        run: |
+          set -euo pipefail
+          $ADB -s "$SERIAL" logcat -c >/dev/null 2>&1 || true
+          cat > /tmp/mrscrap-cdp-click.mjs <<'JS'
+          import fs from 'node:fs';
+          const url = fs.readFileSync('/tmp/mrscrap-ws.txt','utf8').trim();
+          const ws = new WebSocket(url);
+          const expression = `(() => {
+            const buttons = [...document.querySelectorAll('button')];
+            const target = buttons.find((button) => {
+              const text = String(button.innerText || button.textContent || '').replace(/\\s+/g,' ').trim();
+              return /اجلب آخر 10 وحللها/.test(text) || /Grab latest 10 and analyze/i.test(text);
+            });
+            if (!target) return {clicked:false, buttonCount:buttons.length, href:location.href};
+            target.scrollIntoView({block:'center'});
+            target.click();
+            return {clicked:true, text:String(target.innerText || target.textContent || '').replace(/\\s+/g,' ').trim(), href:location.href};
+          })()`;
+          const timer = setTimeout(() => { console.error('CDP_TIMEOUT'); process.exit(31); }, 10000);
+          ws.addEventListener('open', () => {
+            ws.send(JSON.stringify({id:1, method:'Runtime.evaluate', params:{expression, returnByValue:true, awaitPromise:true}}));
+          });
+          ws.addEventListener('message', (event) => {
+            const message = JSON.parse(String(event.data));
+            if (message.id !== 1) return;
+            clearTimeout(timer);
+            const value = message?.result?.result?.value || {};
+            console.log('CDP_CLICKED=' + (value.clicked ? '1' : '0'));
+            console.log('CDP_BUTTON_COUNT=' + String(value.buttonCount ?? 'unknown'));
+            if (value.clicked) console.log('CDP_MATCH_TEXT=' + String(value.text || '').slice(0,120));
+            ws.close();
+            process.exit(value.clicked ? 0 : 32);
+          });
+          ws.addEventListener('error', () => { clearTimeout(timer); console.error('CDP_WEBSOCKET_ERROR'); process.exit(33); });
+          JS
+          node /tmp/mrscrap-cdp-click.mjs
+          echo REAL_WEBVIEW_CLICK_GATE=PASS
+
+      - name: Prove Facebook collector terminal result
+        shell: bash
+        run: |
+          set -euo pipefail
+          success=''
+          failure=''
+          for i in $(seq 1 75); do
+            events="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' || true)"
+            success="$(printf '%s\n' "$events" | grep -E 'event=collect_source_success platform=facebook posts=[0-9]+' | tail -n1 || true)"
+            failure="$(printf '%s\n' "$events" | grep -E 'event=collect_source_error platform=facebook code=' | tail -n1 || true)"
+            if [ -n "$success" ] || [ -n "$failure" ]; then
+              break
+            fi
+            sleep 1
+          done
+
+          echo '=== SAFE COLLECTOR TERMINAL TRACE ==='
+          $ADB -s "$SERIAL" logcat -b all -d -v threadtime 2>/dev/null | tr -d '\r' \
+            | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' \
+            | sed -E 's/(https?:\/\/)[^ ]+/\1[redacted]/g' \
+            | tail -n 140 || true
+
+          syntax_count="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -c 'Uncaught SyntaxError: Invalid or unexpected token' || true)"
+          echo "INVALID_JS_SYNTAX_COUNT=$syntax_count"
+          test "$syntax_count" -eq 0
+
+          if [ -n "$failure" ]; then
+            code="$(printf '%s' "$failure" | sed -n 's/.*code=\([^ ]*\).*/\1/p')"
+            echo "FACEBOOK_COLLECTOR_FAILURE_CODE=${code:-unknown}"
+            exit 34
+          fi
+          test -n "$success"
+          posts="$(printf '%s' "$success" | sed -n 's/.*posts=\([0-9][0-9]*\).*/\1/p')"
+          echo REQUESTED_POSTS=10
+          echo "FACEBOOK_POSTS_COLLECTED=$posts"
+          test -n "$posts"
+          test "$posts" -gt 0
+          echo FACEBOOK_REAL_COLLECTION_GATE=PASS
+
+      - name: Preserve final session proof
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          marker="$($ADB -s "$SERIAL" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          if printf '%s' "$marker" | grep -q 'facebook_connected_at'; then
+            echo FACEBOOK_SESSION_METADATA_FINAL=1
+          else
+            echo FACEBOOK_SESSION_METADATA_FINAL=0
+          fi
+          $ADB -s "$SERIAL" forward --remove tcp:9223 >/dev/null 2>&1 || true
+          echo FACEBOOK_CDP_COLLECTOR_PROOF_COMPLETE=1
