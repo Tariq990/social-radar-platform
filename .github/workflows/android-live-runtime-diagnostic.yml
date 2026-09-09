@@ -1,0 +1,104 @@
+name: Android Live Runtime Diagnostic
+
+on:
+  push:
+    branches:
+      - test/android-timeout-startup-20260909
+    paths:
+      - .github/workflows/android-live-runtime-diagnostic.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 8
+    steps:
+      - name: Prepare Windows adb through WSL
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          cache="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-platform-tools/platform-tools"
+          adb="$cache/adb.exe"
+          if [ ! -x "$adb" ]; then
+            echo "WINDOWS_ADB_MISSING"
+            exit 2
+          fi
+          echo "ADB=$adb" >> "$GITHUB_ENV"
+          "$adb" version | head -n 2 | tr -d '\r'
+
+      - name: Wait for authorized phone
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$ADB" kill-server >/dev/null 2>&1 || true
+          "$ADB" start-server >/dev/null 2>&1 || true
+          serial=""
+          for attempt in $(seq 1 20); do
+            snapshot="$($ADB devices 2>/dev/null | tr -d '\r' || true)"
+            serial="$(printf '%s\n' "$snapshot" | awk 'NR>1 && $2=="device" {print $1; exit}')"
+            if [ -n "$serial" ]; then break; fi
+            sleep 2
+          done
+          test -n "$serial"
+          echo "SERIAL=$serial" >> "$GITHUB_ENV"
+          echo "AUTHORIZED_ANDROID_DEVICE_FOUND"
+
+      - name: Inspect runtime and WebView provider safely
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "RUNTIME_FACTS_BEGIN"
+          "$ADB" -s "$SERIAL" shell dumpsys package com.mrscrap.socialradar 2>/dev/null \
+            | tr -d '\r' | grep -E 'versionName=|versionCode=' | head -n 4 || true
+          "$ADB" -s "$SERIAL" shell getprop ro.build.version.release 2>/dev/null | tr -d '\r' | sed 's/^/ANDROID_RELEASE=/'
+          "$ADB" -s "$SERIAL" shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' | sed 's/^/ANDROID_SDK=/'
+          echo "WEBVIEW_DUMPSYS_BEGIN"
+          "$ADB" -s "$SERIAL" shell dumpsys webviewupdate 2>/dev/null | tr -d '\r' \
+            | grep -E 'Current WebView package|Fallback logic enabled|Multiprocess enabled|Valid package' | head -n 20 || true
+          echo "WEBVIEW_DUMPSYS_END"
+          echo "RUNTIME_FACTS_END"
+
+      - name: Measure cold app startup and collect safe startup logs
+        shell: bash
+        run: |
+          set -euo pipefail
+          package=com.mrscrap.socialradar
+          component="$($ADB -s "$SERIAL" shell cmd package resolve-activity --brief "$package" 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+          if [ -z "$component" ] || [[ "$component" != */* ]]; then
+            component="com.mrscrap.socialradar/.MainActivity"
+          fi
+          "$ADB" -s "$SERIAL" logcat -c || true
+          "$ADB" -s "$SERIAL" shell am force-stop "$package" || true
+          sleep 1
+          echo "STARTUP_AM_BEGIN"
+          "$ADB" -s "$SERIAL" shell am start -W -n "$component" 2>&1 | tr -d '\r' \
+            | sed -E 's#https?://[^ ]+#[URL]#g'
+          echo "STARTUP_AM_END"
+          sleep 12
+          echo "STARTUP_LOGS_BEGIN"
+          "$ADB" -s "$SERIAL" logcat -d -v threadtime 2>/dev/null | tr -d '\r' \
+            | grep -Ei 'ActivityTaskManager|ActivityManager|AndroidRuntime|chromium|WebView|Capacitor|Choreographer|mrscrap|socialradar' \
+            | sed -E 's#https?://[^ ]+#[URL]#g; s/([Cc]ookie|[Tt]oken|[Aa]uthorization)=[^ ]+/\1=[REDACTED]/g' \
+            | tail -n 300 || true
+          echo "STARTUP_LOGS_END"
+          echo "No cookies, credentials, DOM text, post text, or page contents are intentionally collected."
+
+      - name: Capture safe logs during manual Smart Grab window
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "SMART_GRAB_CAPTURE_READY"
+          "$ADB" -s "$SERIAL" logcat -c || true
+          # Give the user a real-device interaction window. Logs are filtered and redacted afterward.
+          sleep 75
+          echo "SMART_GRAB_LOGS_BEGIN"
+          "$ADB" -s "$SERIAL" logcat -d -v threadtime 2>/dev/null | tr -d '\r' \
+            | grep -Ei 'AndroidRuntime|chromium|WebView|Capacitor|mrscrap|socialradar|ERR_|net::|onPage|timeout|timed out|SSL|renderer|crash|ANR' \
+            | sed -E 's#https?://[^ ]+#[URL]#g; s/([Cc]ookie|[Tt]oken|[Aa]uthorization)=[^ ]+/\1=[REDACTED]/g' \
+            | tail -n 500 || true
+          echo "SMART_GRAB_LOGS_END"
+          echo "SMART_GRAB_CAPTURE_COMPLETE"
