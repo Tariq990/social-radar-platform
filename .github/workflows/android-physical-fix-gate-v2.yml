@@ -18,7 +18,7 @@ concurrency:
 jobs:
   validate-install-capture:
     runs-on: [self-hosted, Linux]
-    timeout-minutes: 35
+    timeout-minutes: 50
     env:
       VITE_API_BASE_URL: https://mr-scrap-api-live.onrender.com
       APP_MODE: production
@@ -32,7 +32,12 @@ jobs:
           fetch-depth: 0
 
       - name: Apply physical Android fixes
-        run: python3 scripts/apply-physical-android-fix.py
+        run: |
+          set -euo pipefail
+          python3 scripts/apply-physical-android-fix.py
+          # The project ships ic_launcher as the launcher resource; there is no standalone
+          # ic_launcher_foreground mipmap. Keep the physical-test splash reference buildable.
+          sed -i 's#@mipmap/ic_launcher_foreground#@mipmap/ic_launcher#g' android/app/src/main/res/values/styles.xml
 
       - name: Verify intended diff
         shell: bash
@@ -116,7 +121,7 @@ jobs:
           "$adb" kill-server >/dev/null 2>&1 || true
           "$adb" start-server >/dev/null 2>&1 || true
           serial=""
-          for attempt in $(seq 1 30); do
+          for attempt in $(seq 1 60); do
             snapshot="$($adb devices 2>/dev/null | tr -d '\r' || true)"
             serial="$(printf '%s\n' "$snapshot" | awk 'NR>1 && $2=="device" {print $1; exit}')"
             if [ -n "$serial" ]; then break; fi
@@ -160,7 +165,7 @@ jobs:
           set -euo pipefail
           echo "SMART_GRAB_PHYSICAL_TEST_READY"
           "$ADB" -s "$SERIAL" logcat -c || true
-          sleep 120
+          sleep 180
           echo "SMART_GRAB_COLLECTOR_LOGS_BEGIN"
           "$ADB" -s "$SERIAL" logcat -d -v threadtime 2>/dev/null | tr -d '\r' \
             | grep -E 'MRSCRAP_COLLECTOR' \
