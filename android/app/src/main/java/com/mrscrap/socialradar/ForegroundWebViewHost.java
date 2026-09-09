@@ -4,7 +4,9 @@ import android.app.Activity;
 import android.content.Context;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.Gravity;
 import android.webkit.WebView;
+import android.widget.FrameLayout;
 
 /**
  * Gives foreground authenticated collectors a real window lifecycle without exposing the
@@ -39,13 +41,24 @@ final class ForegroundWebViewHost {
         webView.setFocusable(false);
         webView.setFocusableInTouchMode(false);
         webView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
-        ViewGroup.LayoutParams params = new ViewGroup.LayoutParams(
+        FrameLayout host = new FrameLayout(activity);
+        host.setClipChildren(true);
+        host.setClipToPadding(true);
+        host.setClickable(false);
+        host.setFocusable(false);
+        host.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+
+        FrameLayout.LayoutParams hostParams = new FrameLayout.LayoutParams(1, 1);
+        hostParams.gravity = Gravity.TOP | Gravity.START;
+        // Keep one physical pixel topmost so Surface/WebView visibility accounting cannot mark the
+        // collector fully occluded, while clipping all Facebook/Instagram pixels from the user.
+        root.addView(host, hostParams);
+
+        FrameLayout.LayoutParams webParams = new FrameLayout.LayoutParams(
             Math.max(1, width),
             Math.max(1, height)
         );
-        // Index 0 keeps the collector behind the Capacitor app while still attached/visible to
-        // Android's window lifecycle, which is required by modern lazy-rendered Meta feeds.
-        root.addView(webView, 0, params);
+        host.addView(webView, webParams);
         webView.onResume();
         webView.resumeTimers();
         webView.requestLayout();
@@ -59,7 +72,14 @@ final class ForegroundWebViewHost {
             webView.onPause();
             webView.clearHistory();
             android.view.ViewParent parent = webView.getParent();
-            if (parent instanceof ViewGroup) ((ViewGroup) parent).removeView(webView);
+            if (parent instanceof ViewGroup) {
+                ViewGroup host = (ViewGroup) parent;
+                host.removeView(webView);
+                android.view.ViewParent hostParent = host.getParent();
+                if (host.getChildCount() == 0 && hostParent instanceof ViewGroup) {
+                    ((ViewGroup) hostParent).removeView(host);
+                }
+            }
             webView.removeAllViews();
             webView.destroy();
         } catch (Exception ignored) {}
