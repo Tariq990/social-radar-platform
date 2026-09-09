@@ -140,8 +140,11 @@ final class FacebookGraphqlWebViewCollector {
                         JSONObject diagnostics = result.optJSONObject("diagnostics");
                         int pages = diagnostics == null ? 0 : diagnostics.optInt("pages", 0);
                         int nodes = diagnostics == null ? 0 : diagnostics.optInt("nodes", 0);
+                        int candidatesTried = diagnostics == null ? 0 : diagnostics.optInt("candidatesTried", 0);
+                        int winningCandidate = diagnostics == null ? -1 : diagnostics.optInt("winningCandidate", -1);
                         Log.i(TAG, "event=graphql_result posts=" + postCount +
-                            " pages=" + pages + " nodes=" + nodes);
+                            " pages=" + pages + " nodes=" + nodes +
+                            " candidates=" + candidatesTried + " winner=" + winningCandidate);
                         if (postCount <= 0) {
                             finishError(main, timeout[0], webView, finished, callback,
                                 "GRAPHQL_NO_POSTS|pages=" + pages + "|nodes=" + nodes);
@@ -268,41 +271,76 @@ final class FacebookGraphqlWebViewCollector {
               const requested = abs(REQUESTED);
               const sourceUrl = requested || abs(location.href);
               let sourceId = '';
+              const sourceCandidates = [];
+              const numericId = (raw) => {
+                const value = String(raw || '').trim();
+                if (value.length < 5 || value.length > 32) return '';
+                return [...value].every(ch => ch >= '0' && ch <= '9') ? value : '';
+              };
+              const addCandidate = (raw) => {
+                const value = numericId(raw);
+                if (!value || sourceCandidates.includes(value) || sourceCandidates.length >= 12) return;
+                sourceCandidates.push(value);
+              };
               try {
                 const u = new URL(sourceUrl);
-                sourceId = (u.searchParams.get('id') || '').trim();
+                addCandidate(u.searchParams.get('id') || '');
               } catch (_) {}
 
-              const metaApp = document.querySelector('meta[property="al:ios:url"], meta[property="al:android:url"]')?.content || '';
               const html = document.documentElement?.innerHTML || '';
-              const longestDigitRun = (value) => {
-                let best = '', current = '';
-                for (const ch of String(value || '')) {
-                  if (ch >= '0' && ch <= '9') {
-                    current += ch;
-                    if (current.length > best.length) best = current;
-                  } else {
-                    current = '';
-                  }
+              const scanMarker = (raw, marker, maxHits = 3) => {
+                const text = String(raw || '');
+                let from = 0, hits = 0;
+                while (hits < maxHits && sourceCandidates.length < 12) {
+                  const at = text.indexOf(marker, from);
+                  if (at < 0) break;
+                  let pos = at + marker.length;
+                  const end = Math.min(text.length, pos + 80);
+                  while (pos < end && !(text[pos] >= '0' && text[pos] <= '9')) pos++;
+                  let digits = '';
+                  while (pos < end && text[pos] >= '0' && text[pos] <= '9') digits += text[pos++];
+                  if (numericId(digits)) { addCandidate(digits); hits++; }
+                  from = at + marker.length;
                 }
-                return best.length >= 5 ? best : '';
               };
-              if (!sourceId) {
-                const candidates = [String(metaApp), html];
-                const markers = ['fb://profile/', 'fb://page/', 'profile_id', 'pageID'];
-                outer: for (const candidate of candidates) {
-                  for (const marker of markers) {
-                    const markerIndex = candidate.indexOf(marker);
-                    if (markerIndex < 0) continue;
-                    const digits = longestDigitRun(candidate.slice(markerIndex + marker.length, markerIndex + marker.length + 96));
-                    if (digits) { sourceId = digits; break outer; }
-                  }
+
+              for (const meta of [...document.querySelectorAll('meta[property="al:ios:url"], meta[property="al:android:url"]')]) {
+                const content = String(meta?.content || '');
+                scanMarker(content, 'fb://profile/', 2);
+                scanMarker(content, 'fb://page/', 2);
+              }
+              for (const raw of [
+                document.querySelector('link[rel="canonical"]')?.href || '',
+                document.querySelector('meta[property="og:url"]')?.content || '',
+                requested,
+                location.href
+              ]) {
+                try { addCandidate(new URL(raw, location.href).searchParams.get('id') || ''); } catch (_) {}
+              }
+
+              let requestedHandle = '';
+              try {
+                const parts = new URL(sourceUrl).pathname.split('/').filter(Boolean);
+                if (parts[0] && !['profile.php','groups'].includes(parts[0].toLowerCase())) requestedHandle = parts[0].replace('@','');
+              } catch (_) {}
+              const targetMarkers = ['fb://profile/', 'fb://page/', 'profile_id', 'pageID', 'userID', 'actorID'];
+              if (requestedHandle) {
+                let from = 0;
+                for (let occurrence = 0; occurrence < 8 && sourceCandidates.length < 12; occurrence++) {
+                  const at = html.indexOf(requestedHandle, from);
+                  if (at < 0) break;
+                  const windowText = html.slice(Math.max(0, at - 1200), Math.min(html.length, at + requestedHandle.length + 1800));
+                  for (const marker of targetMarkers) scanMarker(windowText, marker, 2);
+                  from = at + requestedHandle.length;
                 }
               }
-              const numericSourceId = sourceId.length >= 5 && [...sourceId].every(ch => ch >= '0' && ch <= '9');
-              if (!numericSourceId) {
+              if (sourceCandidates.length < 2) {
+                for (const marker of ['fb://profile/', 'fb://page/', 'profile_id', 'pageID']) scanMarker(html, marker, 4);
+              }
+              if (sourceCandidates.length === 0) {
                 return JSON.stringify({pending:true, diagnostics:{collector:'graphql', surface:host, waitingFor:'source_id'}});
               }
+              sourceId = sourceCandidates[0];
 
               const cleanTitle = (raw) => String(raw || '').replace(/\\s*[|·-]\\s*Facebook\\s*$/i, '').trim();
               const title = cleanTitle(
@@ -442,37 +480,59 @@ final class FacebookGraphqlWebViewCollector {
               window[KEY] = {status:'pending', stage:'request'};
               (async () => {
                 const posts = [], seen = new Set();
-                let cursor = null, pages = 0, nodes = 0;
-                for (let page = 0; page < 4 && posts.length < LIMIT; page++) {
-                  const body = new URLSearchParams();
-                  body.set('doc_id', DOC_ID);
-                  body.set('fb_api_req_friendly_name', FRIENDLY);
-                  body.set('variables', JSON.stringify(variablesFor(cursor, Math.min(10, Math.max(1, LIMIT - posts.length)))));
-                  window[KEY].stage = 'request';
-                  const response = await fetch('/api/graphql/', {
-                    method:'POST', credentials:'include',
-                    headers:{'Content-Type':'application/x-www-form-urlencoded','X-FB-Friendly-Name':FRIENDLY},
-                    body:body.toString()
-                  });
-                  if (!response.ok) throw new Error('GRAPHQL_HTTP_' + response.status);
-                  window[KEY].stage = 'response_body';
-                  const parsed = parsePayload(await response.text());
-                  pages++; nodes += parsed.nodes;
-                  if (parsed.queryError && parsed.posts.length === 0) throw new Error('GRAPHQL_QUERY_ERROR');
-                  for (const post of parsed.posts) {
-                    if (seen.has(post.externalPostId)) continue;
-                    seen.add(post.externalPostId); posts.push(post);
-                    if (posts.length >= LIMIT) break;
+                let pages = 0, nodes = 0, candidatesTried = 0, queryErrors = 0;
+                let winningSourceId = '', winningCandidate = -1;
+                const maxCandidates = Math.min(10, sourceCandidates.length);
+                candidateLoop:
+                for (let candidateIndex = 0; candidateIndex < maxCandidates; candidateIndex++) {
+                  sourceId = sourceCandidates[candidateIndex];
+                  candidatesTried++;
+                  let cursor = null;
+                  for (let page = 0; page < 4 && posts.length < LIMIT; page++) {
+                    const body = new URLSearchParams();
+                    body.set('doc_id', DOC_ID);
+                    body.set('fb_api_req_friendly_name', FRIENDLY);
+                    body.set('variables', JSON.stringify(variablesFor(cursor, Math.min(10, Math.max(1, LIMIT - posts.length)))));
+                    window[KEY].stage = 'request';
+                    const response = await fetch('/api/graphql/', {
+                      method:'POST', credentials:'include',
+                      headers:{'Content-Type':'application/x-www-form-urlencoded','X-FB-Friendly-Name':FRIENDLY},
+                      body:body.toString()
+                    });
+                    if (!response.ok) throw new Error('GRAPHQL_HTTP_' + response.status);
+                    window[KEY].stage = 'response_body';
+                    const parsed = parsePayload(await response.text());
+                    pages++; nodes += parsed.nodes;
+                    if (parsed.queryError && parsed.posts.length === 0) {
+                      queryErrors++;
+                      break;
+                    }
+                    if (parsed.posts.length === 0) break;
+                    if (!winningSourceId) {
+                      winningSourceId = sourceId;
+                      winningCandidate = candidateIndex;
+                    }
+                    for (const post of parsed.posts) {
+                      if (seen.has(post.externalPostId)) continue;
+                      seen.add(post.externalPostId); posts.push(post);
+                      if (posts.length >= LIMIT) break;
+                    }
+                    if (posts.length >= LIMIT) break candidateLoop;
+                    if (!parsed.hasNext || !parsed.endCursor) break candidateLoop;
+                    cursor = parsed.endCursor;
                   }
-                  if (!parsed.hasNext || !parsed.endCursor) break;
-                  cursor = parsed.endCursor;
+                  if (winningSourceId) break;
                 }
+                if (posts.length === 0 && candidatesTried > 0 && queryErrors === candidatesTried) {
+                  throw new Error('GRAPHQL_QUERY_ERROR');
+                }
+                const stableExternalId = handle || requestedHandle || winningSourceId || sourceId;
                 window[KEY] = {
                   status:'done',
                   result:{
-                    source:{platform:'facebook', externalId:sourceId, url:sourceUrl, displayName:title || (handle ? '@'+handle : 'Facebook'), handle, avatarUrl:avatar, visibilityType:'authenticated'},
+                    source:{platform:'facebook', externalId:stableExternalId, url:sourceUrl, displayName:title || (handle ? '@'+handle : 'Facebook'), handle, avatarUrl:avatar, visibilityType:'authenticated'},
                     posts:posts.slice(0, LIMIT),
-                    diagnostics:{collector:'graphql', surface:host, pages, nodes}
+                    diagnostics:{collector:'graphql', surface:host, pages, nodes, candidatesTried, winningCandidate}
                   }
                 };
               })().catch((error) => {
