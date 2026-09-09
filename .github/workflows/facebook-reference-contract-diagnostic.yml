@@ -1,0 +1,84 @@
+name: Facebook Reference Contract Diagnostic
+
+on:
+  push:
+    branches: [test/android-physical-fix-20260909]
+    paths: [.github/workflows/facebook-reference-contract-diagnostic.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run exact safe reference contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, urllib.parse, urllib.request, urllib.error
+
+          url = 'https://www.facebook.com/api/graphql/'
+          headers = {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+              'Accept': '*/*',
+              'Accept-Language': 'en-US,en;q=0.9',
+              'Origin': 'https://www.facebook.com',
+              'Referer': 'https://www.facebook.com/',
+              'Content-Type': 'application/x-www-form-urlencoded',
+          }
+          variables = {
+              'count': 1,
+              'cursor': None,
+              'feedLocation': 'TIMELINE',
+              'feedbackSource': 0,
+              'focusCommentID': None,
+              'id': '100067932423860',
+              'scale': 1,
+              'stream_count': 1,
+              'useDefaultActor': False,
+              'renderLocation': 'timeline',
+              '__relay_internal__pv__IsWorkUserrelayprovider': False,
+          }
+          body = urllib.parse.urlencode({
+              'variables': json.dumps(variables, separators=(',', ':')),
+              'doc_id': '27465012859856795',
+          }).encode()
+          req = urllib.request.Request(url, data=body, headers=headers, method='POST')
+          try:
+              with urllib.request.urlopen(req, timeout=20) as r:
+                  status = r.status
+                  text = r.read().decode('utf-8', 'replace')
+          except urllib.error.HTTPError as e:
+              print(f'REFERENCE_HTTP_STATUS={e.code}')
+              raise SystemExit(2)
+          except Exception:
+              print('REFERENCE_TRANSPORT=FAILED')
+              raise SystemExit(3)
+
+          print(f'REFERENCE_HTTP_STATUS={status}')
+          first = next((line for line in text.splitlines() if line.strip()), '')
+          try:
+              payload = json.loads(first)
+          except Exception:
+              print('REFERENCE_JSON=INVALID')
+              raise SystemExit(4)
+          errors = payload.get('errors') or [] if isinstance(payload, dict) else []
+          data = payload.get('data') if isinstance(payload, dict) else None
+          node = data.get('node') if isinstance(data, dict) else None
+          feed = node.get('timeline_list_feed_units') if isinstance(node, dict) else None
+          edges = feed.get('edges') if isinstance(feed, dict) else None
+          print(f'REFERENCE_ERRORS={len(errors) if isinstance(errors, list) else 0}')
+          print(f'REFERENCE_DATA_PRESENT={1 if isinstance(data, dict) else 0}')
+          print(f'REFERENCE_NODE_PRESENT={1 if isinstance(node, dict) else 0}')
+          print(f'REFERENCE_TIMELINE_PRESENT={1 if isinstance(feed, dict) else 0}')
+          print(f'REFERENCE_EDGES={len(edges) if isinstance(edges, list) else 0}')
+          if isinstance(edges, list) and len(edges) > 0:
+              print('REFERENCE_CONTRACT=PASS')
+              raise SystemExit(0)
+          print('REFERENCE_CONTRACT=NO_EDGES')
+          raise SystemExit(5)
+          PY
