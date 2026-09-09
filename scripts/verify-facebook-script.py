@@ -29,7 +29,7 @@ const script = fs.readFileSync(process.argv[2], 'utf8')
 const story = id => ({post_id:id, message:{text:'fixture'}, creation_time:1700000000});
 function context(fetch) {
   const c = {URL, URLSearchParams, fetch, location:{hostname:'www.facebook.com',pathname:'/profile.php',href:'https://www.facebook.com/profile.php?id=123456789'},
-    document:{querySelector:()=>null,documentElement:{innerHTML:''},title:'Fixture | Facebook'}};
+    document:{querySelector:()=>null,querySelectorAll:()=>[],documentElement:{innerHTML:''},title:'Fixture | Facebook'}};
   c.window = c; return vm.createContext(c);
 }
 (async () => {
