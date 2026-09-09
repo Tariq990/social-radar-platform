@@ -34,6 +34,20 @@ jobs:
       - name: Apply round-2 physical fixes
         run: python3 scripts/apply-physical-round2.py
 
+      - name: Correct generated Java diagnostic escape
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSocialSessionPlugin.java')
+          text = p.read_text(encoding='utf-8')
+          old = 'message.split("\\|", 2)'
+          new = 'message.split("\\\\|", 2)'
+          if old not in text:
+              raise SystemExit('expected generated Java escape was not found')
+          p.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+
       - name: Verify intended diff
         shell: bash
         run: |
