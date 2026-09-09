@@ -1,0 +1,137 @@
+name: Android Facebook Detail Modes v152 Proof
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-facebook-detail-modes-proof.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  prove:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 20
+    env:
+      PKG: com.mrscrap.socialradar
+      EXPECTED_VERSION_CODE: '152'
+
+    steps:
+      - name: Checkout exact test lane preserving emulator data
+        uses: actions/checkout@v4
+        with:
+          ref: test/android-headless-emulator-20260909
+          fetch-depth: 1
+          clean: false
+
+      - name: Resolve existing v152 emulator session without reinstall
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"; test -s "$adb"
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1;exit}')"; test -n "$serial"
+          test "$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1)" = 1
+          version="$($adb -s "$serial" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"
+          echo "INSTALLED_VERSION_CODE=$version"; test "$version" = "$EXPECTED_VERSION_CODE"
+          marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          printf '%s' "$marker" | grep -q facebook_connected_at
+          echo FACEBOOK_SESSION_METADATA_PRESENT=1
+          $adb -s "$serial" shell am force-stop "$PKG" >/dev/null 2>&1 || true
+          $adb -s "$serial" shell am start -W -n "$PKG/.MainActivity" >/dev/null
+          sleep 8
+          pid="$($adb -s "$serial" shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"; test -n "$pid"
+          echo "ADB=$adb" >> "$GITHUB_ENV"; echo "SERIAL=$serial" >> "$GITHUB_ENV"; echo "WIN_USER=$win_user" >> "$GITHUB_ENV"; echo "APP_PID=$pid" >> "$GITHUB_ENV"
+          echo EXISTING_V152_SESSION_GATE=PASS
+
+      - name: Prove privacy-safe comment and media modes
+        shell: bash
+        run: |
+          set -euo pipefail
+          socket="$($ADB -s "$SERIAL" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | grep -E "${APP_PID}$|_${APP_PID}($|_)" | head -n1 || true)"
+          [ -n "$socket" ] || socket="$($ADB -s "$SERIAL" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | head -n1 || true)"; test -n "$socket"
+          $ADB -s "$SERIAL" forward --remove tcp:9223 >/dev/null 2>&1 || true
+          $ADB -s "$SERIAL" forward tcp:9223 "localabstract:$socket" >/dev/null
+          ps1="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-v152-detail-modes.ps1"
+          cat > "$ps1" <<'PS'
+          $ErrorActionPreference='Stop'
+          function Targets { for($i=0;$i -lt 30;$i++){ try{$t=@(Invoke-RestMethod -Uri 'http://127.0.0.1:9223/json/list' -TimeoutSec 2);if($t.Count -gt 0){return $t}}catch{}; Start-Sleep -Milliseconds 250 }; throw 'targets unavailable' }
+          function AppTarget { $a=@(Targets|Where-Object{$_.type -eq 'page' -and [string]$_.url -like 'https://localhost*'}|Select-Object -First 1); if($a.Count -eq 0){throw 'app target missing'}; $a[0] }
+          function Eval([string]$raw,[string]$expr,[int]$seconds=180){ $u=[Uri]$raw;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($seconds));$ws.ConnectAsync([Uri]('ws://127.0.0.1:9223'+$u.PathAndQuery),$cts.Token).GetAwaiter().GetResult()|Out-Null;$p=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 8;$b=[Text.Encoding]::UTF8.GetBytes($p);$ws.SendAsync([ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null;$buf=New-Object byte[] 131072;$sb=[Text.StringBuilder]::new();while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id -ne 1){continue};if($m.result.exceptionDetails){throw 'runtime eval exception'};$v=$m.result.result.value;try{$ws.Abort()}catch{};return $v} }
+          $app=AppTarget
+          $expr=@'
+          (async()=>{
+            const safe=(mode,r,ok=true)=>({mode,ok,comments:Array.isArray(r?.comments)?r.comments.length:0,truncated:r?.commentsTruncated===true,media:Array.isArray(r?.media)?r.media.length:0,images:Array.isArray(r?.media)?r.media.filter(x=>x?.type==='image').length:0,videos:Array.isArray(r?.media)?r.media.filter(x=>x?.type==='video').length:0,videoPresent:r?.videoPresent===true,commentArticles:Number(r?.diagnostics?.commentArticles||0),returnedComments:Number(r?.diagnostics?.returnedComments||0),hasMore:r?.diagnostics?.hasMoreControls===true});
+            const fail=(mode,e)=>({mode,ok:false,error:String(e?.message||e||'error').replace(/https?:\/\/\S+/g,'[url]').slice(0,120)});
+            const cap=globalThis.Capacitor?.Plugins?.AuthenticatedSocialSession;
+            if(!cap) return {plugin:false,source:false,posts:0,candidate:false,modes:[]};
+            const sr=await fetch('https://mr-scrap-api-live.onrender.com/api/sources',{credentials:'include'});
+            if(!sr.ok) return {plugin:true,source:false,posts:0,candidate:false,http:sr.status,modes:[]};
+            const sources=await sr.json();
+            const source=(Array.isArray(sources)?sources:[]).find(s=>s&&s.platform==='facebook'&&!Boolean(s.is_paused??s.isPaused)&&(s.connector_type||s.connectorType||'device_session')==='device_session');
+            if(!source) return {plugin:true,source:false,posts:0,candidate:false,modes:[]};
+            const sourceId=source.id, url=source.url;
+            const col=await cap.collectSource({sourceId,url,platform:'facebook',limit:5});
+            const posts=Array.isArray(col?.posts)?col.posts:[];
+            if(!posts.length) return {plugin:true,source:true,posts:0,candidate:false,modes:[]};
+            let chosen=posts[0], top=null;
+            for(const post of posts.slice(0,3)){
+              try{
+                const r=await cap.collectPostDetails({url:post.originalUrl,sourceUrl:url,platform:'facebook',publisherName:post.authorName||'',commentsMode:'top',commentLimit:20,includeReplies:true});
+                if(!top||Number(r?.diagnostics?.commentArticles||0)>Number(top?.diagnostics?.commentArticles||0)){top=r;chosen=post;}
+                if(Number(r?.diagnostics?.commentArticles||0)>0||Array.isArray(r?.comments)&&r.comments.length>0) break;
+              }catch(e){}
+            }
+            const modes=[];
+            if(top) modes.push(safe('top',top)); else modes.push(fail('top','no detail result'));
+            for(const spec of [{mode:'none',limit:1},{mode:'publisher',limit:20},{mode:'all',limit:200}]){
+              try{const r=await cap.collectPostDetails({url:chosen.originalUrl,sourceUrl:url,platform:'facebook',publisherName:chosen.authorName||'',commentsMode:spec.mode,commentLimit:spec.limit,includeReplies:true});modes.push(safe(spec.mode,r));}
+              catch(e){modes.push(fail(spec.mode,e));}
+            }
+            return {plugin:true,source:true,posts:posts.length,candidate:Boolean(chosen),modes};
+          })()
+          '@
+          $r=Eval ([string]$app.webSocketDebuggerUrl) $expr 240
+          if(!$r.plugin){Write-Output 'DETAIL_PLUGIN_AVAILABLE=0';exit 160};Write-Output 'DETAIL_PLUGIN_AVAILABLE=1'
+          if(!$r.source){Write-Output 'FACEBOOK_DEVICE_SOURCE_FOUND=0';if($null-ne$r.http){Write-Output ('SOURCES_HTTP='+$r.http)};exit 161};Write-Output 'FACEBOOK_DEVICE_SOURCE_FOUND=1'
+          Write-Output ('SOURCE_POSTS_COLLECTED='+[int]$r.posts);if([int]$r.posts -lt 1){exit 162}
+          Write-Output ('DETAIL_CANDIDATE_FOUND='+$(if($r.candidate){'1'}else{'0'}));if(!$r.candidate){exit 163}
+          $failed=0
+          foreach($m in @($r.modes)){
+            $u=([string]$m.mode).ToUpperInvariant()
+            Write-Output ("DETAIL_${u}_OK="+$(if($m.ok){'1'}else{'0'}))
+            if($m.ok){
+              Write-Output ("DETAIL_${u}_COMMENTS="+[int]$m.comments)
+              Write-Output ("DETAIL_${u}_TRUNCATED="+$(if($m.truncated){'1'}else{'0'}))
+              Write-Output ("DETAIL_${u}_MEDIA="+[int]$m.media)
+              Write-Output ("DETAIL_${u}_IMAGES="+[int]$m.images)
+              Write-Output ("DETAIL_${u}_VIDEOS="+[int]$m.videos)
+              Write-Output ("DETAIL_${u}_VIDEO_PRESENT="+$(if($m.videoPresent){'1'}else{'0'}))
+              Write-Output ("DETAIL_${u}_COMMENT_ARTICLES="+[int]$m.commentArticles)
+              Write-Output ("DETAIL_${u}_RETURNED_COMMENTS="+[int]$m.returnedComments)
+              Write-Output ("DETAIL_${u}_HAS_MORE="+$(if($m.hasMore){'1'}else{'0'}))
+            } else { Write-Output ("DETAIL_${u}_ERROR=1");$failed++ }
+          }
+          if($failed -gt 0){exit 164}
+          if(@($r.modes).Count -ne 4){exit 165}
+          Write-Output FACEBOOK_DETAIL_MODES_GATE=PASS
+          PS
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
+
+      - name: Reconfirm Facebook session remains local and connected
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${ADB:-}" ] || [ -z "${SERIAL:-}" ]; then exit 0; fi
+          marker="$($ADB -s "$SERIAL" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          printf '%s' "$marker" | grep -q facebook_connected_at
+          echo FACEBOOK_SESSION_METADATA_AFTER_DETAIL_PROOF=1
+          $ADB -s "$SERIAL" forward --remove tcp:9223 >/dev/null 2>&1 || true
+          rm -f "/mnt/c/Users/${WIN_USER:-}/AppData/Local/Temp/mrscrap-v152-detail-modes.ps1" 2>/dev/null || true
+          echo FACEBOOK_DETAIL_SESSION_GATE=PASS
