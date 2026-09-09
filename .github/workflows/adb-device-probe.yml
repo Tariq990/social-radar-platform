@@ -22,9 +22,23 @@ jobs:
           set -euo pipefail
           ADB="$(command -v adb || true)"
           if [ -z "$ADB" ]; then
-            for candidate in "$ANDROID_HOME/platform-tools/adb" "$ANDROID_SDK_ROOT/platform-tools/adb" "$HOME/Android/Sdk/platform-tools/adb"; do
-              if [ -n "${candidate:-}" ] && [ -x "$candidate" ]; then ADB="$candidate"; break; fi
+            for sdk in \
+              "${ANDROID_HOME:-}" \
+              "${ANDROID_SDK_ROOT:-}" \
+              "$HOME/Android/Sdk" \
+              "$HOME/Android/sdk" \
+              "$HOME/.android/sdk" \
+              "/opt/android-sdk" \
+              "/usr/local/lib/android/sdk"
+            do
+              if [ -n "$sdk" ] && [ -x "$sdk/platform-tools/adb" ]; then
+                ADB="$(realpath "$sdk/platform-tools/adb")"
+                break
+              fi
             done
+          fi
+          if [ -z "$ADB" ]; then
+            ADB="$(find "$HOME" /opt /usr/local -maxdepth 8 -type f -path '*/platform-tools/adb' -perm -u+x -print -quit 2>/dev/null || true)"
           fi
           if [ -z "$ADB" ]; then
             echo "ADB_NOT_FOUND"
