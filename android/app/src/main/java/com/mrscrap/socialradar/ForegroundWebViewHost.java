@@ -33,14 +33,13 @@ final class ForegroundWebViewHost {
 
         ViewGroup root = (ViewGroup) content;
         webView.setVisibility(View.VISIBLE);
-        // Keep the collector fully renderable. It is inserted behind the Capacitor WebView, so
-        // lowering alpha is unnecessary and can suppress Chromium's first visible paint callback.
         webView.setAlpha(1f);
         webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
         webView.setClickable(false);
         webView.setFocusable(false);
         webView.setFocusableInTouchMode(false);
         webView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+
         FrameLayout host = new FrameLayout(activity);
         host.setClipChildren(true);
         host.setClipToPadding(true);
@@ -48,11 +47,15 @@ final class ForegroundWebViewHost {
         host.setFocusable(false);
         host.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
 
-        FrameLayout.LayoutParams hostParams = new FrameLayout.LayoutParams(48, 48);
-        hostParams.gravity = Gravity.BOTTOM | Gravity.END;
-        // The 1x1 intersection still produced an empty physical Facebook feed. Keep a tiny but
-        // material topmost intersection while retaining a full-size child layout/JS viewport.
-        root.addView(host, hostParams);
+        // Meta can suppress feed hydration when the physically composited WebView is only a tiny
+        // intersection. Give the collector a real full-size viewport, but insert it at index 0 so
+        // the existing Capacitor UI remains above it and the collector never becomes user-facing.
+        FrameLayout.LayoutParams hostParams = new FrameLayout.LayoutParams(
+            Math.max(1, width),
+            Math.max(1, height)
+        );
+        hostParams.gravity = Gravity.TOP | Gravity.START;
+        root.addView(host, 0, hostParams);
 
         FrameLayout.LayoutParams webParams = new FrameLayout.LayoutParams(
             Math.max(1, width),
