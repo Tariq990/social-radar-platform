@@ -21,6 +21,7 @@ jobs:
     timeout-minutes: 12
     env:
       PKG: com.mrscrap.socialradar
+
     steps:
       - name: Resolve live rebuilt app and preserved Facebook session
         shell: bash
@@ -47,6 +48,7 @@ jobs:
           echo "ADB=$adb" >> "$GITHUB_ENV"
           echo "SERIAL=$serial" >> "$GITHUB_ENV"
           echo "APP_PID=$pid" >> "$GITHUB_ENV"
+          echo "WIN_USER=$win_user" >> "$GITHUB_ENV"
           echo LIVE_REBUILT_APP_GATE=PASS
 
       - name: Discover and forward the app WebView DevTools socket
@@ -67,64 +69,85 @@ jobs:
           echo WEBVIEW_DEVTOOLS_SOCKET_FOUND=1
           $ADB -s "$SERIAL" forward --remove tcp:9223 >/dev/null 2>&1 || true
           $ADB -s "$SERIAL" forward tcp:9223 "localabstract:$socket" >/dev/null
-          for i in $(seq 1 10); do
-            if curl -fsS http://127.0.0.1:9223/json/list > /tmp/mrscrap-pages.json; then
-              break
-            fi
-            sleep 1
-          done
-          test -s /tmp/mrscrap-pages.json
-          python3 - <<'PY'
-          import json
-          pages = json.load(open('/tmp/mrscrap-pages.json'))
-          print('CDP_PAGE_COUNT=' + str(len(pages)))
-          candidates = [p for p in pages if p.get('type') == 'page' and p.get('webSocketDebuggerUrl')]
-          if not candidates:
-              raise SystemExit('no debuggable WebView page target')
-          page = next((p for p in candidates if str(p.get('url','')).startswith('https://localhost')), candidates[0])
-          open('/tmp/mrscrap-ws.txt','w').write(page['webSocketDebuggerUrl'])
-          print('CDP_APP_PAGE_FOUND=1')
-          PY
-          echo CDP_FORWARD_GATE=PASS
+          echo CDP_FORWARD_CREATED=1
 
-      - name: Click Grab latest 10 inside the real Capacitor WebView
+      - name: Click Grab latest 10 through Windows-side WebView CDP
         shell: bash
         run: |
           set -euo pipefail
           $ADB -s "$SERIAL" logcat -c >/dev/null 2>&1 || true
-          cat > /tmp/mrscrap-cdp-click.mjs <<'JS'
-          import fs from 'node:fs';
-          const url = fs.readFileSync('/tmp/mrscrap-ws.txt','utf8').trim();
-          const ws = new WebSocket(url);
-          const expression = `(() => {
+          ps1="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-cdp-click.ps1"
+          cat > "$ps1" <<'PS'
+          $ErrorActionPreference = 'Stop'
+          $targets = $null
+          for ($i = 0; $i -lt 10; $i++) {
+            try {
+              $targets = Invoke-RestMethod -Uri 'http://127.0.0.1:9223/json/list' -TimeoutSec 3
+              if ($targets) { break }
+            } catch {
+              Start-Sleep -Milliseconds 500
+            }
+          }
+          if (-not $targets) { throw 'CDP target list unavailable on Windows localhost' }
+          $pages = @($targets | Where-Object { $_.type -eq 'page' -and $_.webSocketDebuggerUrl })
+          Write-Output ('CDP_PAGE_COUNT=' + $pages.Count)
+          if ($pages.Count -lt 1) { throw 'No debuggable WebView page target' }
+          $page = @($pages | Where-Object { [string]$_.url -like 'https://localhost*' } | Select-Object -First 1)
+          if ($page.Count -eq 0) { $page = @($pages | Select-Object -First 1) }
+          $wsUrl = [string]$page[0].webSocketDebuggerUrl
+          $uri = [Uri]$wsUrl
+          $wsUrl = 'ws://127.0.0.1:9223' + $uri.PathAndQuery
+          Write-Output 'CDP_APP_PAGE_FOUND=1'
+
+          $expression = @"
+          (() => {
             const buttons = [...document.querySelectorAll('button')];
+            const arabic = '\u0627\u062c\u0644\u0628 \u0622\u062e\u0631 10 \u0648\u062d\u0644\u0644\u0647\u0627';
             const target = buttons.find((button) => {
-              const text = String(button.innerText || button.textContent || '').replace(/\\s+/g,' ').trim();
-              return /اجلب آخر 10 وحللها/.test(text) || /Grab latest 10 and analyze/i.test(text);
+              const text = String(button.innerText || button.textContent || '').replace(/\s+/g, ' ').trim();
+              return text.includes(arabic) || /Grab latest 10 and analyze/i.test(text);
             });
-            if (!target) return {clicked:false, buttonCount:buttons.length, href:location.href};
+            if (!target) return {clicked:false, buttonCount:buttons.length};
             target.scrollIntoView({block:'center'});
             target.click();
-            return {clicked:true, text:String(target.innerText || target.textContent || '').replace(/\\s+/g,' ').trim(), href:location.href};
-          })()`;
-          const timer = setTimeout(() => { console.error('CDP_TIMEOUT'); process.exit(31); }, 10000);
-          ws.addEventListener('open', () => {
-            ws.send(JSON.stringify({id:1, method:'Runtime.evaluate', params:{expression, returnByValue:true, awaitPromise:true}}));
-          });
-          ws.addEventListener('message', (event) => {
-            const message = JSON.parse(String(event.data));
-            if (message.id !== 1) return;
-            clearTimeout(timer);
-            const value = message?.result?.result?.value || {};
-            console.log('CDP_CLICKED=' + (value.clicked ? '1' : '0'));
-            console.log('CDP_BUTTON_COUNT=' + String(value.buttonCount ?? 'unknown'));
-            if (value.clicked) console.log('CDP_MATCH_TEXT=' + String(value.text || '').slice(0,120));
-            ws.close();
-            process.exit(value.clicked ? 0 : 32);
-          });
-          ws.addEventListener('error', () => { clearTimeout(timer); console.error('CDP_WEBSOCKET_ERROR'); process.exit(33); });
-          JS
-          node /tmp/mrscrap-cdp-click.mjs
+            return {clicked:true, buttonCount:buttons.length};
+          })()
+          "@
+
+          $ws = [System.Net.WebSockets.ClientWebSocket]::new()
+          $cts = [Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds(10))
+          $ws.ConnectAsync([Uri]$wsUrl, $cts.Token).GetAwaiter().GetResult()
+          $payload = @{ id = 1; method = 'Runtime.evaluate'; params = @{ expression = $expression; returnByValue = $true; awaitPromise = $true } } | ConvertTo-Json -Compress -Depth 8
+          $bytes = [Text.Encoding]::UTF8.GetBytes($payload)
+          $segment = [ArraySegment[byte]]::new($bytes)
+          $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cts.Token).GetAwaiter().GetResult()
+
+          $buffer = New-Object byte[] 65536
+          $builder = [Text.StringBuilder]::new()
+          while ($true) {
+            $received = $ws.ReceiveAsync([ArraySegment[byte]]::new($buffer), $cts.Token).GetAwaiter().GetResult()
+            if ($received.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close) { throw 'CDP socket closed before response' }
+            [void]$builder.Append([Text.Encoding]::UTF8.GetString($buffer, 0, $received.Count))
+            if (-not $received.EndOfMessage) { continue }
+            $message = $builder.ToString() | ConvertFrom-Json
+            $builder.Clear() | Out-Null
+            if ($message.id -ne 1) { continue }
+            $value = $message.result.result.value
+            $clicked = $false
+            $buttonCount = -1
+            if ($null -ne $value) {
+              $clicked = [bool]$value.clicked
+              if ($null -ne $value.buttonCount) { $buttonCount = [int]$value.buttonCount }
+            }
+            Write-Output ('CDP_BUTTON_COUNT=' + $buttonCount)
+            Write-Output ('CDP_CLICKED=' + ($(if ($clicked) {'1'} else {'0'})))
+            if (-not $clicked) { exit 32 }
+            break
+          }
+          try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, 'done', [Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch {}
+          PS
+          ps_win="$(wslpath -w "$ps1")"
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$ps_win" | tr -d '\r'
           echo REAL_WEBVIEW_CLICK_GATE=PASS
 
       - name: Prove Facebook collector terminal result
@@ -178,4 +201,5 @@ jobs:
             echo FACEBOOK_SESSION_METADATA_FINAL=0
           fi
           $ADB -s "$SERIAL" forward --remove tcp:9223 >/dev/null 2>&1 || true
+          rm -f "/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-cdp-click.ps1" 2>/dev/null || true
           echo FACEBOOK_CDP_COLLECTOR_PROOF_COMPLETE=1
