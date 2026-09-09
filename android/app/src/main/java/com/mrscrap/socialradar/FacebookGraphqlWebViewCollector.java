@@ -150,12 +150,19 @@ final class FacebookGraphqlWebViewCollector {
                         int p2 = diagnostics == null ? 0 : diagnostics.optInt("p2", 0);
                         int p3 = diagnostics == null ? 0 : diagnostics.optInt("p3", 0);
                         int p4 = diagnostics == null ? 0 : diagnostics.optInt("p4", 0);
+                        int p5 = diagnostics == null ? 0 : diagnostics.optInt("p5", 0);
+                        int handleHits = diagnostics == null ? 0 : diagnostics.optInt("handleHits", 0);
+                        int contextualCandidates = diagnostics == null ? 0 : diagnostics.optInt("contextualCandidates", 0);
+                        String winningResolverKey = safeCode(diagnostics == null ? "none" : diagnostics.optString("winningResolverKey", "none"));
+                        String contextKeySummary = safeCode(diagnostics == null ? "none" : diagnostics.optString("contextKeySummary", "none"));
                         Log.i(TAG, "event=graphql_result posts=" + postCount +
                             " pages=" + pages + " nodes=" + nodes +
                             " candidates=" + candidatesTried + " qerr=" + queryErrors +
                             " winner=" + winningCandidate + " winp=" + winningResolverPattern +
-                            " wino=" + winningResolverOccurrence + " p0=" + p0 + " p1=" + p1 +
-                            " p2=" + p2 + " p3=" + p3 + " p4=" + p4);
+                            " wino=" + winningResolverOccurrence + " wink=" + winningResolverKey +
+                            " handleHits=" + handleHits + " contextual=" + contextualCandidates +
+                            " p0=" + p0 + " p1=" + p1 + " p2=" + p2 + " p3=" + p3 +
+                            " p4=" + p4 + " p5=" + p5 + " keys=" + contextKeySummary);
                         if (postCount <= 0) {
                             finishError(main, timeout[0], webView, finished, callback,
                                 "GRAPHQL_NO_POSTS|pages=" + pages + "|nodes=" + nodes);
@@ -294,28 +301,33 @@ final class FacebookGraphqlWebViewCollector {
               let sourceId = '';
               let resolverPattern = -99;
               let resolverOccurrence = -1;
+              let resolverKey = '';
               const sourceCandidates = [];
               const sourceCandidatePatterns = [];
               const sourceCandidateOccurrences = [];
+              const sourceCandidateKeys = [];
               const numericId = (raw) => {
                 const value = String(raw || '').trim();
                 if (value.length < 5 || value.length > 32) return '';
                 return [...value].every(ch => ch >= '0' && ch <= '9') ? value : '';
               };
-              const addCandidate = (raw, pattern, occurrence) => {
+              const safeKey = (raw) => String(raw || '').replace(/[^A-Za-z0-9_]/g, '').slice(0, 48);
+              const addCandidate = (raw, pattern, occurrence, key) => {
                 const value = numericId(raw);
-                if (!value || sourceCandidates.includes(value) || sourceCandidates.length >= 24) return;
+                if (!value || sourceCandidates.includes(value) || sourceCandidates.length >= 24) return false;
                 sourceCandidates.push(value);
                 sourceCandidatePatterns.push(pattern);
                 sourceCandidateOccurrences.push(occurrence);
+                sourceCandidateKeys.push(safeKey(key));
+                return true;
               };
               try {
                 const u = new URL(sourceUrl);
-                addCandidate(u.searchParams.get('id') || '', -2, 0);
+                addCandidate(u.searchParams.get('id') || '', -2, 0, 'query_id');
               } catch (_) {}
 
               const html = document.documentElement?.innerHTML || '';
-              const scanAll = (marker, pattern, maxHits) => {
+              const scanAll = (marker, pattern, maxHits, key) => {
                 let from = 0, occurrence = 0;
                 while (occurrence < maxHits && sourceCandidates.length < 24) {
                   const at = html.indexOf(marker, from);
@@ -323,19 +335,52 @@ final class FacebookGraphqlWebViewCollector {
                   let pos = at + marker.length;
                   let digits = '';
                   while (pos < html.length && html[pos] >= '0' && html[pos] <= '9') digits += html[pos++];
-                  addCandidate(digits, pattern, occurrence);
+                  addCandidate(digits, pattern, occurrence, key);
                   occurrence++;
                   from = at + marker.length;
                 }
               };
 
-              // Strong, source-specific markers first. Generic JSON id is last because an
-              // authenticated Facebook document contains many unrelated object IDs.
-              scanAll('fb://profile/', 0, 6);
-              scanAll('fb://page/', 1, 6);
-              scanAll('"pageID":"', 2, 6);
-              scanAll('profile_id=', 4, 8);
-              scanAll('"id":"', 3, 20);
+              scanAll('fb://profile/', 0, 6, 'fb_profile');
+              scanAll('fb://page/', 1, 6, 'fb_page');
+              scanAll('"pageID":"', 2, 6, 'pageID');
+              scanAll('profile_id=', 4, 8, 'profile_id');
+
+              // The authenticated WebView bootstrap does not expose the target under the
+              // traditional keys. Search only around the requested handle and collect nearby
+              // numeric schema values. Values stay in-memory; diagnostics expose key names only.
+              let handleHits = 0;
+              let contextualCandidates = 0;
+              const contextKeys = new Set();
+              if (requestedHandle) {
+                const lower = html.toLowerCase();
+                const needle = requestedHandle.toLowerCase();
+                let from = 0;
+                while (handleHits < 12 && sourceCandidates.length < 24) {
+                  const at = lower.indexOf(needle, from);
+                  if (at < 0) break;
+                  handleHits++;
+                  let windowText = html.slice(Math.max(0, at - 7000), Math.min(html.length, at + needle.length + 7000));
+                  windowText = windowText.replace(/&quot;|&#34;/g, '"').replace(/&amp;/g, '&');
+                  const jsonRe = /["']([A-Za-z][A-Za-z0-9_]{1,48})["']\\s*:\\s*["']?(\\d{5,32})/g;
+                  const queryRe = /([A-Za-z][A-Za-z0-9_]{1,48})=(\\d{5,32})/g;
+                  for (const re of [jsonRe, queryRe]) {
+                    re.lastIndex = 0;
+                    let match;
+                    let localOccurrence = 0;
+                    while ((match = re.exec(windowText)) && sourceCandidates.length < 24 && localOccurrence < 24) {
+                      const key = safeKey(match[1]);
+                      if (key) contextKeys.add(key);
+                      if (addCandidate(match[2], 5, localOccurrence, key)) contextualCandidates++;
+                      localOccurrence++;
+                    }
+                  }
+                  from = at + needle.length;
+                }
+              }
+
+              // Generic IDs are a final fallback only after handle-context candidates.
+              scanAll('"id":"', 3, 20, 'id');
 
               if (sourceCandidates.length === 0) {
                 return JSON.stringify({pending:true, diagnostics:{collector:'graphql', surface:host, waitingFor:'source_id'}});
@@ -343,10 +388,12 @@ final class FacebookGraphqlWebViewCollector {
               sourceId = sourceCandidates[0];
               resolverPattern = sourceCandidatePatterns[0];
               resolverOccurrence = sourceCandidateOccurrences[0];
-              const candidatePatternCounts = [0,0,0,0,0];
+              resolverKey = sourceCandidateKeys[0];
+              const candidatePatternCounts = [0,0,0,0,0,0];
               for (const pattern of sourceCandidatePatterns) {
-                if (pattern >= 0 && pattern <= 4) candidatePatternCounts[pattern]++;
+                if (pattern >= 0 && pattern <= 5) candidatePatternCounts[pattern]++;
               }
+              const contextKeySummary = [...contextKeys].slice(0, 12).join('.');
 
               const cleanTitle = (raw) => String(raw || '').replace(/\\s*[|·-]\\s*Facebook\\s*$/i, '').trim();
               const title = cleanTitle(
@@ -487,13 +534,14 @@ final class FacebookGraphqlWebViewCollector {
               (async () => {
                 const posts = [], seen = new Set();
                 let pages = 0, nodes = 0, candidatesTried = 0, queryErrors = 0;
-                let winningSourceId = '', winningCandidate = -1, winningResolverPattern = -99, winningResolverOccurrence = -1;
+                let winningSourceId = '', winningCandidate = -1, winningResolverPattern = -99, winningResolverOccurrence = -1, winningResolverKey = '';
                 const maxCandidates = Math.min(24, sourceCandidates.length);
                 candidateLoop:
                 for (let candidateIndex = 0; candidateIndex < maxCandidates; candidateIndex++) {
                   sourceId = sourceCandidates[candidateIndex];
                   resolverPattern = sourceCandidatePatterns[candidateIndex];
                   resolverOccurrence = sourceCandidateOccurrences[candidateIndex];
+                  resolverKey = sourceCandidateKeys[candidateIndex];
                   candidatesTried++;
                   let cursor = null;
                   for (let page = 0; page < 4 && posts.length < LIMIT; page++) {
@@ -521,6 +569,7 @@ final class FacebookGraphqlWebViewCollector {
                       winningCandidate = candidateIndex;
                       winningResolverPattern = resolverPattern;
                       winningResolverOccurrence = resolverOccurrence;
+                      winningResolverKey = resolverKey;
                     }
                     for (const post of parsed.posts) {
                       if (seen.has(post.externalPostId)) continue;
@@ -542,7 +591,7 @@ final class FacebookGraphqlWebViewCollector {
                   result:{
                     source:{platform:'facebook', externalId:stableExternalId, url:sourceUrl, displayName:title || (handle ? '@'+handle : 'Facebook'), handle, avatarUrl:avatar, visibilityType:'authenticated'},
                     posts:posts.slice(0, LIMIT),
-                    diagnostics:{collector:'graphql', surface:host, pages, nodes, candidatesTried, queryErrors, winningCandidate, winningResolverPattern, winningResolverOccurrence, p0:candidatePatternCounts[0], p1:candidatePatternCounts[1], p2:candidatePatternCounts[2], p3:candidatePatternCounts[3], p4:candidatePatternCounts[4]}
+                    diagnostics:{collector:'graphql', surface:host, pages, nodes, candidatesTried, queryErrors, winningCandidate, winningResolverPattern, winningResolverOccurrence, winningResolverKey, handleHits, contextualCandidates, contextKeySummary, p0:candidatePatternCounts[0], p1:candidatePatternCounts[1], p2:candidatePatternCounts[2], p3:candidatePatternCounts[3], p4:candidatePatternCounts[4], p5:candidatePatternCounts[5]}
                   }
                 };
               })().catch((error) => {
