@@ -13,7 +13,7 @@ jobs:
     runs-on: [self-hosted, Linux]
     timeout-minutes: 10
     steps:
-      - name: Install Android CLI locally on Windows and inspect SDK support
+      - name: Install Android CLI binary locally on Windows and inspect SDK support
         shell: bash
         run: |
           set -euo pipefail
@@ -21,63 +21,25 @@ jobs:
           win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
           test -n "$win_user"
 
-          tmp_win="C:\\Users\\${win_user}\\AppData\\Local\\Temp"
-          installer_win="${tmp_win}\\mrscrap-android-cli-install.cmd"
-          installer_wsl="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-android-cli-install.cmd"
+          cli_dir_wsl="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidCLI"
+          cli_dir_win="C:\\Users\\${win_user}\\AppData\\Local\\MRSCRAP\\AndroidCLI"
+          sdk_dir_win="C:\\Users\\${win_user}\\AppData\\Local\\MRSCRAP\\AndroidSdk"
+          mkdir -p "$cli_dir_wsl"
 
           /mnt/c/Windows/System32/curl.exe -fsSL \
-            https://dl.google.com/android/cli/latest/windows_x86_64/install.cmd \
-            -o "$installer_win"
-          test -s "$installer_wsl"
-          echo ANDROID_CLI_INSTALLER_READY=1
+            https://dl.google.com/android/cli/latest/windows_x86_64/android.exe \
+            -o "${cli_dir_win}\\android.exe"
 
-          /mnt/c/Windows/System32/cmd.exe /d /c "cd /d C:\\Windows && call ${installer_win}" 2>&1 | tr -d '\r'
-          echo ANDROID_CLI_INSTALL_ATTEMPTED=1
+          android="${cli_dir_wsl}/android.exe"
+          test -s "$android"
+          echo ANDROID_CLI_PRESENT=1
 
-          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-find-android-cli.ps1"
-          cat > "$ps1" <<'POWERSHELL'
-          $ErrorActionPreference = 'Stop'
-          $roots = @(
-            $env:LOCALAPPDATA,
-            $env:USERPROFILE
-          ) | Where-Object { $_ -and (Test-Path $_) }
+          "$android" --version 2>&1 | tr -d '\r' | sed 's/^/ANDROID_CLI_VERSION=/'
+          "$android" --sdk="$sdk_dir_win" info 2>&1 | tr -d '\r' | sed 's/^/ANDROID_INFO=/'
 
-          $android = $null
-          foreach ($root in $roots) {
-            $candidate = Get-ChildItem -Path $root -Filter android.exe -File -Recurse -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -match 'android|google' } |
-              Select-Object -First 1
-            if ($candidate) {
-              $android = $candidate.FullName
-              break
-            }
-          }
+          "$android" --sdk="$sdk_dir_win" sdk list --all 2>&1 | tr -d '\r' |
+            grep -Ei '(^|[ /])(emulator|platform-tools|system-images/android-3[5-7].*(x86_64|x86_6))' |
+            head -n 40 |
+            sed 's/^/SDK_MATCH=/' || true
 
-          if (-not $android) {
-            Write-Output 'ANDROID_CLI_PRESENT=0'
-            exit 2
-          }
-
-          Write-Output 'ANDROID_CLI_PRESENT=1'
-          Write-Output ('ANDROID_CLI_DIR=' + (Split-Path $android -Parent))
-
-          try {
-            & $android --version 2>&1 | ForEach-Object { Write-Output ('ANDROID_CLI_VERSION=' + $_.ToString()) }
-          } catch {
-            Write-Output 'ANDROID_CLI_VERSION=UNKNOWN'
-          }
-
-          try {
-            & $android sdk list 2>&1 |
-              Select-String -Pattern 'emulator|platform-tools|system-images/android-3[5-7].*(x86_64|x86_6)' |
-              Select-Object -First 30 |
-              ForEach-Object { Write-Output ('SDK_MATCH=' + $_.Line.Trim()) }
-          } catch {
-            Write-Output 'SDK_LIST=FAILED'
-          }
-          POWERSHELL
-
-          ps1_win="$(wslpath -w "$ps1")"
-          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe \
-            -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
-            -File "$ps1_win" | tr -d '\r'
+          echo ANDROID_CLI_BOOTSTRAP=PASS
