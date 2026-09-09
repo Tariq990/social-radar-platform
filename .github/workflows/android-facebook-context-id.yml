@@ -1,0 +1,162 @@
+name: Facebook Context ID Physical Gate
+
+on:
+  push:
+    branches: [test/android-physical-fix-20260909]
+    paths:
+      - .github/workflows/android-facebook-context-id.yml
+      - scripts/apply-facebook-context-id-sweep.py
+
+permissions:
+  contents: write
+
+concurrency:
+  group: facebook-context-id-physical
+  cancel-in-progress: true
+
+jobs:
+  context-probe:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 15
+    env:
+      ANDROID_VERSION_CODE: '141'
+      ANDROID_VERSION_NAME: '0.1.141-context-id-test'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply handle-context resolver
+        shell: bash
+        run: |
+          set -euo pipefail
+          git show "$GITHUB_SHA:scripts/apply-facebook-context-id-sweep.py" > /tmp/apply-facebook-context-id-sweep.py
+          git fetch origin test/android-physical-local-recovery-20260909
+          git checkout -B context-id-candidate FETCH_HEAD
+          python3 /tmp/apply-facebook-context-id-sweep.py
+          git diff --check
+
+      - name: Verify emitted JavaScript
+        shell: bash
+        run: |
+          set -euo pipefail
+          export JAVA_HOME=/home/tarik/actions-runnerr/_work/_tool/Java_Temurin-Hotspot_jdk/21.0.12-101.0.LTS/x64
+          export PATH="$JAVA_HOME/bin:/home/tarik/actions-runnerr/_work/_tool/node/22.23.2/x64/bin:$PATH"
+          python3 scripts/verify-facebook-script.py
+
+      - name: Build and sync
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="/home/tarik/actions-runnerr/_work/_tool/node/22.23.2/x64/bin:$PATH"
+          npm install --prefer-offline --no-audit --no-fund
+          npm run build
+          npx cap sync android
+
+      - name: Compile APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          export JAVA_HOME=/home/tarik/actions-runnerr/_work/_tool/Java_Temurin-Hotspot_jdk/21.0.12-101.0.LTS/x64
+          export PATH="$JAVA_HOME/bin:$PATH"
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/.android/sdk}}"
+          sdk="$(realpath "$sdk")"
+          printf 'sdk.dir=%s\n' "$sdk" > android/local.properties
+          "$HOME/.local/share/mrscrap-gradle/gradle-8.13/bin/gradle" -p android :app:assembleDebug --stacktrace
+
+      - name: Commit physical candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'MR SCRAP Physical Fix'
+          git config user.email 'actions@users.noreply.github.com'
+          git add android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java
+          git diff --cached --check
+          git commit -m 'test: resolve Facebook ID from handle context'
+          git push origin HEAD:test/android-physical-local-recovery-20260909
+
+      - name: Install preserving session
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-platform-tools/platform-tools/adb.exe"
+          serial=""
+          for i in $(seq 1 45); do
+            serial="$($adb devices 2>/dev/null | tr -d '\r' | awk 'NR>1 && $2=="device" {print $1; exit}')"
+            [ -n "$serial" ] && break
+            sleep 1
+          done
+          test -n "$serial"
+          echo "::add-mask::$serial"
+          echo "WIN_USER=$win_user" >> "$GITHUB_ENV"
+          echo "ADB=$adb" >> "$GITHUB_ENV"
+          echo "SERIAL=$serial" >> "$GITHUB_ENV"
+          apk="$GITHUB_WORKSPACE/android/app/build/outputs/apk/debug/app-debug.apk"
+          win_tmp="/mnt/c/Users/${win_user}/AppData/Local/Temp/MR-SCRAP-context-id-test.apk"
+          cp "$apk" "$win_tmp"
+          "$adb" -s "$serial" install -r "$(wslpath -w "$win_tmp")" | tr -d '\r'
+          "$adb" -s "$serial" shell dumpsys package com.mrscrap.socialradar | tr -d '\r' | grep -E 'versionCode=|versionName=' | head -n4
+
+      - name: Auto-run context probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$ADB" -s "$SERIAL" shell setprop log.tag.MRSCRAP_FLOW I || true
+          "$ADB" -s "$SERIAL" shell setprop log.tag.MRSCRAP_COLLECTOR I || true
+          "$ADB" -s "$SERIAL" shell am force-stop com.mrscrap.socialradar || true
+          "$ADB" -s "$SERIAL" shell am start -W -n com.mrscrap.socialradar/.MainActivity | tr -d '\r'
+          sleep 4
+          "$ADB" -s "$SERIAL" logcat -c
+
+          socket_name=""
+          for i in $(seq 1 45); do
+            pid="$($ADB -s "$SERIAL" shell pidof com.mrscrap.socialradar 2>/dev/null | tr -d '\r' | awk '{print $1}')"
+            if [ -n "$pid" ]; then
+              socket_name="$($ADB -s "$SERIAL" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | grep -o "webview_devtools_remote_${pid}" | head -n1 || true)"
+              [ -n "$socket_name" ] && break
+            fi
+            sleep 1
+          done
+          test -n "$socket_name"
+          "$ADB" -s "$SERIAL" forward --remove tcp:19222 >/dev/null 2>&1 || true
+          "$ADB" -s "$SERIAL" forward tcp:19222 "localabstract:${socket_name}" >/dev/null
+
+          ps1="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-context-id-probe.ps1"
+          cat > "$ps1" <<'PS'
+          $ErrorActionPreference='Stop'
+          $targets=@(Invoke-RestMethod -Uri 'http://127.0.0.1:19222/json' -TimeoutSec 4)
+          $main=$targets|Where-Object {$_.type -eq 'page' -and ([string]$_.url).StartsWith('https://localhost')}|Select-Object -First 1
+          if(-not $main){throw 'MAIN_TARGET_NOT_FOUND'}
+          $u=([string]$main.webSocketDebuggerUrl) -replace '^ws://localhost:','ws://127.0.0.1:'
+          $ws=[System.Net.WebSockets.ClientWebSocket]::new();$ws.Options.Proxy=$null
+          [void]$ws.ConnectAsync([Uri]$u,[Threading.CancellationToken]::None).GetAwaiter().GetResult()
+          $expr="(() => { window.Capacitor.nativePromise('AuthenticatedSocialSession','collectSource',{sourceId:'context-id-diagnostic',url:'https://www.facebook.com/tarik.ziad.3914',platform:'facebook',limit:10}).catch(()=>null); return 'started'; })()"
+          $payload=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true}}|ConvertTo-Json -Depth 10 -Compress
+          $bytes=[Text.Encoding]::UTF8.GetBytes($payload);$seg=[ArraySegment[byte]]::new($bytes)
+          [void]$ws.SendAsync($seg,[Net.WebSockets.WebSocketMessageType]::Text,$true,[Threading.CancellationToken]::None).GetAwaiter().GetResult()
+          Start-Sleep -Milliseconds 300
+          $ws.Dispose()
+          Write-Output CONTEXT_ID_NATIVE_COLLECTOR_INVOKED
+          PS
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\\Users\\${WIN_USER}\\AppData\\Local\\Temp\\mrscrap-context-id-probe.ps1"
+
+          terminal=0
+          logs=""
+          for i in $(seq 1 60); do
+            logs="$($ADB -s "$SERIAL" logcat -d -v brief -s MRSCRAP_FLOW:I MRSCRAP_COLLECTOR:I '*:S' 2>/dev/null | tr -d '\r' || true)"
+            if printf '%s\n' "$logs" | grep -Eq 'event=collect_source_(success|error) platform=facebook'; then terminal=1; break; fi
+            sleep 1
+          done
+          echo CONTEXT_ID_SAFE_TRACE_BEGIN
+          printf '%s\n' "$logs" | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' | grep -E 'collect_source_|graphql_(load_start|page_started|page_finished|stage|result|error|timeout)' | tail -n180 || true
+          echo CONTEXT_ID_SAFE_TRACE_END
+          "$ADB" -s "$SERIAL" forward --remove tcp:19222 >/dev/null 2>&1 || true
+          test "$terminal" = 1
+          if printf '%s\n' "$logs" | grep -Eq 'event=graphql_result posts=[1-9][0-9]*'; then
+            printf '%s\n' "$logs" | grep -q 'event=collect_source_success platform=facebook'
+            echo CONTEXT_ID_PHYSICAL_COLLECTOR_PASS
+          else
+            echo CONTEXT_ID_NO_POSTS
+            exit 1
+          fi
