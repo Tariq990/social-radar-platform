@@ -38,76 +38,25 @@ jobs:
           from pathlib import Path
           p=Path('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedWebCollector.java')
           s=p.read_text()
-          old='private static final long PAGE_STARTED_EXTRACTION_DELAY_MS = 900;'
-          assert s.count(old)==1, s.count(old)
-          s=s.replace(old, 'private static final long PAGE_STARTED_EXTRACTION_DELAY_MS = 3_000;')
-          old_block='''                @Override
-                public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                    return !isAllowedSocialUrl(request.getUrl().toString());
-                }
-'''
-          new_block='''                @Override
-                public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                    String target = request.getUrl().toString();
-                    boolean allowed = isAllowedSocialUrl(target);
-                    Log.i(TAG, "event=navigation_request main=" + request.isForMainFrame() +
-                        " allowed=" + allowed + " surface=" + surfaceClass(target));
-                    return !allowed;
-                }
-
-                @Override
-                public void onReceivedError(WebView view, WebResourceRequest request, android.webkit.WebResourceError error) {
-                    super.onReceivedError(view, request, error);
-                    if (request == null) return;
-                    Log.w(TAG, "event=navigation_error main=" + request.isForMainFrame() +
-                        " code=" + (error == null ? 0 : error.getErrorCode()) +
-                        " surface=" + surfaceClass(request.getUrl().toString()));
-                }
-
-                @Override
-                public void onReceivedHttpError(WebView view, WebResourceRequest request, android.webkit.WebResourceResponse response) {
-                    super.onReceivedHttpError(view, request, response);
-                    if (request == null) return;
-                    Log.w(TAG, "event=navigation_http_error main=" + request.isForMainFrame() +
-                        " status=" + (response == null ? 0 : response.getStatusCode()) +
-                        " surface=" + surfaceClass(request.getUrl().toString()));
-                }
-
-                @Override
-                public boolean onRenderProcessGone(WebView view, android.webkit.RenderProcessGoneDetail detail) {
-                    Log.e(TAG, "event=renderer_gone crashed=" + (detail != null && detail.didCrash()) +
-                        " priority=" + (detail == null ? 0 : detail.rendererPriorityAtExit()));
-                    return super.onRenderProcessGone(view, detail);
-                }
-'''
-          assert s.count(old_block)==1, s.count(old_block)
-          s=s.replace(old_block,new_block)
-          anchor='''    private static boolean isBlank(String value) {
-'''
-          helper='''    private static String surfaceClass(String rawUrl) {
-        try {
-            Uri uri = Uri.parse(rawUrl);
-            String host = uri.getHost();
-            if (host == null) return "blank";
-            String h = host.toLowerCase();
-            if (h.equals("facebook.com") || h.endsWith(".facebook.com") || h.equals("fb.com") || h.endsWith(".fb.com") || h.equals("fb.watch")) return "facebook";
-            if (h.equals("instagram.com") || h.endsWith(".instagram.com") || h.equals("instagr.am") || h.endsWith(".instagr.am")) return "instagram";
-            return "other";
-        } catch (Exception ignored) {
-            return "invalid";
-        }
-    }
-
-'''
-          assert s.count(anchor)==1
-          s=s.replace(anchor,helper+anchor)
+          delay='private static final long PAGE_STARTED_EXTRACTION_DELAY_MS = 900;'
+          assert s.count(delay)==1, s.count(delay)
+          s=s.replace(delay, 'private static final long PAGE_STARTED_EXTRACTION_DELAY_MS = 3_000;')
+          nav='                    return !isAllowedSocialUrl(request.getUrl().toString());'
+          assert s.count(nav)==1, s.count(nav)
+          repl='\n'.join([
+              '                    String target = request.getUrl().toString();',
+              '                    boolean allowed = isAllowedSocialUrl(target);',
+              '                    Log.i(TAG, "event=navigation_request main=" + request.isForMainFrame() +',
+              '                        " allowed=" + allowed + " host=" + String.valueOf(request.getUrl().getHost()));',
+              '                    return !allowed;'
+          ])
+          s=s.replace(nav,repl)
           p.write_text(s)
           assert 'PAGE_STARTED_EXTRACTION_DELAY_MS = 3_000' in s
           assert 'event=navigation_request' in s
-          assert 'event=renderer_gone' in s
           print('V149_WORKSPACE_PATCH=PASS')
           PY
-          git diff -- android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedWebCollector.java | sed -n '1,220p'
+          git diff -- android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedWebCollector.java | sed -n '1,140p'
 
       - name: Setup Java 21
         uses: actions/setup-java@v4
@@ -125,7 +74,6 @@ jobs:
           printf 'sdk.dir=%s\n' "$sdk" > android/local.properties
           gradle="$HOME/.local/share/mrscrap-gradle/gradle-8.13/bin/gradle"; test -x "$gradle"
           echo "GRADLE_BIN=$gradle" >> "$GITHUB_ENV"
-          echo BUILD_TOOLCHAIN_READY=1
 
       - name: Compile workspace-only v149 debug APK
         shell: bash
@@ -160,6 +108,8 @@ jobs:
           echo "INSTALLED_VERSION_CODE=$version"; test "$version" = 149
           marker="$($ADB -s "$SERIAL" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"; printf '%s' "$marker" | grep -q facebook_connected_at
           echo FACEBOOK_SESSION_METADATA_AFTER_INSTALL=1
+          for i in $(seq 1 12); do code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 https://mr-scrap-api-live.onrender.com/api/health || true)"; [ "$code" = 200 ] && break; sleep 5; done
+          echo "BACKEND_HEALTH_HTTP=$code"; test "$code" = 200
           $ADB -s "$SERIAL" shell am force-stop "$PKG" >/dev/null 2>&1 || true
           $ADB -s "$SERIAL" shell am start -W -n "$PKG/.MainActivity" >/dev/null
           sleep 10
@@ -178,19 +128,22 @@ jobs:
           ps1="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-v149-grab.ps1"
           cat > "$ps1" <<'PS'
           $ErrorActionPreference='Stop'
-          function Targets {for($i=0;$i -lt 20;$i++){try{$t=@(Invoke-RestMethod -Uri 'http://127.0.0.1:9223/json/list' -TimeoutSec 2);if($t.Count -gt 0){return $t}}catch{};Start-Sleep -Milliseconds 300};throw 'targets unavailable'}
-          function AppTarget {$a=@(Targets|Where-Object{$_.type -eq 'page' -and [string]$_.url -like 'https://localhost*'}|Select-Object -First 1);if($a.Count -eq 0){throw 'app target missing'};$a[0]}
-          function Eval([string]$raw,[string]$expr,[int]$seconds=10){$u=[Uri]$raw;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($seconds));$ws.ConnectAsync([Uri]('ws://127.0.0.1:9223'+$u.PathAndQuery),$cts.Token).GetAwaiter().GetResult()|Out-Null;$p=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 8;$b=[Text.Encoding]::UTF8.GetBytes($p);$ws.SendAsync([ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null;$buf=New-Object byte[] 131072;$sb=[Text.StringBuilder]::new();while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id -ne 1){continue};if($m.result.exceptionDetails){throw 'runtime eval exception'};$v=$m.result.result.value;try{$ws.Abort()}catch{};return $v}}
-          $app=AppTarget;$null=Eval ([string]$app.webSocketDebuggerUrl) "(()=>{window.dispatchEvent(new CustomEvent('mrscrap:navigate',{detail:{screen:'radar'}}));return true})()" 8
+          function Targets { for($i=0;$i -lt 20;$i++){ try{$t=@(Invoke-RestMethod -Uri 'http://127.0.0.1:9223/json/list' -TimeoutSec 2);if($t.Count -gt 0){return $t}}catch{}; Start-Sleep -Milliseconds 300 }; throw 'targets unavailable' }
+          function AppTarget { $a=@(Targets|Where-Object{$_.type -eq 'page' -and [string]$_.url -like 'https://localhost*'}|Select-Object -First 1); if($a.Count -eq 0){throw 'app target missing'}; $a[0] }
+          function Eval([string]$raw,[string]$expr,[int]$seconds=10){ $u=[Uri]$raw;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($seconds));$ws.ConnectAsync([Uri]('ws://127.0.0.1:9223'+$u.PathAndQuery),$cts.Token).GetAwaiter().GetResult()|Out-Null;$p=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 8;$b=[Text.Encoding]::UTF8.GetBytes($p);$ws.SendAsync([ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null;$buf=New-Object byte[] 131072;$sb=[Text.StringBuilder]::new();while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id -ne 1){continue};if($m.result.exceptionDetails){throw 'runtime eval exception'};$v=$m.result.result.value;try{$ws.Abort()}catch{};return $v} }
+          $app=AppTarget
+          $null=Eval ([string]$app.webSocketDebuggerUrl) "(()=>{window.dispatchEvent(new CustomEvent('mrscrap:navigate',{detail:{screen:'radar'}}));return true})()" 8
           $find=@'
           (()=>{const n=s=>String(s||'').replace(/\s+/g,' ').trim();const b=[...document.querySelectorAll('button')].find(x=>{const t=n(x.innerText||x.textContent);return t.includes('\u0627\u062c\u0644\u0628 \u0622\u062e\u0631 10 \u0648\u062d\u0644\u0644\u0647\u0627')||/Grab latest 10 and analyze/i.test(t)});return{found:Boolean(b),enabled:Boolean(b&&!b.disabled)}})()
           '@
-          $s=$null;for($i=0;$i -lt 80;$i++){Start-Sleep -Milliseconds 400;$app=AppTarget;$s=Eval ([string]$app.webSocketDebuggerUrl) $find 8;if($s.found -and $s.enabled){break}}
+          $s=$null
+          for($i=0;$i -lt 80;$i++){Start-Sleep -Milliseconds 400;$app=AppTarget;$s=Eval ([string]$app.webSocketDebuggerUrl) $find 8;if($s.found -and $s.enabled){break}}
           Write-Output ('RADAR_GRAB_BUTTON_FOUND='+$(if($s.found){'1'}else{'0'}));Write-Output ('RADAR_GRAB_BUTTON_ENABLED='+$(if($s.enabled){'1'}else{'0'}));if(!$s.found -or !$s.enabled){exit 149}
           $click=@'
           (()=>{const n=s=>String(s||'').replace(/\s+/g,' ').trim();const b=[...document.querySelectorAll('button')].find(x=>{const t=n(x.innerText||x.textContent);return t.includes('\u0627\u062c\u0644\u0628 \u0622\u062e\u0631 10 \u0648\u062d\u0644\u0644\u0647\u0627')||/Grab latest 10 and analyze/i.test(t)});if(!b||b.disabled)return false;b.click();return true})()
           '@
-          $clicked=Eval ([string]$app.webSocketDebuggerUrl) $click 8;Write-Output ('REAL_GRAB_CLICKED='+$(if($clicked){'1'}else{'0'}));if(!$clicked){exit 150}
+          $clicked=Eval ([string]$app.webSocketDebuggerUrl) $click 8
+          Write-Output ('REAL_GRAB_CLICKED='+$(if($clicked){'1'}else{'0'}));if(!$clicked){exit 150}
           PS
           $ADB -s "$SERIAL" logcat -c >/dev/null 2>&1 || true
           /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
@@ -205,17 +158,16 @@ jobs:
             events="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' || true)"
             success="$(printf '%s\n' "$events" | grep -E 'event=collect_source_success platform=facebook posts=[0-9]+' | tail -n1 || true)"
             failure="$(printf '%s\n' "$events" | grep -E 'event=collect_source_error platform=facebook code=' | tail -n1 || true)"
-            [ -n "$success" ] || [ -n "$failure" ] || { sleep 1; continue; }; break
+            [ -n "$success" ] || [ -n "$failure" ] || { sleep 1; continue; }
+            break
           done
           echo '=== SAFE V149 LIFECYCLE TRACE ==='
           $ADB -s "$SERIAL" logcat -b all -d -v threadtime 2>/dev/null | tr -d '\r' | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' | tail -n 320 || true
           started="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -c 'MRSCRAP_COLLECTOR.*event=page_started' || true)"
           finished="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -c 'MRSCRAP_COLLECTOR.*event=page_finished' || true)"
           requests="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -c 'MRSCRAP_COLLECTOR.*event=navigation_request' || true)"
-          main_errors="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -Ec 'MRSCRAP_COLLECTOR.*event=navigation_(error|http_error) main=true' || true)"
-          renderer_gone="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | grep -c 'MRSCRAP_COLLECTOR.*event=renderer_gone' || true)"
           max_body="$($ADB -s "$SERIAL" logcat -b all -d -v brief 2>/dev/null | tr -d '\r' | sed -n 's/.*event=eval_result.* body=\([0-9][0-9]*\).*/\1/p' | sort -n | tail -n1)"
-          echo "DOM_PAGE_STARTED_COUNT=$started"; echo "DOM_PAGE_FINISHED_COUNT=$finished"; echo "DOM_NAVIGATION_REQUEST_COUNT=$requests"; echo "DOM_MAIN_FRAME_ERROR_COUNT=$main_errors"; echo "DOM_RENDERER_GONE_COUNT=$renderer_gone"; echo "MAX_DOM_BODY_TEXT_LENGTH=${max_body:-0}"
+          echo "DOM_PAGE_STARTED_COUNT=$started"; echo "DOM_PAGE_FINISHED_COUNT=$finished"; echo "DOM_NAVIGATION_REQUEST_COUNT=$requests"; echo "MAX_DOM_BODY_TEXT_LENGTH=${max_body:-0}"
           if [ -n "$failure" ]; then code="$(printf '%s' "$failure" | sed -n 's/.*code=\([^ ]*\).*/\1/p')"; echo "FACEBOOK_COLLECTOR_FAILURE_CODE=${code:-unknown}"; exit 151; fi
           test -n "$success"
           posts="$(printf '%s' "$success" | sed -n 's/.*posts=\([0-9][0-9]*\).*/\1/p')"
