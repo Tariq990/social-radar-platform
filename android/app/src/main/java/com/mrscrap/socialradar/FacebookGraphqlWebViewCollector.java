@@ -351,7 +351,7 @@ final class FacebookGraphqlWebViewCollector {
                   if (!post || seen.has(post.externalPostId)) return;
                   seen.add(post.externalPostId); posts.push(post);
                 };
-                for (const line of String(text || '').split('\n')) {
+                for (const line of String(text || '').split('\\n')) {
                   if (!line.trim()) continue;
                   let payload;
                   try { payload = JSON.parse(line); } catch (_) { continue; }
