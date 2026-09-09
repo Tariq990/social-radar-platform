@@ -131,7 +131,9 @@ jobs:
           echo "GRADLE_BIN=$selected" >> "$GITHUB_ENV"
 
       - name: Compile signed debug APK
-        run: "$GRADLE_BIN" -p android :app:assembleDebug --stacktrace
+        shell: bash
+        run: |
+          "$GRADLE_BIN" -p android :app:assembleDebug --stacktrace
 
       - name: Commit validated production fix on test branch
         shell: bash
