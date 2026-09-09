@@ -14,14 +14,55 @@ jobs:
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
-      - name: Run full safe reference contract
+      - name: Resolve target and run full safe reference contract
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, urllib.parse, urllib.request, urllib.error
+          import json, re, urllib.parse, urllib.request, urllib.error
 
-          url = 'https://www.facebook.com/api/graphql/'
+          handle = 'tarik.ziad.3914'
+          page_headers = {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36',
+              'Accept': '*/*',
+              'Accept-Language': 'en-US,en;q=0.9',
+              'Origin': 'https://www.facebook.com',
+          }
+          page_url = 'https://www.facebook.com/' + urllib.parse.quote(handle, safe='.') + '?locale=en_US'
+          try:
+              with urllib.request.urlopen(urllib.request.Request(page_url, headers=page_headers), timeout=20) as r:
+                  page_status = r.status
+                  html = r.read().decode('utf-8', 'replace')
+          except urllib.error.HTTPError as e:
+              print(f'TARGET_PAGE_HTTP={e.code}')
+              raise SystemExit(2)
+          except Exception:
+              print('TARGET_PAGE_TRANSPORT=FAILED')
+              raise SystemExit(3)
+
+          patterns = [
+              r'fb://profile/(\d+)',
+              r'fb://page/(\d+)',
+              r'"pageID":"(\d+)"',
+              r'"id":"(\d+)"',
+              r'profile_id=(\d+)',
+          ]
+          resolved = ''
+          matched_pattern = -1
+          for i, pattern in enumerate(patterns):
+              m = re.search(pattern, html)
+              if m:
+                  resolved = m.group(1)
+                  matched_pattern = i
+                  break
+
+          print(f'TARGET_PAGE_HTTP={page_status}')
+          print(f'TARGET_ID_RESOLVED={1 if resolved.isdigit() else 0}')
+          print(f'TARGET_ID_PATTERN_INDEX={matched_pattern}')
+          print(f'TARGET_ID_LENGTH={len(resolved)}')
+          if not resolved.isdigit():
+              raise SystemExit(4)
+
           headers = {
               'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36',
               'Accept': '*/*',
@@ -32,26 +73,13 @@ jobs:
               'Sec-Fetch-Site': 'same-origin',
           }
           variables = {
-              'afterTime': None,
-              'beforeTime': None,
-              'count': 1,
-              'cursor': None,
-              'feedLocation': 'TIMELINE',
-              'feedbackSource': 0,
-              'focusCommentID': None,
-              'memorializedSplitTimeFilter': None,
-              'omitPinnedPost': True,
-              'postedBy': {'group': 'OWNER'},
-              'privacy': None,
-              'privacySelectorRenderLocation': 'COMET_STREAM',
-              'referringStoryRenderLocation': None,
-              'renderLocation': 'timeline',
-              'scale': 1,
-              'stream_count': 1,
-              'taggedInOnly': None,
-              'trackingCode': None,
-              'useDefaultActor': False,
-              'id': '100067932423860',
+              'afterTime': None, 'beforeTime': None, 'count': 10, 'cursor': None,
+              'feedLocation': 'TIMELINE', 'feedbackSource': 0, 'focusCommentID': None,
+              'memorializedSplitTimeFilter': None, 'omitPinnedPost': True,
+              'postedBy': {'group': 'OWNER'}, 'privacy': None,
+              'privacySelectorRenderLocation': 'COMET_STREAM', 'referringStoryRenderLocation': None,
+              'renderLocation': 'timeline', 'scale': 1, 'stream_count': 1,
+              'taggedInOnly': None, 'trackingCode': None, 'useDefaultActor': False, 'id': resolved,
               '__relay_internal__pv__GHLShouldChangeAdIdFieldNamerelayprovider': False,
               '__relay_internal__pv__GHLShouldChangeSponsoredDataFieldNamerelayprovider': False,
               '__relay_internal__pv__CometFeedStory_enable_reactor_facepilerelayprovider': False,
@@ -84,46 +112,40 @@ jobs:
               'variables': json.dumps(variables, separators=(',', ':')),
               'doc_id': '27465012859856795',
           }).encode()
-          req = urllib.request.Request(url, data=body, headers=headers, method='POST')
+          req = urllib.request.Request('https://www.facebook.com/api/graphql/', data=body, headers=headers, method='POST')
           try:
               with urllib.request.urlopen(req, timeout=20) as r:
-                  status = r.status
+                  gql_status = r.status
                   text = r.read().decode('utf-8', 'replace')
           except urllib.error.HTTPError as e:
-              print(f'REFERENCE_HTTP_STATUS={e.code}')
-              raise SystemExit(2)
+              print(f'TARGET_GRAPHQL_HTTP={e.code}')
+              raise SystemExit(5)
           except Exception:
-              print('REFERENCE_TRANSPORT=FAILED')
-              raise SystemExit(3)
+              print('TARGET_GRAPHQL_TRANSPORT=FAILED')
+              raise SystemExit(6)
 
-          print(f'REFERENCE_HTTP_STATUS={status}')
-          total_errors = 0
+          errors = 0
           codes = set()
-          data_blocks = node_blocks = timeline_blocks = edges_total = post_nodes = page_info_blocks = 0
-          json_lines = parse_failures = 0
+          data_blocks = node_blocks = timeline_blocks = edges_total = post_nodes = 0
           for line in text.splitlines():
               if not line.strip():
                   continue
               try:
                   payload = json.loads(line)
               except Exception:
-                  parse_failures += 1
                   continue
-              json_lines += 1
               if not isinstance(payload, dict):
                   continue
-              errors = payload.get('errors') or []
-              if isinstance(errors, list):
-                  total_errors += len(errors)
-                  for e in errors:
+              es = payload.get('errors') or []
+              if isinstance(es, list):
+                  errors += len(es)
+                  for e in es:
                       if isinstance(e, dict) and e.get('code') is not None:
                           codes.add(str(e.get('code')))
               data = payload.get('data')
               if not isinstance(data, dict):
                   continue
               data_blocks += 1
-              if isinstance(data.get('page_info'), dict):
-                  page_info_blocks += 1
               node = data.get('node')
               if not isinstance(node, dict):
                   continue
@@ -134,26 +156,22 @@ jobs:
               if not isinstance(feed, dict):
                   continue
               timeline_blocks += 1
-              if isinstance(feed.get('page_info'), dict):
-                  page_info_blocks += 1
               edges = feed.get('edges')
               if isinstance(edges, list):
                   edges_total += len(edges)
                   post_nodes += sum(1 for edge in edges if isinstance(edge, dict) and isinstance(edge.get('node'), dict) and edge['node'].get('post_id'))
 
-          print(f'REFERENCE_JSON_LINES={json_lines}')
-          print(f'REFERENCE_PARSE_FAILURES={parse_failures}')
-          print(f'REFERENCE_ERRORS={total_errors}')
-          print('REFERENCE_ERROR_CODES=' + ','.join(sorted(codes)))
-          print(f'REFERENCE_DATA_BLOCKS={data_blocks}')
-          print(f'REFERENCE_NODE_BLOCKS={node_blocks}')
-          print(f'REFERENCE_TIMELINE_BLOCKS={timeline_blocks}')
-          print(f'REFERENCE_EDGES={edges_total}')
-          print(f'REFERENCE_POST_NODES={post_nodes}')
-          print(f'REFERENCE_PAGE_INFO={page_info_blocks}')
+          print(f'TARGET_GRAPHQL_HTTP={gql_status}')
+          print(f'TARGET_GRAPHQL_ERRORS={errors}')
+          print('TARGET_GRAPHQL_ERROR_CODES=' + ','.join(sorted(codes)))
+          print(f'TARGET_DATA_BLOCKS={data_blocks}')
+          print(f'TARGET_NODE_BLOCKS={node_blocks}')
+          print(f'TARGET_TIMELINE_BLOCKS={timeline_blocks}')
+          print(f'TARGET_EDGES={edges_total}')
+          print(f'TARGET_POST_NODES={post_nodes}')
           if edges_total > 0 or post_nodes > 0:
-              print('REFERENCE_FULL_CONTRACT=PASS')
+              print('TARGET_REFERENCE_PATH=PASS')
               raise SystemExit(0)
-          print('REFERENCE_FULL_CONTRACT=NO_POSTS')
-          raise SystemExit(5)
+          print('TARGET_REFERENCE_PATH=NO_POSTS')
+          raise SystemExit(7)
           PY
