@@ -32,6 +32,15 @@ function context(fetch) {
     document:{querySelector:()=>null,querySelectorAll:()=>[],documentElement:{innerHTML:''},title:'Fixture | Facebook'}};
   c.window = c; return vm.createContext(c);
 }
+async function settle(c, maxTurns=40) {
+  let result = null;
+  for (let i=0; i<maxTurns; i++) {
+    result = JSON.parse(vm.runInContext(script,c));
+    if (!result?.pending) return result;
+    await new Promise(resolve=>setImmediate(resolve));
+  }
+  return result;
+}
 (async () => {
   let calls = 0;
   const c = context(async (url, options) => {
@@ -42,15 +51,19 @@ function context(fetch) {
       JSON.stringify({data:{node:story('222')}})
     ].join('\n')};
   });
-  assert.equal(JSON.parse(vm.runInContext(script,c)).pending,true);
-  await new Promise(resolve=>setImmediate(resolve));
-  const result=JSON.parse(vm.runInContext(script,c));
+  const first=JSON.parse(vm.runInContext(script,c));
+  assert.equal(first.pending,true);
+  const result=await settle(c);
+  assert.ok(result && Array.isArray(result.posts), 'collector did not settle to a post result');
   assert.equal(result.posts.length,2); assert.equal(calls,1);
   assert.equal(result.source.displayName,'Fixture');
   console.log('PASS: actual emitted script fetch and multiline response parser');
+
   const failed=context(async()=>{throw new Error('private transport detail')});
-  vm.runInContext(script,failed); await new Promise(resolve=>setImmediate(resolve));
-  assert.equal(JSON.parse(vm.runInContext(script,failed)).error,'GRAPHQL_FETCH_FAILED');
+  const failedFirst=JSON.parse(vm.runInContext(script,failed));
+  assert.equal(failedFirst.pending,true);
+  const failedResult=await settle(failed);
+  assert.equal(failedResult.error,'GRAPHQL_FETCH_FAILED');
   console.log('PASS: transport failure exposes only safe error code');
 })().catch(error=>{console.error(error);process.exit(1)});
 """)
