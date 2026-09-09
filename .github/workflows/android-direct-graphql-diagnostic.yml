@@ -64,15 +64,7 @@ jobs:
           $payload=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true}}|ConvertTo-Json -Depth 10 -Compress
           $bytes=[Text.Encoding]::UTF8.GetBytes($payload);$seg=[ArraySegment[byte]]::new($bytes)
           [void]$ws.SendAsync($seg,[Net.WebSockets.WebSocketMessageType]::Text,$true,[Threading.CancellationToken]::None).GetAwaiter().GetResult()
-          $buf=New-Object byte[] 65536;$rseg=[ArraySegment[byte]]::new($buf)
-          $deadline=[DateTime]::UtcNow.AddSeconds(5)
-          while([DateTime]::UtcNow -lt $deadline){
-            $res=$ws.ReceiveAsync($rseg,[Threading.CancellationToken]::None).GetAwaiter().GetResult()
-            if($res.Count -le 0){continue}
-            $text=[Text.Encoding]::UTF8.GetString($buf,0,$res.Count)
-            try{$obj=$text|ConvertFrom-Json -Depth 20}catch{continue}
-            if($obj.id -eq 1){break}
-          }
+          Start-Sleep -Milliseconds 250
           $ws.Dispose()
           Write-Output LOCALE_NATIVE_COLLECTOR_INVOKED
           PS
@@ -80,6 +72,7 @@ jobs:
           /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$win_ps1"
 
           terminal=0
+          logs=""
           for i in $(seq 1 40); do
             logs="$($adb -s "$serial" logcat -d -v brief -s MRSCRAP_FLOW:I MRSCRAP_COLLECTOR:I '*:S' 2>/dev/null | tr -d '\r' || true)"
             if printf '%s\n' "$logs" | grep -Eq 'event=collect_source_(success|error) platform=facebook'; then terminal=1; break; fi
