@@ -1,0 +1,127 @@
+name: Android 140 GraphQL Contract Gate
+
+on:
+  push:
+    branches: [test/android-physical-fix-20260909]
+    paths: [.github/workflows/android-140-graphql-contract-gate.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-140-graphql-contract-gate
+  cancel-in-progress: true
+
+jobs:
+  build-install-test:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout exact recovered fix commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin test/android-physical-local-recovery-20260909
+          git checkout --detach 859778a305e30669f8956e1fbeb081e9b3d0f1a4
+          test "$(git rev-parse HEAD)" = 859778a305e30669f8956e1fbeb081e9b3d0f1a4
+          echo "SOURCE_COMMIT=859778a305e30669f8956e1fbeb081e9b3d0f1a4"
+
+      - name: Restore exact APK 137 web assets and generate Android project files
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="/home/tarik/actions-runnerr/_work/_tool/node/22.23.2/x64/bin:$PATH"
+          REF=/mnt/c/Users/tarik/AppData/Local/Temp/MR-SCRAP-physical-test3.apk
+          test -f "$REF"
+          rm -rf /tmp/mrscrap137-web dist node_modules
+          mkdir -p /tmp/mrscrap137-web dist
+          unzip -q "$REF" 'assets/public/*' -d /tmp/mrscrap137-web
+          cp -a /tmp/mrscrap137-web/assets/public/. dist/
+          npm install --no-audit --no-fund
+          npx cap sync android
+          diff -qr /tmp/mrscrap137-web/assets/public android/app/src/main/assets/public
+          echo "APK137_WEB_ASSETS_RESTORED_BYTE_FOR_BYTE"
+
+      - name: Verify GraphQL script and tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          export JAVA_HOME=/home/tarik/actions-runnerr/_work/_tool/Java_Temurin-Hotspot_jdk/21.0.12-101.0.LTS/x64
+          export PATH="$JAVA_HOME/bin:/home/tarik/actions-runnerr/_work/_tool/node/22.23.2/x64/bin:$PATH"
+          python3 scripts/verify-facebook-script.py
+          npm test -- --runInBand
+
+      - name: Build signed APK 140
+        shell: bash
+        run: |
+          set -euo pipefail
+          export JAVA_HOME=/home/tarik/actions-runnerr/_work/_tool/Java_Temurin-Hotspot_jdk/21.0.12-101.0.LTS/x64
+          export ANDROID_HOME=/home/tarik/.android/sdk
+          export ANDROID_VERSION_CODE=140
+          export ANDROID_VERSION_NAME=0.1.140-graphql-contract-test
+          GRADLE=/home/tarik/.local/share/mrscrap-gradle/gradle-8.13/bin/gradle
+          "$GRADLE" -p android :app:assembleDebug --stacktrace
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          rm -rf /tmp/mrscrap140-web
+          mkdir -p /tmp/mrscrap140-web
+          unzip -q "$APK" 'assets/public/*' -d /tmp/mrscrap140-web
+          diff -qr /tmp/mrscrap137-web/assets/public /tmp/mrscrap140-web/assets/public
+          sha256sum "$APK" | awk '{print "APK140_SHA256=" $1}'
+          echo "APK140_WEB_ASSETS_MATCH_137"
+
+      - name: Install APK 140 without clearing app data
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-platform-tools/platform-tools/adb.exe"
+          serial=""
+          for i in $(seq 1 60); do
+            serial="$($adb devices 2>/dev/null | tr -d '\r' | awk 'NR>1 && $2=="device" {print $1; exit}')"
+            [ -n "$serial" ] && break
+            sleep 1
+          done
+          test -n "$serial"
+          echo "::add-mask::$serial"
+          echo "ADB=$adb" >> "$GITHUB_ENV"
+          echo "SERIAL=$serial" >> "$GITHUB_ENV"
+          WIN_APK="/mnt/c/Users/${win_user}/AppData/Local/Temp/MR-SCRAP-140.apk"
+          cp android/app/build/outputs/apk/debug/app-debug.apk "$WIN_APK"
+          "$adb" -s "$serial" install -r "$WIN_APK" | tr -d '\r'
+          "$adb" -s "$serial" shell dumpsys package com.mrscrap.socialradar | tr -d '\r' | grep -E 'versionCode=|versionName=' | head -n4
+          "$adb" -s "$serial" shell setprop log.tag.MRSCRAP_FLOW I || true
+          "$adb" -s "$serial" shell setprop log.tag.MRSCRAP_COLLECTOR I || true
+          "$adb" -s "$serial" shell am force-stop com.mrscrap.socialradar
+          "$adb" -s "$serial" shell am start -n com.mrscrap.socialradar/.MainActivity >/dev/null
+          echo "APK140_INSTALLED_AND_LAUNCHED"
+
+      - name: Wait for one physical Smart Grab result
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$ADB" -s "$SERIAL" logcat -c
+          echo "READY_FOR_SMART_GRAB_10_NO_COMMENTS"
+          seen_enter=0
+          for i in $(seq 1 240); do
+            logs="$($ADB -s "$SERIAL" logcat -d -v brief -s MRSCRAP_FLOW:I MRSCRAP_COLLECTOR:I '*:S' 2>/dev/null | tr -d '\r' || true)"
+            if printf '%s\n' "$logs" | grep -q 'event=collect_source_enter platform=facebook'; then seen_enter=1; fi
+            if [ "$seen_enter" = 1 ] && printf '%s\n' "$logs" | grep -Eq 'event=collect_source_(success|error) platform=facebook'; then
+              echo "SMART_GRAB_SAFE_TRACE_BEGIN"
+              printf '%s\n' "$logs" | grep -E 'MRSCRAP_(FLOW|COLLECTOR)' | grep -E 'collect_source_|graphql_(load_start|page_started|page_finished|stage|result|error|timeout)' | tail -n120
+              echo "SMART_GRAB_SAFE_TRACE_END"
+              if printf '%s\n' "$logs" | grep -q 'event=collect_source_success platform=facebook posts=10'; then
+                echo "PHYSICAL_SMART_GRAB_10_PASS"
+                exit 0
+              fi
+              echo "PHYSICAL_SMART_GRAB_DID_NOT_RETURN_10"
+              exit 2
+            fi
+            sleep 1
+          done
+          echo "NO_SMART_GRAB_ATTEMPT_SEEN_IN_WINDOW"
+          exit 3
