@@ -14,9 +14,9 @@ permissions:
 jobs:
   probe:
     runs-on: [self-hosted, Linux]
-    timeout-minutes: 7
+    timeout-minutes: 10
     steps:
-      - name: Detect runner boundary and adb backend
+      - name: Detect runner boundary and prepare adb backend
         shell: bash
         run: |
           set -euo pipefail
@@ -38,19 +38,44 @@ jobs:
           selected="$linux_adb"
           backend="linux"
           if [ "$is_wsl" = 1 ] && command -v cmd.exe >/dev/null 2>&1; then
+            win_user="$(cmd.exe /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1 || true)"
             win_adb="$(cmd.exe /c where adb 2>/dev/null | tr -d '\r' | head -n1 || true)"
-            if [ -z "$win_adb" ]; then
-              win_user="$(cmd.exe /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1 || true)"
-              candidate="/mnt/c/Users/${win_user}/AppData/Local/Android/Sdk/platform-tools/adb.exe"
-              if [ -n "$win_user" ] && [ -x "$candidate" ]; then win_adb="$candidate"; fi
-            elif command -v wslpath >/dev/null 2>&1; then
+            if [ -n "$win_adb" ] && command -v wslpath >/dev/null 2>&1; then
               win_adb="$(wslpath "$win_adb" 2>/dev/null || printf '%s' "$win_adb")"
             fi
+
+            if [ -z "$win_adb" ] && [ -n "$win_user" ]; then
+              candidate="/mnt/c/Users/${win_user}/AppData/Local/Android/Sdk/platform-tools/adb.exe"
+              if [ -x "$candidate" ]; then win_adb="$candidate"; fi
+            fi
+
+            if [ -z "$win_adb" ] && [ -n "$win_user" ]; then
+              cache="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-platform-tools"
+              mkdir -p "$cache"
+              if [ ! -x "$cache/platform-tools/adb.exe" ]; then
+                echo "WINDOWS_ADB_BOOTSTRAP=download"
+                zip="$cache/platform-tools.zip"
+                curl -fsSL --retry 3 --retry-delay 2 \
+                  https://dl.google.com/android/repository/platform-tools-latest-windows.zip \
+                  -o "$zip"
+                python3 - "$zip" "$cache" <<'PY'
+import sys, zipfile
+zip_path, target = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(zip_path) as z:
+    z.extractall(target)
+PY
+                rm -f "$zip"
+              fi
+              if [ -x "$cache/platform-tools/adb.exe" ]; then
+                win_adb="$cache/platform-tools/adb.exe"
+              fi
+            fi
+
             if [ -n "$win_adb" ] && [ -x "$win_adb" ]; then
               selected="$win_adb"
               backend="windows"
             else
-              echo "WINDOWS_ADB_NOT_FOUND"
+              echo "WINDOWS_ADB_NOT_AVAILABLE"
             fi
           fi
 
@@ -61,7 +86,7 @@ jobs:
           echo "ADB=$selected" >> "$GITHUB_ENV"
           echo "ADB_BACKEND=$backend" >> "$GITHUB_ENV"
           echo "ADB_BACKEND=$backend"
-          "$selected" version | head -n 2
+          "$selected" version | head -n 2 | tr -d '\r'
 
       - name: Detect authorized physical device
         shell: bash
@@ -70,7 +95,7 @@ jobs:
           "$ADB" kill-server >/dev/null 2>&1 || true
           "$ADB" start-server >/dev/null 2>&1 || true
           SERIAL=""
-          for attempt in $(seq 1 12); do
+          for attempt in $(seq 1 30); do
             snapshot="$($ADB devices 2>/dev/null | tr -d '\r' || true)"
             states="$(printf '%s\n' "$snapshot" | awk 'NR>1 && NF>=2 {print $2}' | sort | uniq -c | xargs || true)"
             echo "ADB_ATTEMPT_${attempt}_STATES=${states:-none}"
