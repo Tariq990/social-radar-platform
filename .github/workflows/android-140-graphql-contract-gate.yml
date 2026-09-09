@@ -1,4 +1,4 @@
-name: Android 140 GraphQL Contract Gate
+name: Android 141 Facebook Source ID Gate
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: android-140-graphql-contract-gate
+  group: android-141-facebook-source-id-gate
   cancel-in-progress: true
 
 jobs:
@@ -21,14 +21,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Checkout exact recovered fix commit
+      - name: Checkout exact recovered source ID fix
         shell: bash
         run: |
           set -euo pipefail
           git fetch origin test/android-physical-local-recovery-20260909
-          git checkout --detach 859778a305e30669f8956e1fbeb081e9b3d0f1a4
-          test "$(git rev-parse HEAD)" = 859778a305e30669f8956e1fbeb081e9b3d0f1a4
-          echo "SOURCE_COMMIT=859778a305e30669f8956e1fbeb081e9b3d0f1a4"
+          git checkout --detach e26557b76a5c7fce402ffc38a5604ad4ff2516ca
+          test "$(git rev-parse HEAD)" = e26557b76a5c7fce402ffc38a5604ad4ff2516ca
+          echo "SOURCE_COMMIT=e26557b76a5c7fce402ffc38a5604ad4ff2516ca"
 
       - name: Restore exact APK 137 web assets and generate Android project files
         shell: bash
@@ -55,26 +55,26 @@ jobs:
           python3 scripts/verify-facebook-script.py
           npm test -- --runInBand
 
-      - name: Build signed APK 140
+      - name: Build signed APK 141
         shell: bash
         run: |
           set -euo pipefail
           export JAVA_HOME=/home/tarik/actions-runnerr/_work/_tool/Java_Temurin-Hotspot_jdk/21.0.12-101.0.LTS/x64
           export ANDROID_HOME=/home/tarik/.android/sdk
-          export ANDROID_VERSION_CODE=140
-          export ANDROID_VERSION_NAME=0.1.140-graphql-contract-test
+          export ANDROID_VERSION_CODE=141
+          export ANDROID_VERSION_NAME=0.1.141-source-id-test
           GRADLE=/home/tarik/.local/share/mrscrap-gradle/gradle-8.13/bin/gradle
           "$GRADLE" -p android :app:assembleDebug --stacktrace
           APK=android/app/build/outputs/apk/debug/app-debug.apk
           test -f "$APK"
-          rm -rf /tmp/mrscrap140-web
-          mkdir -p /tmp/mrscrap140-web
-          unzip -q "$APK" 'assets/public/*' -d /tmp/mrscrap140-web
-          diff -qr /tmp/mrscrap137-web/assets/public /tmp/mrscrap140-web/assets/public
-          sha256sum "$APK" | awk '{print "APK140_SHA256=" $1}'
-          echo "APK140_WEB_ASSETS_MATCH_137"
+          rm -rf /tmp/mrscrap141-web
+          mkdir -p /tmp/mrscrap141-web
+          unzip -q "$APK" 'assets/public/*' -d /tmp/mrscrap141-web
+          diff -qr /tmp/mrscrap137-web/assets/public /tmp/mrscrap141-web/assets/public
+          sha256sum "$APK" | awk '{print "APK141_SHA256=" $1}'
+          echo "APK141_WEB_ASSETS_MATCH_137"
 
-      - name: Install APK 140 without clearing app data
+      - name: Install APK 141 without clearing app data
         shell: bash
         run: |
           set -euo pipefail
@@ -90,8 +90,8 @@ jobs:
           echo "::add-mask::$serial"
           echo "ADB=$adb" >> "$GITHUB_ENV"
           echo "SERIAL=$serial" >> "$GITHUB_ENV"
-          WIN_APK_LINUX="/mnt/c/Users/${win_user}/AppData/Local/Temp/MR-SCRAP-140.apk"
-          WIN_APK_WINDOWS="C:\\Users\\${win_user}\\AppData\\Local\\Temp\\MR-SCRAP-140.apk"
+          WIN_APK_LINUX="/mnt/c/Users/${win_user}/AppData/Local/Temp/MR-SCRAP-141.apk"
+          WIN_APK_WINDOWS="C:\\Users\\${win_user}\\AppData\\Local\\Temp\\MR-SCRAP-141.apk"
           cp android/app/build/outputs/apk/debug/app-debug.apk "$WIN_APK_LINUX"
           test -f "$WIN_APK_LINUX"
           "$adb" -s "$serial" install -r "$WIN_APK_WINDOWS" | tr -d '\r'
@@ -100,7 +100,7 @@ jobs:
           "$adb" -s "$serial" shell setprop log.tag.MRSCRAP_COLLECTOR I || true
           "$adb" -s "$serial" shell am force-stop com.mrscrap.socialradar
           "$adb" -s "$serial" shell am start -n com.mrscrap.socialradar/.MainActivity >/dev/null
-          echo "APK140_INSTALLED_AND_LAUNCHED"
+          echo "APK141_INSTALLED_AND_LAUNCHED"
 
       - name: Wait for one physical Smart Grab result
         shell: bash
