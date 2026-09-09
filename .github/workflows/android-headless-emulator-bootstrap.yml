@@ -31,7 +31,7 @@ jobs:
           test -s "$installer_wsl"
           echo ANDROID_CLI_INSTALLER_READY=1
 
-          /mnt/c/Windows/System32/cmd.exe /d /c "\"${installer_win}\"" 2>&1 | tr -d '\r'
+          /mnt/c/Windows/System32/cmd.exe /d /c "cd /d C:\\Windows && call ${installer_win}" 2>&1 | tr -d '\r'
           echo ANDROID_CLI_INSTALL_ATTEMPTED=1
 
           ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-find-android-cli.ps1"
