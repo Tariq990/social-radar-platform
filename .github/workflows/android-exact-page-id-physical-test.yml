@@ -54,6 +54,7 @@ jobs:
           node -v
           npm -v
           npm install --no-audit --no-fund
+          npm run build
           npx cap sync android
 
       - name: Compile signed debug APK
