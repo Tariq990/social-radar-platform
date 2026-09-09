@@ -18,263 +18,32 @@ jobs:
           fetch-depth: 0
       - name: Patch target-bound Facebook ID recovery
         shell: bash
+        env:
+          ID_BLOCK_B64: "ICAgICAgICAgICAgICBsZXQgc291cmNlSWQgPSAnJzsKICAgICAgICAgICAgICBjb25zdCBzb3VyY2VDYW5kaWRhdGVzID0gW107CiAgICAgICAgICAgICAgY29uc3QgbnVtZXJpY0lkID0gKHJhdykgPT4gewogICAgICAgICAgICAgICAgY29uc3QgdmFsdWUgPSBTdHJpbmcocmF3IHx8ICcnKS50cmltKCk7CiAgICAgICAgICAgICAgICBpZiAodmFsdWUubGVuZ3RoIDwgNSB8fCB2YWx1ZS5sZW5ndGggPiAzMikgcmV0dXJuICcnOwogICAgICAgICAgICAgICAgcmV0dXJuIFsuLi52YWx1ZV0uZXZlcnkoY2ggPT4gY2ggPj0gJzAnICYmIGNoIDw9ICc5JykgPyB2YWx1ZSA6ICcnOwogICAgICAgICAgICAgIH07CiAgICAgICAgICAgICAgY29uc3QgYWRkQ2FuZGlkYXRlID0gKHJhdykgPT4gewogICAgICAgICAgICAgICAgY29uc3QgdmFsdWUgPSBudW1lcmljSWQocmF3KTsKICAgICAgICAgICAgICAgIGlmICghdmFsdWUgfHwgc291cmNlQ2FuZGlkYXRlcy5pbmNsdWRlcyh2YWx1ZSkgfHwgc291cmNlQ2FuZGlkYXRlcy5sZW5ndGggPj0gMTIpIHJldHVybjsKICAgICAgICAgICAgICAgIHNvdXJjZUNhbmRpZGF0ZXMucHVzaCh2YWx1ZSk7CiAgICAgICAgICAgICAgfTsKICAgICAgICAgICAgICB0cnkgewogICAgICAgICAgICAgICAgY29uc3QgdSA9IG5ldyBVUkwoc291cmNlVXJsKTsKICAgICAgICAgICAgICAgIGFkZENhbmRpZGF0ZSh1LnNlYXJjaFBhcmFtcy5nZXQoJ2lkJykgfHwgJycpOwogICAgICAgICAgICAgIH0gY2F0Y2ggKF8pIHt9CgogICAgICAgICAgICAgIGNvbnN0IGh0bWwgPSBkb2N1bWVudC5kb2N1bWVudEVsZW1lbnQ/LmlubmVySFRNTCB8fCAnJzsKICAgICAgICAgICAgICBjb25zdCBzY2FuTWFya2VyID0gKHJhdywgbWFya2VyLCBtYXhIaXRzID0gMykgPT4gewogICAgICAgICAgICAgICAgY29uc3QgdGV4dCA9IFN0cmluZyhyYXcgfHwgJycpOwogICAgICAgICAgICAgICAgbGV0IGZyb20gPSAwLCBoaXRzID0gMDsKICAgICAgICAgICAgICAgIHdoaWxlIChoaXRzIDwgbWF4SGl0cyAmJiBzb3VyY2VDYW5kaWRhdGVzLmxlbmd0aCA8IDEyKSB7CiAgICAgICAgICAgICAgICAgIGNvbnN0IGF0ID0gdGV4dC5pbmRleE9mKG1hcmtlciwgZnJvbSk7CiAgICAgICAgICAgICAgICAgIGlmIChhdCA8IDApIGJyZWFrOwogICAgICAgICAgICAgICAgICBsZXQgcG9zID0gYXQgKyBtYXJrZXIubGVuZ3RoOwogICAgICAgICAgICAgICAgICBjb25zdCBlbmQgPSBNYXRoLm1pbih0ZXh0Lmxlbmd0aCwgcG9zICsgODApOwogICAgICAgICAgICAgICAgICB3aGlsZSAocG9zIDwgZW5kICYmICEodGV4dFtwb3NdID49ICcwJyAmJiB0ZXh0W3Bvc10gPD0gJzknKSkgcG9zKys7CiAgICAgICAgICAgICAgICAgIGxldCBkaWdpdHMgPSAnJzsKICAgICAgICAgICAgICAgICAgd2hpbGUgKHBvcyA8IGVuZCAmJiB0ZXh0W3Bvc10gPj0gJzAnICYmIHRleHRbcG9zXSA8PSAnOScpIGRpZ2l0cyArPSB0ZXh0W3BvcysrXTsKICAgICAgICAgICAgICAgICAgaWYgKG51bWVyaWNJZChkaWdpdHMpKSB7IGFkZENhbmRpZGF0ZShkaWdpdHMpOyBoaXRzKys7IH0KICAgICAgICAgICAgICAgICAgZnJvbSA9IGF0ICsgbWFya2VyLmxlbmd0aDsKICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICB9OwoKICAgICAgICAgICAgICBmb3IgKGNvbnN0IG1ldGEgb2YgWy4uLmRvY3VtZW50LnF1ZXJ5U2VsZWN0b3JBbGwoJ21ldGFbcHJvcGVydHk9ImFsOmlvczp1cmwiXSwgbWV0YVtwcm9wZXJ0eT0iYWw6YW5kcm9pZDp1cmwiXScpXSkgewogICAgICAgICAgICAgICAgY29uc3QgY29udGVudCA9IFN0cmluZyhtZXRhPy5jb250ZW50IHx8ICcnKTsKICAgICAgICAgICAgICAgIHNjYW5NYXJrZXIoY29udGVudCwgJ2ZiOi8vcHJvZmlsZS8nLCAyKTsKICAgICAgICAgICAgICAgIHNjYW5NYXJrZXIoY29udGVudCwgJ2ZiOi8vcGFnZS8nLCAyKTsKICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgZm9yIChjb25zdCByYXcgb2YgWwogICAgICAgICAgICAgICAgZG9jdW1lbnQucXVlcnlTZWxlY3RvcignbGlua1tyZWw9ImNhbm9uaWNhbCJdJyk/LmhyZWYgfHwgJycsCiAgICAgICAgICAgICAgICBkb2N1bWVudC5xdWVyeVNlbGVjdG9yKCdtZXRhW3Byb3BlcnR5PSJvZzp1cmwiXScpPy5jb250ZW50IHx8ICcnLAogICAgICAgICAgICAgICAgcmVxdWVzdGVkLAogICAgICAgICAgICAgICAgbG9jYXRpb24uaHJlZgogICAgICAgICAgICAgIF0pIHsKICAgICAgICAgICAgICAgIHRyeSB7IGFkZENhbmRpZGF0ZShuZXcgVVJMKHJhdywgbG9jYXRpb24uaHJlZikuc2VhcmNoUGFyYW1zLmdldCgnaWQnKSB8fCAnJyk7IH0gY2F0Y2ggKF8pIHt9CiAgICAgICAgICAgICAgfQoKICAgICAgICAgICAgICBsZXQgcmVxdWVzdGVkSGFuZGxlID0gJyc7CiAgICAgICAgICAgICAgdHJ5IHsKICAgICAgICAgICAgICAgIGNvbnN0IHBhcnRzID0gbmV3IFVSTChzb3VyY2VVcmwpLnBhdGhuYW1lLnNwbGl0KCcvJykuZmlsdGVyKEJvb2xlYW4pOwogICAgICAgICAgICAgICAgaWYgKHBhcnRzWzBdICYmICFbJ3Byb2ZpbGUucGhwJywnZ3JvdXBzJ10uaW5jbHVkZXMocGFydHNbMF0udG9Mb3dlckNhc2UoKSkpIHJlcXVlc3RlZEhhbmRsZSA9IHBhcnRzWzBdLnJlcGxhY2UoJ0AnLCcnKTsKICAgICAgICAgICAgICB9IGNhdGNoIChfKSB7fQogICAgICAgICAgICAgIGNvbnN0IHRhcmdldE1hcmtlcnMgPSBbJ2ZiOi8vcHJvZmlsZS8nLCAnZmI6Ly9wYWdlLycsICdwcm9maWxlX2lkJywgJ3BhZ2VJRCcsICd1c2VySUQnLCAnYWN0b3JJRCddOwogICAgICAgICAgICAgIGlmIChyZXF1ZXN0ZWRIYW5kbGUpIHsKICAgICAgICAgICAgICAgIGxldCBmcm9tID0gMDsKICAgICAgICAgICAgICAgIGZvciAobGV0IG9jY3VycmVuY2UgPSAwOyBvY2N1cnJlbmNlIDwgOCAmJiBzb3VyY2VDYW5kaWRhdGVzLmxlbmd0aCA8IDEyOyBvY2N1cnJlbmNlKyspIHsKICAgICAgICAgICAgICAgICAgY29uc3QgYXQgPSBodG1sLmluZGV4T2YocmVxdWVzdGVkSGFuZGxlLCBmcm9tKTsKICAgICAgICAgICAgICAgICAgaWYgKGF0IDwgMCkgYnJlYWs7CiAgICAgICAgICAgICAgICAgIGNvbnN0IHdpbmRvd1RleHQgPSBodG1sLnNsaWNlKE1hdGgubWF4KDAsIGF0IC0gMTIwMCksIE1hdGgubWluKGh0bWwubGVuZ3RoLCBhdCArIHJlcXVlc3RlZEhhbmRsZS5sZW5ndGggKyAxODAwKSk7CiAgICAgICAgICAgICAgICAgIGZvciAoY29uc3QgbWFya2VyIG9mIHRhcmdldE1hcmtlcnMpIHNjYW5NYXJrZXIod2luZG93VGV4dCwgbWFya2VyLCAyKTsKICAgICAgICAgICAgICAgICAgZnJvbSA9IGF0ICsgcmVxdWVzdGVkSGFuZGxlLmxlbmd0aDsKICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgaWYgKHNvdXJjZUNhbmRpZGF0ZXMubGVuZ3RoIDwgMikgewogICAgICAgICAgICAgICAgZm9yIChjb25zdCBtYXJrZXIgb2YgWydmYjovL3Byb2ZpbGUvJywgJ2ZiOi8vcGFnZS8nLCAncHJvZmlsZV9pZCcsICdwYWdlSUQnXSkgc2Nhbk1hcmtlcihodG1sLCBtYXJrZXIsIDQpOwogICAgICAgICAgICAgIH0KICAgICAgICAgICAgICBpZiAoc291cmNlQ2FuZGlkYXRlcy5sZW5ndGggPT09IDApIHsKICAgICAgICAgICAgICAgIHJldHVybiBKU09OLnN0cmluZ2lmeSh7cGVuZGluZzp0cnVlLCBkaWFnbm9zdGljczp7Y29sbGVjdG9yOidncmFwaHFsJywgc3VyZmFjZTpob3N0LCB3YWl0aW5nRm9yOidzb3VyY2VfaWQnfX0pOwogICAgICAgICAgICAgIH0KICAgICAgICAgICAgICBzb3VyY2VJZCA9IHNvdXJjZUNhbmRpZGF0ZXNbMF07Cgo="
+          ASYNC_BLOCK_B64: "ICAgICAgICAgICAgICB3aW5kb3dbS0VZXSA9IHtzdGF0dXM6J3BlbmRpbmcnLCBzdGFnZToncmVxdWVzdCd9OwogICAgICAgICAgICAgIChhc3luYyAoKSA9PiB7CiAgICAgICAgICAgICAgICBjb25zdCBwb3N0cyA9IFtdLCBzZWVuID0gbmV3IFNldCgpOwogICAgICAgICAgICAgICAgbGV0IHBhZ2VzID0gMCwgbm9kZXMgPSAwLCBjYW5kaWRhdGVzVHJpZWQgPSAwLCBxdWVyeUVycm9ycyA9IDA7CiAgICAgICAgICAgICAgICBsZXQgd2lubmluZ1NvdXJjZUlkID0gJycsIHdpbm5pbmdDYW5kaWRhdGUgPSAtMTsKICAgICAgICAgICAgICAgIGNvbnN0IG1heENhbmRpZGF0ZXMgPSBNYXRoLm1pbigxMCwgc291cmNlQ2FuZGlkYXRlcy5sZW5ndGgpOwogICAgICAgICAgICAgICAgY2FuZGlkYXRlTG9vcDoKICAgICAgICAgICAgICAgIGZvciAobGV0IGNhbmRpZGF0ZUluZGV4ID0gMDsgY2FuZGlkYXRlSW5kZXggPCBtYXhDYW5kaWRhdGVzOyBjYW5kaWRhdGVJbmRleCsrKSB7CiAgICAgICAgICAgICAgICAgIHNvdXJjZUlkID0gc291cmNlQ2FuZGlkYXRlc1tjYW5kaWRhdGVJbmRleF07CiAgICAgICAgICAgICAgICAgIGNhbmRpZGF0ZXNUcmllZCsrOwogICAgICAgICAgICAgICAgICBsZXQgY3Vyc29yID0gbnVsbDsKICAgICAgICAgICAgICAgICAgZm9yIChsZXQgcGFnZSA9IDA7IHBhZ2UgPCA0ICYmIHBvc3RzLmxlbmd0aCA8IExJTUlUOyBwYWdlKyspIHsKICAgICAgICAgICAgICAgICAgICBjb25zdCBib2R5ID0gbmV3IFVSTFNlYXJjaFBhcmFtcygpOwogICAgICAgICAgICAgICAgICAgIGJvZHkuc2V0KCdkb2NfaWQnLCBET0NfSUQpOwogICAgICAgICAgICAgICAgICAgIGJvZHkuc2V0KCdmYl9hcGlfcmVxX2ZyaWVuZGx5X25hbWUnLCBGUklFTkRMWSk7CiAgICAgICAgICAgICAgICAgICAgYm9keS5zZXQoJ3ZhcmlhYmxlcycsIEpTT04uc3RyaW5naWZ5KHZhcmlhYmxlc0ZvcihjdXJzb3IsIE1hdGgubWluKDEwLCBNYXRoLm1heCgxLCBMSU1JVCAtIHBvc3RzLmxlbmd0aCkpKSkpOwogICAgICAgICAgICAgICAgICAgIHdpbmRvd1tLRVldLnN0YWdlID0gJ3JlcXVlc3QnOwogICAgICAgICAgICAgICAgICAgIGNvbnN0IHJlc3BvbnNlID0gYXdhaXQgZmV0Y2goJy9hcGkvZ3JhcGhxbC8nLCB7CiAgICAgICAgICAgICAgICAgICAgICBtZXRob2Q6J1BPU1QnLCBjcmVkZW50aWFsczonaW5jbHVkZScsCiAgICAgICAgICAgICAgICAgICAgICBoZWFkZXJzOnsnQ29udGVudC1UeXBlJzonYXBwbGljYXRpb24veC13d3ctZm9ybS11cmxlbmNvZGVkJywnWC1GQi1GcmllbmRseS1OYW1lJzpGUklFTkRMWX0sCiAgICAgICAgICAgICAgICAgICAgICBib2R5OmJvZHkudG9TdHJpbmcoKQogICAgICAgICAgICAgICAgICAgIH0pOwogICAgICAgICAgICAgICAgICAgIGlmICghcmVzcG9uc2Uub2spIHRocm93IG5ldyBFcnJvcignR1JBUEhRTF9IVFRQXycgKyByZXNwb25zZS5zdGF0dXMpOwogICAgICAgICAgICAgICAgICAgIHdpbmRvd1tLRVldLnN0YWdlID0gJ3Jlc3BvbnNlX2JvZHknOwogICAgICAgICAgICAgICAgICAgIGNvbnN0IHBhcnNlZCA9IHBhcnNlUGF5bG9hZChhd2FpdCByZXNwb25zZS50ZXh0KCkpOwogICAgICAgICAgICAgICAgICAgIHBhZ2VzKys7IG5vZGVzICs9IHBhcnNlZC5ub2RlczsKICAgICAgICAgICAgICAgICAgICBpZiAocGFyc2VkLnF1ZXJ5RXJyb3IgJiYgcGFyc2VkLnBvc3RzLmxlbmd0aCA9PT0gMCkgewogICAgICAgICAgICAgICAgICAgICAgcXVlcnlFcnJvcnMrKzsKICAgICAgICAgICAgICAgICAgICAgIGJyZWFrOwogICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgICAgICBpZiAocGFyc2VkLnBvc3RzLmxlbmd0aCA9PT0gMCkgYnJlYWs7CiAgICAgICAgICAgICAgICAgICAgaWYgKCF3aW5uaW5nU291cmNlSWQpIHsKICAgICAgICAgICAgICAgICAgICAgIHdpbm5pbmdTb3VyY2VJZCA9IHNvdXJjZUlkOwogICAgICAgICAgICAgICAgICAgICAgd2lubmluZ0NhbmRpZGF0ZSA9IGNhbmRpZGF0ZUluZGV4OwogICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgICAgICBmb3IgKGNvbnN0IHBvc3Qgb2YgcGFyc2VkLnBvc3RzKSB7CiAgICAgICAgICAgICAgICAgICAgICBpZiAoc2Vlbi5oYXMocG9zdC5leHRlcm5hbFBvc3RJZCkpIGNvbnRpbnVlOwogICAgICAgICAgICAgICAgICAgICAgc2Vlbi5hZGQocG9zdC5leHRlcm5hbFBvc3RJZCk7IHBvc3RzLnB1c2gocG9zdCk7CiAgICAgICAgICAgICAgICAgICAgICBpZiAocG9zdHMubGVuZ3RoID49IExJTUlUKSBicmVhazsKICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICAgICAgaWYgKHBvc3RzLmxlbmd0aCA+PSBMSU1JVCkgYnJlYWsgY2FuZGlkYXRlTG9vcDsKICAgICAgICAgICAgICAgICAgICBpZiAoIXBhcnNlZC5oYXNOZXh0IHx8ICFwYXJzZWQuZW5kQ3Vyc29yKSBicmVhayBjYW5kaWRhdGVMb29wOwogICAgICAgICAgICAgICAgICAgIGN1cnNvciA9IHBhcnNlZC5lbmRDdXJzb3I7CiAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgICAgaWYgKHdpbm5pbmdTb3VyY2VJZCkgYnJlYWs7CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICBpZiAocG9zdHMubGVuZ3RoID09PSAwICYmIGNhbmRpZGF0ZXNUcmllZCA+IDAgJiYgcXVlcnlFcnJvcnMgPT09IGNhbmRpZGF0ZXNUcmllZCkgewogICAgICAgICAgICAgICAgICB0aHJvdyBuZXcgRXJyb3IoJ0dSQVBIUUxfUVVFUllfRVJST1InKTsKICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgIGNvbnN0IHN0YWJsZUV4dGVybmFsSWQgPSBoYW5kbGUgfHwgcmVxdWVzdGVkSGFuZGxlIHx8IHdpbm5pbmdTb3VyY2VJZCB8fCBzb3VyY2VJZDsKICAgICAgICAgICAgICAgIHdpbmRvd1tLRVldID0gewogICAgICAgICAgICAgICAgICBzdGF0dXM6J2RvbmUnLAogICAgICAgICAgICAgICAgICByZXN1bHQ6ewogICAgICAgICAgICAgICAgICAgIHNvdXJjZTp7cGxhdGZvcm06J2ZhY2Vib29rJywgZXh0ZXJuYWxJZDpzdGFibGVFeHRlcm5hbElkLCB1cmw6c291cmNlVXJsLCBkaXNwbGF5TmFtZTp0aXRsZSB8fCAoaGFuZGxlID8gJ0AnK2hhbmRsZSA6ICdGYWNlYm9vaycpLCBoYW5kbGUsIGF2YXRhclVybDphdmF0YXIsIHZpc2liaWxpdHlUeXBlOidhdXRoZW50aWNhdGVkJ30sCiAgICAgICAgICAgICAgICAgICAgcG9zdHM6cG9zdHMuc2xpY2UoMCwgTElNSVQpLAogICAgICAgICAgICAgICAgICAgIGRpYWdub3N0aWNzOntjb2xsZWN0b3I6J2dyYXBocWwnLCBzdXJmYWNlOmhvc3QsIHBhZ2VzLCBub2RlcywgY2FuZGlkYXRlc1RyaWVkLCB3aW5uaW5nQ2FuZGlkYXRlfQogICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICB9OwogICAgICAgICAgICAgIH0pKCkuY2F0Y2goKGVycm9yKSA9PiB7CiAgICAgICAgICAgICAgICBjb25zdCByYXcgPSBTdHJpbmcoZXJyb3I/Lm1lc3NhZ2UgfHwgJ0dSQVBIUUxfRkVUQ0hfRkFJTEVEJyk7CiAgICAgICAgICAgICAgICBjb25zdCBjb2RlID0gL15HUkFQSFFMX1tBLVowLTlfXSskLy50ZXN0KHJhdykgPyByYXcgOiAnR1JBUEhRTF9GRVRDSF9GQUlMRUQnOwogICAgICAgICAgICAgICAgd2luZG93W0tFWV0gPSB7c3RhdHVzOidlcnJvcicsIGNvZGV9OwogICAgICAgICAgICAgIH0pOwoK"
         run: |
           set -euo pipefail
           git fetch origin test/android-physical-local-recovery-20260909
           git checkout -B physical-code-fix FETCH_HEAD
           python3 - <<'PY'
+          import base64, os
           from pathlib import Path
           p=Path('android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java')
           s=p.read_text(encoding='utf-8')
-
-          old_id='''              let sourceId = '';
-              try {
-                const u = new URL(sourceUrl);
-                sourceId = (u.searchParams.get('id') || '').trim();
-              } catch (_) {}
-
-              const metaApp = document.querySelector('meta[property="al:ios:url"], meta[property="al:android:url"]')?.content || '';
-              const html = document.documentElement?.innerHTML || '';
-              const longestDigitRun = (value) => {
-                let best = '', current = '';
-                for (const ch of String(value || '')) {
-                  if (ch >= '0' && ch <= '9') {
-                    current += ch;
-                    if (current.length > best.length) best = current;
-                  } else {
-                    current = '';
-                  }
-                }
-                return best.length >= 5 ? best : '';
-              };
-              if (!sourceId) {
-                const candidates = [String(metaApp), html];
-                const markers = ['fb://profile/', 'fb://page/', 'profile_id', 'pageID'];
-                outer: for (const candidate of candidates) {
-                  for (const marker of markers) {
-                    const markerIndex = candidate.indexOf(marker);
-                    if (markerIndex < 0) continue;
-                    const digits = longestDigitRun(candidate.slice(markerIndex + marker.length, markerIndex + marker.length + 96));
-                    if (digits) { sourceId = digits; break outer; }
-                  }
-                }
-              }
-              const numericSourceId = sourceId.length >= 5 && [...sourceId].every(ch => ch >= '0' && ch <= '9');
-              if (!numericSourceId) {
-                return JSON.stringify({pending:true, diagnostics:{collector:'graphql', surface:host, waitingFor:'source_id'}});
-              }
-'''
-
-          new_id='''              let sourceId = '';
-              const sourceCandidates = [];
-              const sourceCandidateOrigins = [];
-              const numericId = (raw) => {
-                const value = String(raw || '').trim();
-                if (value.length < 5 || value.length > 32) return '';
-                return [...value].every(ch => ch >= '0' && ch <= '9') ? value : '';
-              };
-              const addCandidate = (raw, origin) => {
-                const value = numericId(raw);
-                if (!value || sourceCandidates.includes(value) || sourceCandidates.length >= 12) return;
-                sourceCandidates.push(value);
-                sourceCandidateOrigins.push(origin);
-              };
-              try {
-                const u = new URL(sourceUrl);
-                addCandidate(u.searchParams.get('id') || '', 'requested_query');
-              } catch (_) {}
-
-              const html = document.documentElement?.innerHTML || '';
-              const scanMarker = (raw, marker, origin, maxHits = 3) => {
-                const text = String(raw || '');
-                let from = 0, hits = 0;
-                while (hits < maxHits && sourceCandidates.length < 12) {
-                  const at = text.indexOf(marker, from);
-                  if (at < 0) break;
-                  let pos = at + marker.length;
-                  const end = Math.min(text.length, pos + 80);
-                  while (pos < end && !(text[pos] >= '0' && text[pos] <= '9')) pos++;
-                  let digits = '';
-                  while (pos < end && text[pos] >= '0' && text[pos] <= '9') digits += text[pos++];
-                  if (numericId(digits)) { addCandidate(digits, origin); hits++; }
-                  from = at + marker.length;
-                }
-              };
-
-              for (const meta of [...document.querySelectorAll('meta[property="al:ios:url"], meta[property="al:android:url"]')]) {
-                const content = String(meta?.content || '');
-                scanMarker(content, 'fb://profile/', 'meta_app_profile', 2);
-                scanMarker(content, 'fb://page/', 'meta_app_page', 2);
-              }
-              for (const raw of [
-                document.querySelector('link[rel="canonical"]')?.href || '',
-                document.querySelector('meta[property="og:url"]')?.content || '',
-                requested,
-                location.href
-              ]) {
-                try { addCandidate(new URL(raw, location.href).searchParams.get('id') || '', 'bound_url'); } catch (_) {}
-              }
-
-              let requestedHandle = '';
-              try {
-                const parts = new URL(sourceUrl).pathname.split('/').filter(Boolean);
-                if (parts[0] && !['profile.php','groups'].includes(parts[0].toLowerCase())) requestedHandle = parts[0].replace('@','');
-              } catch (_) {}
-              const targetMarkers = ['fb://profile/', 'fb://page/', 'profile_id', 'pageID', 'userID', 'actorID'];
-              if (requestedHandle) {
-                let from = 0;
-                for (let occurrence = 0; occurrence < 8 && sourceCandidates.length < 12; occurrence++) {
-                  const at = html.indexOf(requestedHandle, from);
-                  if (at < 0) break;
-                  const windowText = html.slice(Math.max(0, at - 1200), Math.min(html.length, at + requestedHandle.length + 1800));
-                  for (const marker of targetMarkers) scanMarker(windowText, marker, 'handle_anchor', 2);
-                  from = at + requestedHandle.length;
-                }
-              }
-              if (sourceCandidates.length < 2) {
-                for (const marker of ['fb://profile/', 'fb://page/', 'profile_id', 'pageID']) {
-                  scanMarker(html, marker, 'global_fallback', 4);
-                }
-              }
-              if (sourceCandidates.length === 0) {
-                return JSON.stringify({pending:true, diagnostics:{collector:'graphql', surface:host, waitingFor:'source_id'}});
-              }
-              sourceId = sourceCandidates[0];
-'''
-          if s.count(old_id) != 1:
-              raise SystemExit('SOURCE_ID_PATCH_ANCHOR_MISMATCH')
-          s=s.replace(old_id,new_id,1)
-
-          old_async='''              window[KEY] = {status:'pending', stage:'request'};
-              (async () => {
-                const posts = [], seen = new Set();
-                let cursor = null, pages = 0, nodes = 0;
-                for (let page = 0; page < 4 && posts.length < LIMIT; page++) {
-                  const body = new URLSearchParams();
-                  body.set('doc_id', DOC_ID);
-                  body.set('fb_api_req_friendly_name', FRIENDLY);
-                  body.set('variables', JSON.stringify(variablesFor(cursor, Math.min(10, Math.max(1, LIMIT - posts.length)))));
-                  window[KEY].stage = 'request';
-                  const response = await fetch('/api/graphql/', {
-                    method:'POST', credentials:'include',
-                    headers:{'Content-Type':'application/x-www-form-urlencoded','X-FB-Friendly-Name':FRIENDLY},
-                    body:body.toString()
-                  });
-                  if (!response.ok) throw new Error('GRAPHQL_HTTP_' + response.status);
-                  window[KEY].stage = 'response_body';
-                  const parsed = parsePayload(await response.text());
-                  pages++; nodes += parsed.nodes;
-                  if (parsed.queryError && parsed.posts.length === 0) throw new Error('GRAPHQL_QUERY_ERROR');
-                  for (const post of parsed.posts) {
-                    if (seen.has(post.externalPostId)) continue;
-                    seen.add(post.externalPostId); posts.push(post);
-                    if (posts.length >= LIMIT) break;
-                  }
-                  if (!parsed.hasNext || !parsed.endCursor) break;
-                  cursor = parsed.endCursor;
-                }
-                window[KEY] = {
-                  status:'done',
-                  result:{
-                    source:{platform:'facebook', externalId:sourceId, url:sourceUrl, displayName:title || (handle ? '@'+handle : 'Facebook'), handle, avatarUrl:avatar, visibilityType:'authenticated'},
-                    posts:posts.slice(0, LIMIT),
-                    diagnostics:{collector:'graphql', surface:host, pages, nodes}
-                  }
-                };
-              })().catch((error) => {
-                const raw = String(error?.message || 'GRAPHQL_FETCH_FAILED');
-                const code = /^GRAPHQL_[A-Z0-9_]+$/.test(raw) ? raw : 'GRAPHQL_FETCH_FAILED';
-                window[KEY] = {status:'error', code};
-              });
-'''
-
-          new_async='''              window[KEY] = {status:'pending', stage:'request'};
-              (async () => {
-                const posts = [], seen = new Set();
-                let pages = 0, nodes = 0, candidatesTried = 0, queryErrors = 0;
-                let winningSourceId = '', winningCandidate = -1;
-                const maxCandidates = Math.min(10, sourceCandidates.length);
-                candidateLoop:
-                for (let candidateIndex = 0; candidateIndex < maxCandidates; candidateIndex++) {
-                  sourceId = sourceCandidates[candidateIndex];
-                  candidatesTried++;
-                  let cursor = null;
-                  for (let page = 0; page < 4 && posts.length < LIMIT; page++) {
-                    const body = new URLSearchParams();
-                    body.set('doc_id', DOC_ID);
-                    body.set('fb_api_req_friendly_name', FRIENDLY);
-                    body.set('variables', JSON.stringify(variablesFor(cursor, Math.min(10, Math.max(1, LIMIT - posts.length)))));
-                    window[KEY].stage = 'request';
-                    const response = await fetch('/api/graphql/', {
-                      method:'POST', credentials:'include',
-                      headers:{'Content-Type':'application/x-www-form-urlencoded','X-FB-Friendly-Name':FRIENDLY},
-                      body:body.toString()
-                    });
-                    if (!response.ok) throw new Error('GRAPHQL_HTTP_' + response.status);
-                    window[KEY].stage = 'response_body';
-                    const parsed = parsePayload(await response.text());
-                    pages++; nodes += parsed.nodes;
-                    if (parsed.queryError && parsed.posts.length === 0) {
-                      queryErrors++;
-                      break;
-                    }
-                    if (parsed.posts.length === 0) break;
-                    if (!winningSourceId) {
-                      winningSourceId = sourceId;
-                      winningCandidate = candidateIndex;
-                    }
-                    for (const post of parsed.posts) {
-                      if (seen.has(post.externalPostId)) continue;
-                      seen.add(post.externalPostId); posts.push(post);
-                      if (posts.length >= LIMIT) break;
-                    }
-                    if (posts.length >= LIMIT) break candidateLoop;
-                    if (!parsed.hasNext || !parsed.endCursor) break candidateLoop;
-                    cursor = parsed.endCursor;
-                  }
-                  if (winningSourceId) break;
-                }
-                if (posts.length === 0 && candidatesTried > 0 && queryErrors === candidatesTried) {
-                  throw new Error('GRAPHQL_QUERY_ERROR');
-                }
-                const stableExternalId = handle || requestedHandle || winningSourceId || sourceId;
-                window[KEY] = {
-                  status:'done',
-                  result:{
-                    source:{platform:'facebook', externalId:stableExternalId, url:sourceUrl, displayName:title || (handle ? '@'+handle : 'Facebook'), handle, avatarUrl:avatar, visibilityType:'authenticated'},
-                    posts:posts.slice(0, LIMIT),
-                    diagnostics:{collector:'graphql', surface:host, pages, nodes, candidatesTried, winningCandidate}
-                  }
-                };
-              })().catch((error) => {
-                const raw = String(error?.message || 'GRAPHQL_FETCH_FAILED');
-                const code = /^GRAPHQL_[A-Z0-9_]+$/.test(raw) ? raw : 'GRAPHQL_FETCH_FAILED';
-                window[KEY] = {status:'error', code};
-              });
-'''
-          if s.count(old_async) != 1:
-              raise SystemExit('ASYNC_PATCH_ANCHOR_MISMATCH')
-          s=s.replace(old_async,new_async,1)
-
-          old_log='''                        int nodes = diagnostics == null ? 0 : diagnostics.optInt("nodes", 0);
-                        Log.i(TAG, "event=graphql_result posts=" + postCount +
-                            " pages=" + pages + " nodes=" + nodes);
-'''
-          new_log='''                        int nodes = diagnostics == null ? 0 : diagnostics.optInt("nodes", 0);
-                        int candidatesTried = diagnostics == null ? 0 : diagnostics.optInt("candidatesTried", 0);
-                        int winningCandidate = diagnostics == null ? -1 : diagnostics.optInt("winningCandidate", -1);
-                        Log.i(TAG, "event=graphql_result posts=" + postCount +
-                            " pages=" + pages + " nodes=" + nodes +
-                            " candidates=" + candidatesTried + " winner=" + winningCandidate);
-'''
-          if s.count(old_log) != 1:
-              raise SystemExit('LOG_PATCH_ANCHOR_MISMATCH')
-          s=s.replace(old_log,new_log,1)
-          p.write_text(s,encoding='utf-8')
+          id_start="              let sourceId = '';\n"
+          id_end="              const cleanTitle = "
+          a=s.index(id_start); b=s.index(id_end,a)
+          s=s[:a]+base64.b64decode(os.environ['ID_BLOCK_B64']).decode()+s[b:]
+          async_start="              window[KEY] = {status:'pending', stage:'request'};\n"
+          async_end="              return JSON.stringify({pending:true, diagnostics:{collector:'graphql', waitingFor:'request', started:true}});"
+          a=s.index(async_start); b=s.index(async_end,a)
+          s=s[:a]+base64.b64decode(os.environ['ASYNC_BLOCK_B64']).decode()+s[b:]
+          old='''                        int nodes = diagnostics == null ? 0 : diagnostics.optInt("nodes", 0);\n                        Log.i(TAG, "event=graphql_result posts=" + postCount +\n                            " pages=" + pages + " nodes=" + nodes);\n'''
+          new='''                        int nodes = diagnostics == null ? 0 : diagnostics.optInt("nodes", 0);\n                        int candidatesTried = diagnostics == null ? 0 : diagnostics.optInt("candidatesTried", 0);\n                        int winningCandidate = diagnostics == null ? -1 : diagnostics.optInt("winningCandidate", -1);\n                        Log.i(TAG, "event=graphql_result posts=" + postCount +\n                            " pages=" + pages + " nodes=" + nodes +\n                            " candidates=" + candidatesTried + " winner=" + winningCandidate);\n'''
+          if s.count(old)!=1: raise SystemExit('LOG_PATCH_ANCHOR_MISMATCH')
+          p.write_text(s.replace(old,new,1),encoding='utf-8')
           PY
           git diff --check
-          grep -q 'sourceCandidates' android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java
-          grep -q 'candidatesTried' android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java
           export JAVA_HOME=/home/tarik/actions-runnerr/_work/_tool/Java_Temurin-Hotspot_jdk/21.0.12-101.0.LTS/x64
           export PATH="$JAVA_HOME/bin:/home/tarik/actions-runnerr/_work/_tool/node/22.23.2/x64/bin:$PATH"
           python3 scripts/verify-facebook-script.py
