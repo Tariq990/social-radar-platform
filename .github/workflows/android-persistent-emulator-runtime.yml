@@ -1,6 +1,9 @@
 name: Android Persistent Emulator Runtime
 
 on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-persistent-emulator-runtime.yml]
   workflow_dispatch:
     inputs:
       headless:
