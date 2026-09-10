@@ -1,0 +1,48 @@
+name: Android v158 Test Compatibility Fix
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-v158-test-compat-fix.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: test/android-headless-emulator-20260909
+          fetch-depth: 0
+          clean: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Update stale bounded-collection assertion and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('server/tests/architectureRegression.test.ts')
+          s = p.read_text()
+          old = "  assert.match(collector, /posts\\.slice\\(0, LIMIT\\)/);"
+          new = "  assert.match(collector, /(?:posts|accumulatedPosts)\\.slice\\(0, LIMIT\\)/);"
+          if s.count(old) != 1:
+              raise SystemExit('expected stale assertion not found exactly once')
+          p.write_text(s.replace(old, new, 1))
+          print('V158_TEST_COMPAT_PATCH_APPLIED=1')
+          PY
+          git diff --check
+          if [ ! -x node_modules/.bin/tsx ]; then npm install --no-audit --no-fund; fi
+          npm test
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add server/tests/architectureRegression.test.ts
+          git diff --cached --check
+          git commit -m 'test: allow virtualized feed accumulator output'
+          git push origin HEAD:test/android-headless-emulator-20260909
+          echo V158_TEST_COMPAT_GATE=PASS
