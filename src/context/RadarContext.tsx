@@ -84,6 +84,22 @@ const RadarContext = createContext<RadarContextType | undefined>(undefined);
 
 const STORAGE_KEYS = { LOCALE: 'mrscrap_locale_v2', THEME: 'mrscrap_theme_v2', DEMO_MODE: 'mrscrap_demo_mode_v2' };
 
+function readStoredLocale(): Locale {
+  try {
+    return localStorage.getItem(STORAGE_KEYS.LOCALE) === 'ar' ? 'ar' : 'en';
+  } catch {
+    return 'en';
+  }
+}
+
+function readStoredTheme(): 'dark' | 'light' {
+  try {
+    return localStorage.getItem(STORAGE_KEYS.THEME) === 'light' ? 'light' : 'dark';
+  } catch {
+    return 'dark';
+  }
+}
+
 const EMPTY_USER: UserProfile = {
   id: '', email: '', displayName: '', avatarUrl: '', plan: 'free', watchedSourcesCount: 0, activeRulesCount: 0, deviceSessionConnected: false,
   preferences: { language: 'en', theme: 'dark', pushEnabled: false, digestMode: 'instant' }
@@ -130,14 +146,14 @@ function sourceNeedsVisibleMetadata(source: Source): boolean {
 }
 
 export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [locale, setLocaleState] = useState<Locale>(() => (localStorage.getItem(STORAGE_KEYS.LOCALE) as Locale) || 'en');
-  const [theme, setThemeState] = useState<'dark' | 'light'>(() => (localStorage.getItem(STORAGE_KEYS.THEME) as 'dark' | 'light') || 'dark');
+  const [locale, setLocaleState] = useState<Locale>(readStoredLocale);
+  const [theme, setThemeState] = useState<'dark' | 'light'>(readStoredTheme);
   const [isDemoMode, setIsDemoMode] = useState(false);
   const [user, setUser] = useState<UserProfile>(EMPTY_USER);
   const [sources, setSources] = useState<Source[]>([]);
   const [rules, setRules] = useState<WatchRule[]>([]);
   const [matches, setMatches] = useState<AlertMatch[]>([]);
-  const [collections] = useState<Collection[]>(INITIAL_COLLECTIONS);
+  const [collections, setCollections] = useState<Collection[]>([]);
   const [digest, setDigest] = useState<RadarDigest>(EMPTY_DIGEST);
   const [isScanning, setIsScanning] = useState(false);
   const [backendStatus, setBackendStatus] = useState<'online' | 'offline' | 'checking'>('checking');
@@ -219,6 +235,7 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       ]);
       const serverDemo = config.appMode === 'demo';
       setIsDemoMode(serverDemo);
+      setCollections(serverDemo ? INITIAL_COLLECTIONS : []);
       if (serverDemo) localStorage.setItem(STORAGE_KEYS.DEMO_MODE, 'true'); else localStorage.removeItem(STORAGE_KEYS.DEMO_MODE);
       setBackendStatus(health.status === 'ok' ? 'online' : 'offline');
       setIsPostgres(Boolean(config.isPostgres));
@@ -274,6 +291,7 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         return loadDatabaseState(attempt + 1);
       }
       setBackendStatus('offline');
+      setCollections([]);
       setSources([]); setRules([]); setMatches([]);
     }
   };
@@ -342,13 +360,18 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       platform: sourceData.platform, externalId: sourceData.externalId, url: sourceData.url, name: sourceData.displayName,
       handle: sourceData.handle, avatarUrl: sourceData.avatarUrl, bio: sourceData.bio, visibilityType: sourceData.visibilityType, connectorType: sourceData.connectorType
     });
-    rememberSourceIdentity({ ...persistedSource, ...sourceData });
+    rememberSourceIdentity({
+      ...persistedSource,
+      displayName: sourceData.displayName || persistedSource.displayName,
+      avatarUrl: sourceData.avatarUrl || persistedSource.avatarUrl,
+      handle: sourceData.handle || persistedSource.handle
+    });
     persistedSource = mergeCachedSourceIdentity(persistedSource);
     try {
       const persistedRule = await apiCreateRule({
         name: ruleName || `${persistedSource.displayName} Watch`, naturalLanguage: ruleNL, minConfidence: 0.82, alertMode: 'instant', collectionId: sourceData.collectionId
       }, [persistedSource.id]);
-      const withRuleCount = { ...persistedSource, activeRulesCount: 1, connectorStatus: sourceData.connectorStatus };
+      const withRuleCount = { ...persistedSource, activeRulesCount: 1 };
       setSources(previous => [withRuleCount, ...previous.filter(source => source.id !== persistedSource.id)]);
       setRules(previous => [persistedRule, ...previous.filter(rule => rule.id !== persistedRule.id)]);
       setUser(previous => ({ ...previous, watchedSourcesCount: previous.watchedSourcesCount + 1, activeRulesCount: previous.activeRulesCount + 1 }));
@@ -424,8 +447,11 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const enabledOrphans = affectedRules.filter(rule => rule.enabled && rule.sourceIds.length === 1).length;
     setSources(previous => previous.filter(source => source.id !== sourceId));
     try {
-      if (DeviceSessionConnector.isNativeAvailable()) await DeviceSessionConnector.cancelBackgroundSource(sourceId);
       await apiDeleteSource(sourceId);
+      if (DeviceSessionConnector.isNativeAvailable()) {
+        try { await DeviceSessionConnector.cancelBackgroundSource(sourceId); }
+        catch (error) { console.warn('Source deleted but local background cleanup did not complete', error); }
+      }
       setRules(previous => previous.flatMap(rule => {
         if (!rule.sourceIds.includes(sourceId)) return [rule];
         if (orphanRuleIds.has(rule.id)) return [];
@@ -454,14 +480,17 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const toggleRule = async (ruleId: string) => {
     const existing = rules.find(rule => rule.id === ruleId);
     if (!existing) return;
-    const next = !existing.enabled;
-    setRules(current => current.map(rule => rule.id === ruleId ? { ...rule, enabled: next } : rule));
+    const optimisticEnabled = !existing.enabled;
+    setRules(current => current.map(rule => rule.id === ruleId ? { ...rule, enabled: optimisticEnabled } : rule));
     try {
-      await apiToggleRule(ruleId);
-      const delta = next ? 1 : -1;
-      setSources(previous => previous.map(source => (existing.sourceIds.length === 0 || existing.sourceIds.includes(source.id))
-        ? { ...source, activeRulesCount: Math.max(0, source.activeRulesCount + delta) } : source));
-      setUser(previous => ({ ...previous, activeRulesCount: Math.max(0, previous.activeRulesCount + delta) }));
+      const serverEnabled = await apiToggleRule(ruleId);
+      setRules(current => current.map(rule => rule.id === ruleId ? { ...rule, enabled: serverEnabled } : rule));
+      const delta = Number(serverEnabled) - Number(existing.enabled);
+      if (delta !== 0) {
+        setSources(previous => previous.map(source => (existing.sourceIds.length === 0 || existing.sourceIds.includes(source.id))
+          ? { ...source, activeRulesCount: Math.max(0, source.activeRulesCount + delta) } : source));
+        setUser(previous => ({ ...previous, activeRulesCount: Math.max(0, previous.activeRulesCount + delta) }));
+      }
     } catch (error) {
       setRules(current => current.map(rule => rule.id === ruleId ? { ...rule, enabled: existing.enabled } : rule));
       throw error;
@@ -548,7 +577,13 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return { scanned, matched };
   };
 
-  const resetToDemo = () => { if (isDemoMode) { setSources(INITIAL_SOURCES); setRules(INITIAL_RULES); setMatches(INITIAL_MATCHES); } };
+  const resetToDemo = () => {
+    if (!isDemoMode) return;
+    setSources(INITIAL_SOURCES);
+    setRules(INITIAL_RULES);
+    setMatches(INITIAL_MATCHES);
+    setCollections(INITIAL_COLLECTIONS);
+  };
   const connectFacebookSession = async () => {
     if (!DeviceSessionConnector.isNativeAvailable()) throw new Error('Authenticated Facebook monitoring requires the Android app.');
     const connected = await DeviceSessionConnector.connectFacebook();
