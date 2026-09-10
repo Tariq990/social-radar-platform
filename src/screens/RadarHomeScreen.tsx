@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
-import { Sparkles, RotateCw, Plus, CheckCircle2, ArrowRight, ArrowLeft, Bell } from 'lucide-react';
+import { Sparkles, RotateCw, Plus, CheckCircle2, ArrowRight, ArrowLeft, Bell, Images } from 'lucide-react';
 import { useRadar } from '../context/RadarContext';
 import { AlertCard } from '../components/AlertCard';
 import { SmartGrabPanel } from '../components/SmartGrabPanel';
+import { ExtractedPostsModal } from '../components/ExtractedPostsModal';
 import { translations } from '../lib/i18n';
 
 export const RadarHomeScreen: React.FC = () => {
@@ -21,6 +22,7 @@ export const RadarHomeScreen: React.FC = () => {
   } = useRadar();
   const t = translations[locale];
   const [scanNotice, setScanNotice] = useState<string | null>(null);
+  const [showExtractedPosts, setShowExtractedPosts] = useState(false);
 
   const priorityMatches = matches.slice(0, 5);
   const greeting = new Date().getHours() >= 17 ? t.greetingEvening : t.greetingDay;
@@ -62,13 +64,15 @@ export const RadarHomeScreen: React.FC = () => {
           <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-100 tracking-tight flex items-center gap-2.5"><span>{greeting}</span><span className="inline-block w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse" /></h1>
           <p className="text-sm text-slate-400 mt-1"><strong className="text-cyan-400 font-bold">{matches.length}</strong> {t.radarSummarySubtitle}</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <button id="btn-scan-radar-home" onClick={() => void handleScan()} disabled={isScanning} className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-800 text-xs font-semibold flex items-center gap-1.5 disabled:opacity-50"><RotateCw className={`w-3.5 h-3.5 text-cyan-400 ${isScanning ? 'animate-spin' : ''}`} /><span>{isScanning ? t.loading : t.seedActivity}</span></button>
+          <button id="btn-extracted-posts-home" onClick={() => setShowExtractedPosts(true)} className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-800 text-xs font-semibold flex items-center gap-1.5"><Images className="w-3.5 h-3.5 text-cyan-400" /><span>{locale === 'ar' ? 'المنشورات المستخرجة' : 'Extracted posts'}</span></button>
           <button id="btn-add-source-home" onClick={() => openAddSource()} className="px-4 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-xs font-bold flex items-center gap-1.5 shadow-md shadow-cyan-500/20"><Plus className="w-4 h-4 stroke-[2.5]" /><span>{t.watchAction}</span></button>
         </div>
       </div>
 
       {scanNotice && <div role="status" className="px-4 py-3 rounded-2xl bg-slate-900/80 border border-slate-800 text-sm text-slate-300">{scanNotice}</div>}
+      {showExtractedPosts && <ExtractedPostsModal onClose={() => setShowExtractedPosts(false)} />}
       <SmartGrabPanel />
 
       <div className="grid grid-cols-3 gap-3">

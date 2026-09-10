@@ -32,6 +32,7 @@ export interface GrabDetailOptions {
   commentsMode?: CommentGrabMode;
   commentLimit?: number;
   includeReplies?: boolean;
+  includeMedia?: boolean;
 }
 
 interface NativeCollectedComment {
@@ -142,7 +143,17 @@ function mergeMedia(base: NormalizedPost['media'], detail: { type: 'image' | 'vi
   return output;
 }
 
-function toNormalizedPost(source: { id: string; platform: SourcePlatform; url: string; externalId: string }, post: NativeCollectedPost): NormalizedPost {
+function normalizedIdentity(value?: string): string {
+  return (value || '').trim().replace(/^@/, '').toLowerCase();
+}
+
+function isGenericIdentityName(value: string | undefined, externalId: string): boolean {
+  const name = normalizedIdentity(value);
+  const id = normalizedIdentity(externalId);
+  return !name || name === id || ['facebook', 'instagram', 'page', 'profile'].includes(name);
+}
+
+function toNormalizedPost(source: { id: string; platform: SourcePlatform; url: string; externalId: string; displayName?: string; avatarUrl?: string }, post: NativeCollectedPost): NormalizedPost {
   const detectedAt = new Date().toISOString();
   return {
     id: post.externalPostId || `${source.id}:${post.originalUrl}`,
@@ -150,8 +161,10 @@ function toNormalizedPost(source: { id: string; platform: SourcePlatform; url: s
     platform: source.platform,
     externalPostId: post.externalPostId,
     originalUrl: post.originalUrl,
-    authorName: post.authorName || source.externalId,
-    authorAvatar: post.authorAvatar,
+    authorName: !isGenericIdentityName(post.authorName, source.externalId)
+      ? post.authorName!.trim()
+      : (!isGenericIdentityName(source.displayName, source.externalId) ? source.displayName!.trim() : source.externalId),
+    authorAvatar: post.authorAvatar || source.avatarUrl,
     text: post.text || '',
     media: Array.isArray(post.media) ? post.media : [],
     publishedAt: post.publishedAt || '',
@@ -288,7 +301,7 @@ export class DeviceSessionConnector implements SourceConnector {
   }
 
   async fetchLatest(
-    source: { id: string; url: string; platform: SourcePlatform; externalId: string; displayName?: string },
+    source: { id: string; url: string; platform: SourcePlatform; externalId: string; displayName?: string; avatarUrl?: string },
     limit: number = 10,
     detailOptions: GrabDetailOptions = {}
   ): Promise<NormalizedPost[]> {
@@ -297,17 +310,32 @@ export class DeviceSessionConnector implements SourceConnector {
     if (!DeviceSessionConnector.isPlatformConnected(status, source.platform)) {
       throw new Error(`${source.platform === 'instagram' ? 'Instagram' : 'Facebook'} session expired or is not connected.`);
     }
+    let normalizedSource = source;
+    const needsIdentity = isGenericIdentityName(source.displayName, source.externalId) || !source.avatarUrl?.trim();
+    if (needsIdentity) {
+      try {
+        const resolved = await this.resolveSource({ url: source.url });
+        normalizedSource = {
+          ...source,
+          externalId: resolved.externalId || source.externalId,
+          displayName: resolved.displayName || source.displayName,
+          avatarUrl: resolved.avatarUrl || source.avatarUrl
+        };
+      } catch { /* collection remains usable even if metadata enrichment is unavailable */ }
+    }
+
     const result = await NativeSession.collectSource({
       sourceId: source.id,
       url: source.url,
       platform: source.platform,
       limit: clampPostLimit(limit)
     });
-    const posts = (result.posts || []).map(post => toNormalizedPost(source, post));
+    const posts = (result.posts || []).map(post => toNormalizedPost(normalizedSource, post));
     const commentsMode: CommentGrabMode = ['publisher', 'top', 'all'].includes(detailOptions.commentsMode || '')
       ? detailOptions.commentsMode as CommentGrabMode
       : 'none';
-    if (commentsMode === 'none' || posts.length === 0) return posts;
+    const includeMedia = detailOptions.includeMedia === true;
+    if ((!includeMedia && commentsMode === 'none') || posts.length === 0) return posts;
 
     const commentLimit = clampCommentLimit(detailOptions.commentLimit, commentsMode);
     const includeReplies = detailOptions.includeReplies !== false;
@@ -325,7 +353,7 @@ export class DeviceSessionConnector implements SourceConnector {
           url: post.originalUrl,
           sourceUrl: source.url,
           platform: source.platform,
-          publisherName: post.authorName || source.displayName || source.externalId,
+          publisherName: post.authorName || normalizedSource.displayName || normalizedSource.externalId,
           commentsMode,
           commentLimit,
           includeReplies

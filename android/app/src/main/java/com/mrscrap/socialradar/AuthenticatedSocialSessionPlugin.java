@@ -222,7 +222,7 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
             return;
         }
 
-        AuthenticatedSourceMetadataResolver.resolve(getContext(), url, new AuthenticatedWebCollector.Callback() {
+        AuthenticatedSourceMetadataResolver.resolve(foregroundContext(), url, new AuthenticatedWebCollector.Callback() {
             @Override
             public void onSuccess(JSONObject result) {
                 try {
