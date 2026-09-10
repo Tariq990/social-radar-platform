@@ -154,7 +154,8 @@ test('Android updater is same-origin and verifies package identity before instal
   const verifier = read('android/app/src/main/java/com/mrscrap/socialradar/ApkIdentityVerifier.java');
   assert.match(webUpdater, /url\.origin !== backendOrigin\.origin/);
   assert.match(nativeUpdater, /sameHttpsOrigin/);
-  assert.match(nativeUpdater, /redirected away from the MR SCRAP backend origin/);
+  assert.match(nativeUpdater, /URL finalUrl = connection\.getURL\(\)/);
+  assert.match(nativeUpdater, /!isTrustedUpdateUrl\(finalUrl\) \|\| !sameHttpsOrigin\(requestedUrl, finalUrl\)/);
   assert.match(nativeUpdater, /ApkIdentityVerifier\.verify/);
   assert.match(verifier, /getPackageArchiveInfo/);
   assert.match(verifier, /getPackageName\(\)/);
@@ -296,7 +297,8 @@ test('Facebook photo Smart Grab opens detail from its source and supports listit
   const plugin = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSocialSessionPlugin.java');
   const collector = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedPostDetailCollector.java');
   const extractor = read('android/app/src/main/res/raw/mrscrap_post_detail_extractor.js');
-  assert.match(connector, /sourceUrl: source\.url/);
+  assert.match(connector, /const sourceUrl = normalizeSocialUrl\(source\.url, source\.platform\)/);
+  assert.match(connector, /collectPostDetails\(\{[\s\S]*sourceUrl,[\s\S]*platform: source\.platform/);
   assert.match(plugin, /String sourceUrl = call\.getString\("sourceUrl"/);
   assert.match(collector, /isFacebookPhotoUrl/);
   assert.match(collector, /photoClickScript/);
