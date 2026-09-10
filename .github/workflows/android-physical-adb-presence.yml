@@ -1,0 +1,44 @@
+name: Android Physical ADB Presence
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-physical-adb-presence.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 3
+    steps:
+      - name: Count physical Android targets without logging identifiers
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"
+          test -s "$adb"
+          out="$RUNNER_TEMP/mrscrap-adb-presence.txt"
+          "$adb" devices 2>/dev/null | tr -d '\r' > "$out"
+          authorized="$(awk '$1 !~ /^emulator-/ && $2=="device" {n++} END{print n+0}' "$out")"
+          unauthorized="$(awk '$1 !~ /^emulator-/ && $2=="unauthorized" {n++} END{print n+0}' "$out")"
+          offline="$(awk '$1 !~ /^emulator-/ && $2=="offline" {n++} END{print n+0}' "$out")"
+          other="$(awk 'NF>=2 && $1 !~ /^List$/ && $1 !~ /^emulator-/ && $2!="device" && $2!="unauthorized" && $2!="offline" {n++} END{print n+0}' "$out")"
+          emulator="$(awk '$1 ~ /^emulator-/ && $2=="device" {n++} END{print n+0}' "$out")"
+          echo "PHYSICAL_ADB_AUTHORIZED=$authorized"
+          echo "PHYSICAL_ADB_UNAUTHORIZED=$unauthorized"
+          echo "PHYSICAL_ADB_OFFLINE=$offline"
+          echo "PHYSICAL_ADB_OTHER=$other"
+          echo "EMULATOR_ADB_AUTHORIZED=$emulator"
+          if [ "$authorized" -gt 0 ]; then
+            echo PHYSICAL_ADB_READY=1
+          else
+            echo PHYSICAL_ADB_READY=0
+          fi
