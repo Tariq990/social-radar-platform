@@ -316,3 +316,11 @@ test('Smart Grab surfaces sanitized native collection diagnostics instead of dis
   assert.match(panel, /describeCollectionFailure\(firstFailure\.error, firstFailure\.source, locale\)/);
   assert.doesNotMatch(panel, /if \(batches\.length === 0\) \{\s*throw new Error\(locale === 'ar' \? 'لم يتمكن الجهاز من استخراج منشورات حقيقية من المصادر المختارة الآن\.'/s);
 });
+
+
+test('native collector accumulates virtualized feed posts across extraction polls', () => {
+  const collector = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedWebCollector.java');
+  assert.match(collector, /__mrscrapCollectedFeedPostsV1/);
+  assert.match(collector, /const accumulatedPosts = accumulator\.slice/);
+  assert.match(collector, /posts: accumulatedPosts\.slice\(0, LIMIT\)/);
+});
