@@ -324,3 +324,18 @@ test('native collector accumulates virtualized feed posts across extraction poll
   assert.match(collector, /const accumulatedPosts = accumulator\.slice/);
   assert.match(collector, /posts: accumulatedPosts\.slice\(0, LIMIT\)/);
 });
+
+
+test('safe source identity cache heals legacy placeholder metadata across Android restarts', () => {
+  const cache = read('src/lib/sourceIdentityCache.ts');
+  const radar = read('src/context/RadarContext.tsx');
+  const modal = read('src/components/ExtractedPostsModal.tsx');
+  assert.match(cache, /mrscrap_source_identity_cache_v1/);
+  assert.match(cache, /rememberSourceIdentity/);
+  assert.match(cache, /mergeCachedSourceIdentity/);
+  assert.doesNotMatch(cache, /token\s*\?:\s*string/);
+  assert.doesNotMatch(cache, /cookie\s*\?:\s*string/i);
+  assert.match(radar, /dbSources\.map\(mergeCachedSourceIdentity\)/);
+  assert.match(radar, /rememberSourceIdentity\(healedIdentity\)/);
+  assert.match(modal, /fresh\.map\(mergeCachedSourceIdentity\)/);
+});

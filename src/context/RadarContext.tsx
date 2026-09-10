@@ -4,6 +4,7 @@ import { INITIAL_SOURCES, INITIAL_RULES, INITIAL_MATCHES, INITIAL_COLLECTIONS } 
 import { DeviceSessionConnector, NativeSessionStatus } from '../connectors/deviceSessionConnector';
 import { Locale } from '../lib/i18n';
 import { extractSupportedSocialUrl } from '../lib/socialUrl';
+import { isGenericSourceIdentityName, mergeCachedSourceIdentity, rememberSourceIdentity } from '../lib/sourceIdentityCache';
 import {
   apiCheckHealth,
   apiGetConfig,
@@ -110,19 +111,18 @@ interface IngestSourceMetadata {
 function withHealedSourceMetadata(source: Source, ingest: unknown): Source {
   const metadata = (ingest as { sourceMetadata?: IngestSourceMetadata } | null)?.sourceMetadata;
   if (!metadata) return source;
-  return {
+  const healed = {
     ...source,
     displayName: metadata.displayName?.trim() || source.displayName,
     avatarUrl: metadata.avatarUrl?.trim() || source.avatarUrl,
     handle: metadata.handle?.trim() || source.handle
   };
+  rememberSourceIdentity(healed);
+  return healed;
 }
 
 function isGenericVisibleSourceName(value: string | undefined, source: Pick<Source, 'externalId' | 'handle'>): boolean {
-  const normalize = (input?: string) => (input || '').trim().replace(/^@/, '').toLowerCase();
-  const name = normalize(value);
-  const generic = new Set(['facebook', 'instagram', 'page', 'profile', normalize(source.externalId), normalize(source.handle)].filter(Boolean));
-  return !name || generic.has(name);
+  return isGenericSourceIdentityName(value, source);
 }
 
 function sourceNeedsVisibleMetadata(source: Source): boolean {
@@ -169,6 +169,14 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const realName = !isGenericVisibleSourceName(resolved.displayName, source) ? resolved.displayName.trim() : '';
         const avatarUrl = resolved.avatarUrl?.trim() || '';
         if (!realName && !avatarUrl) continue;
+        const healedIdentity: Source = {
+          ...source,
+          displayName: realName || source.displayName,
+          avatarUrl: avatarUrl || source.avatarUrl,
+          handle: resolved.handle?.trim() || source.handle,
+          connectorStatus: 'authenticated_monitoring'
+        };
+        rememberSourceIdentity(healedIdentity);
         setSources(previous => previous.map(item => item.id === source.id ? {
           ...item,
           displayName: realName || item.displayName,
@@ -239,7 +247,8 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         set.add(alert.postId);
         uniqueMatchedPosts.set(alert.sourceId, set);
       }
-      const hydratedSources = dbSources.map(source => ({
+      const cachedSources = dbSources.map(mergeCachedSourceIdentity);
+      const hydratedSources = cachedSources.map(source => ({
         ...source,
         activeRulesCount: dbRules.filter(rule => rule.enabled && (rule.sourceIds.length === 0 || rule.sourceIds.includes(source.id))).length,
         recentPostsCount: Math.max(Number(source.recentPostsCount || 0), uniqueMatchedPosts.get(source.id)?.size || 0)
@@ -329,10 +338,12 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     ruleNL: string,
     ruleName?: string
   ) => {
-    const persistedSource = await apiCreateSource({
+    let persistedSource = await apiCreateSource({
       platform: sourceData.platform, externalId: sourceData.externalId, url: sourceData.url, name: sourceData.displayName,
       handle: sourceData.handle, avatarUrl: sourceData.avatarUrl, bio: sourceData.bio, visibilityType: sourceData.visibilityType, connectorType: sourceData.connectorType
     });
+    rememberSourceIdentity({ ...persistedSource, ...sourceData });
+    persistedSource = mergeCachedSourceIdentity(persistedSource);
     try {
       const persistedRule = await apiCreateRule({
         name: ruleName || `${persistedSource.displayName} Watch`, naturalLanguage: ruleNL, minConfidence: 0.82, alertMode: 'instant', collectionId: sourceData.collectionId

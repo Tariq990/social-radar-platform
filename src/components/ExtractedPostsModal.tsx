@@ -5,6 +5,7 @@ import { useRadar } from '../context/RadarContext';
 import { NormalizedPost, Source } from '../types';
 import { SourceAvatar } from './SourceAvatar';
 import { apiFetchSources } from '../services/api';
+import { mergeCachedSourceIdentity } from '../lib/sourceIdentityCache';
 
 interface ExtractedPostsModalProps { onClose: () => void; }
 
@@ -20,9 +21,9 @@ export const ExtractedPostsModal: React.FC<ExtractedPostsModalProps> = ({ onClos
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sourceFilter, setSourceFilter] = useState<string>('all');
-  const [runtimeSources, setRuntimeSources] = useState<Source[]>(sources);
+  const [runtimeSources, setRuntimeSources] = useState<Source[]>(() => sources.map(mergeCachedSourceIdentity));
 
-  useEffect(() => { if (sources.length > 0) setRuntimeSources(sources); }, [sources]);
+  useEffect(() => { if (sources.length > 0) setRuntimeSources(sources.map(mergeCachedSourceIdentity)); }, [sources]);
   const sourceMap = useMemo(() => new Map(runtimeSources.map(source => [source.id, source])), [runtimeSources]);
 
   const load = useCallback(async () => {
@@ -33,16 +34,16 @@ export const ExtractedPostsModal: React.FC<ExtractedPostsModalProps> = ({ onClos
       let availableSources = sources;
       try {
         const fresh = await apiFetchSources();
-        if (Array.isArray(fresh) && fresh.length > 0) availableSources = fresh;
+        if (Array.isArray(fresh) && fresh.length > 0) availableSources = fresh.map(mergeCachedSourceIdentity);
       } catch { /* use hydrated context as a fallback */ }
       if (availableSources.length === 0) {
         await new Promise(resolve => window.setTimeout(resolve, 800));
         try {
           const retry = await apiFetchSources();
-          if (Array.isArray(retry) && retry.length > 0) availableSources = retry;
+          if (Array.isArray(retry) && retry.length > 0) availableSources = retry.map(mergeCachedSourceIdentity);
         } catch { /* final fallback remains the context snapshot */ }
       }
-      setRuntimeSources(availableSources);
+      setRuntimeSources(availableSources.map(mergeCachedSourceIdentity));
       const eligible = availableSources.filter(source => source.connectorType === 'device_session' && !source.isPaused && DeviceSessionConnector.isPlatformConnected(status, source.platform));
       if (eligible.length === 0) throw new Error(locale === 'ar' ? 'اربط Facebook أو Instagram للمصادر المطلوبة أولًا.' : 'Connect Facebook or Instagram for the monitored sources first.');
       const collected: NormalizedPost[] = [];
