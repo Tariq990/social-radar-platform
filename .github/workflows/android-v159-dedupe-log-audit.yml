@@ -1,0 +1,36 @@
+name: Android v159 Dedupe Log Audit
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-v159-dedupe-log-audit.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 3
+    steps:
+      - name: Audit privacy-safe collector batch counts
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"; test -x "$adb"
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1;exit}')"; test -n "$serial"
+          raw="$RUNNER_TEMP/mrscrap-collector-counts.txt"
+          "$adb" -s "$serial" logcat -d -v brief MRSCRAP_COLLECTOR:I '*:S' 2>/dev/null | tr -d '\r' > "$raw" || true
+          loads="$(grep -c 'event=load_start' "$raw" || true)"
+          tens="$(grep -c 'event=eval_result .*posts=10 ' "$raw" || true)"
+          positive="$(grep -Ec 'event=eval_result .*posts=[1-9][0-9]* ' "$raw" || true)"
+          echo "COLLECTOR_LOAD_START_COUNT=$loads"
+          echo "COLLECTOR_POSTS10_RESULT_COUNT=$tens"
+          echo "COLLECTOR_POSITIVE_RESULT_COUNT=$positive"
+          if [ "$loads" -lt 2 ] || [ "$tens" -lt 2 ]; then exit 253; fi
+          echo V159_RECENT_COLLECTOR_BATCH_COUNT_AUDIT=PASS
