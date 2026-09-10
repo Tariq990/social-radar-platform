@@ -2,7 +2,9 @@
 
 ## Scope
 
-This document describes the security/trust boundaries of the current `work/real-session-ai-provider` implementation. It is not a claim that the application is production-ready.
+This document describes the security/trust boundaries of the current repository architecture. It is not a claim that the application is production-ready.
+
+Current validation/evidence is maintained on `test/android-headless-emulator-20260909` (Draft PR #7, validation-only, **DO NOT MERGE AS-IS**). The older `work/real-session-ai-provider` lane remains a protected/owner-blocked provider/Production branch and is not the active validation lane.
 
 ## 1. Facebook authentication boundary
 
@@ -182,9 +184,36 @@ The ingestion sanitizer rejects secret-looking metadata keys such as:
 - `xs`
 - token/access_token
 
-This sanitizer is defense-in-depth; the Android collector contract should not include these values in the first place.
+Android collector metadata is also sanitized before network egress. This is defense-in-depth; the collector contract should not include social authentication material in the first place.
 
-## 11. Remaining P0/P1 risks
+## 11. Build / CI supply-chain boundary
+
+The validation lane uses:
+
+- committed `package-lock.json`;
+- `npm ci` rather than a floating install graph;
+- reviewed immutable GitHub Action commit SHAs in permanent validation gates;
+- read-only default workflow permissions for validation;
+- regression checks covering action SHA allowlists, lockfile usage, no `pull_request_target`, and the manual-only physical gate.
+
+The executable validation path for PR #7 is `.github/workflows/code-complete-gate.yml` on the isolated self-hosted Linux validation runner. The generic hosted `verify-real-session.yml` job is intentionally skipped automatically on the validation lane and protected provider lane because hosted jobs on this repository were failing before runner assignment; manual dispatch remains available.
+
+Current locked dependency audit recorded in PR #7 is 0 critical, 0 high, 5 moderate residual advisories. A non-forced lockfile-only remediation made no supported change. Do not introduce unsupported overrides/downgrades or major framework/server migrations solely to hide moderate-only audit output on the validated lane.
+
+## 12. Physical acceptance state preservation
+
+The physical acceptance candidate must preserve evidence already present on the device:
+
+- do not uninstall MR SCRAP merely to update the candidate;
+- do not clear app data, WebView data or Facebook cookies as an update step;
+- verify installed/candidate signing certificates match before replacement;
+- use `adb install -r` only after compatibility is proven;
+- stop fail-closed on incompatible signatures instead of destroying the session;
+- run the automated Android Physical ADB Final Gate only after an external device-state change produces one authorized real device.
+
+The automated gate is a prerequisite/collector proof, not a substitute for the full matrix in `docs/ANDROID_ACCEPTANCE_TEST.md`.
+
+## 13. Remaining P0/P1 risks
 
 ### P0 — physical Android Facebook acceptance test
 
@@ -200,6 +229,8 @@ Must verify on real hardware:
 - Facebook disconnect clears the local Facebook session;
 - no raw Facebook cookie/password values appear in logs/network/backend payloads.
 
+Current blocker classification: `OWNER_BLOCKED: NO_PHONE_USB_ENUMERATION`.
+
 ### P1 — account recovery
 
 Email verification and password-reset/recovery are not yet implemented.
@@ -210,32 +241,37 @@ FCM/Web Push interfaces exist but external delivery is not complete. Do not mark
 
 ### P1 — release signing / Play Store
 
-Current alpha APK is a debug build. Production signing keys, release keystore handling, Play Integrity/store requirements, privacy declarations and package hardening remain separate release work.
+Current validation/alpha APKs are debug builds. Production signing keys, release keystore handling, Play Integrity/store requirements, privacy declarations and package hardening remain separate release work.
 
 ### P1 — production scaling controls
 
 The current in-process IP rate limiter is suitable for a single alpha backend instance, not a distributed fleet. Move to a shared store/gateway limiter before horizontal scale and scope limiter buckets per route/action.
 
-## 12. Operational rules
+## 14. Operational rules
 
-Never commit:
+Never commit or expose production-sensitive material such as:
 
 - `.env` files;
 - AI API keys;
 - PostgreSQL credentials;
-- Android signing keys;
-- sensitive deployment credentials;
+- **production** Android signing keys/passwords;
+- service-account/deployment credentials;
 - Facebook cookies/session exports.
+
+PR #7 contains an alpha/debug-only test keystore solely to preserve sideload signing continuity during validation. It must not be promoted to `main` or reused for production/Play signing.
 
 Never add a fallback that turns a failed connector/AI request into a fake successful production result.
 
-## 13. Security review gate
+## 15. Security review / promotion gate
 
-Do not merge the architecture PR as production-ready until the physical P0 acceptance gate is closed and a final audit confirms:
+Do not promote any candidate as production-ready until:
 
 1. authenticated tenant-scoped API access remains enforced;
-2. physical-device application/Facebook session behavior works as documented;
-3. no secret leakage in Android/background storage;
+2. the physical P0 application/Facebook session matrix passes on real hardware;
+3. no secret leakage is observed in Android/background/network/backend boundaries;
 4. release environment uses HTTPS;
 5. database migrations and dedupe are stable under concurrent ingestion;
-6. final candidate CI is green.
+6. the clean promotion candidate CI is green;
+7. the promotion diff excludes obsolete diagnostic/probe/apply workflows and the alpha/debug-only test keystore.
+
+PR #7 must remain evidence-only. After physical PASS, create a clean promotion branch from the then-current `main` and rerun the complete code/security checks there.

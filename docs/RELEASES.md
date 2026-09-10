@@ -2,40 +2,63 @@
 
 ## Release levels
 
-MR SCRAP intentionally separates CI artifacts, Android alpha builds and future production releases.
+MR SCRAP intentionally separates **validation artifacts**, controlled Android alpha distribution and future production releases.
 
-## 1. Pull-request CI artifact
+Current validation/evidence is on `test/android-headless-emulator-20260909` (Draft PR #7, **DO NOT MERGE AS-IS**). The protected `work/real-session-ai-provider` lane remains separate and owner-blocked unless its Production/provider scope is explicitly reopened.
 
-Workflow:
+## 1. Validation CI artifact
 
-`.github/workflows/verify-real-session.yml`
+Primary executable validation workflow for the current evidence lane:
 
-For the architecture PR, CI verifies:
+`.github/workflows/code-complete-gate.yml`
 
-1. dependency installation;
+It verifies:
+
+1. locked dependency installation with `npm ci`;
 2. TypeScript typecheck;
-3. unit tests;
+3. unit/integration/regression tests;
 4. web/server build;
 5. Capacitor Android sync;
-6. Android debug APK compilation.
-
-The resulting debug APK is uploaded as a GitHub Actions artifact.
+6. Android debug APK compilation;
+7. APK artifact upload.
 
 Properties:
 
 - temporary/short-lived;
-- useful for branch testing;
+- useful for branch validation;
 - debug signed;
-- backend origin comes from the CI build environment;
+- compile/build verification only unless a real HTTPS backend origin is explicitly built into a physical acceptance candidate;
 - not a production distribution channel.
 
-A CI APK built with `https://example.invalid` is compile verification only and cannot perform a real end-to-end backend acceptance test.
+A validation APK built with `https://example.invalid` cannot perform a real end-to-end backend acceptance test.
 
-## 2. Android Alpha prerelease
+The generic `.github/workflows/verify-real-session.yml` workflow remains available for manual/general verification. Its automatic PR job is intentionally skipped on the current validation lane and protected provider lane because hosted runs on this repository were failing before runner assignment and duplicated the self-hosted Code Complete workload.
+
+## 2. Physical acceptance candidate
+
+The physical acceptance path is separate from ordinary compile artifacts.
+
+Use the manual **Android Physical ADB Final Gate** only after a real external device-state change produces exactly one authorized physical Android target.
+
+The gate must:
+
+- preserve the currently installed app/session state;
+- refuse to proceed if the expected Facebook session marker is absent;
+- verify candidate and installed APK signing certificates are compatible;
+- use `adb install -r` for replacement only after compatibility is proven;
+- never uninstall or clear app/WebView/Facebook data merely to update the candidate;
+- fail closed rather than destroy the evidence state;
+- prove the real collector boundary without logging source/session secrets.
+
+A successful automated physical gate is a prerequisite/collector proof. It does **not** replace the complete manual acceptance matrix in `docs/ANDROID_ACCEPTANCE_TEST.md`.
+
+## 3. Android Alpha prerelease
 
 Workflow:
 
 `.github/workflows/android-alpha-release.yml`
+
+This is a separate controlled distribution path and is **outside the current PR #7 validation authority**.
 
 Mutable prerelease tag:
 
@@ -49,7 +72,7 @@ Release title:
 MR SCRAP Android Alpha
 ```
 
-Expected assets:
+Expected assets when that lane is explicitly used:
 
 ```text
 MR-SCRAP-android-alpha.apk
@@ -57,39 +80,29 @@ MR-SCRAP-android-alpha.apk.sha256
 COMMIT_SHA.txt
 ```
 
-This release is intended for controlled physical-device acceptance testing.
+The alpha channel is intended for controlled testing and is not Play Store production signing.
 
 ### Automatic branch publishing
 
-Configure the repository Actions variable:
+The existing alpha workflow can use repository variable:
 
 ```text
 ALPHA_API_BASE_URL=https://your-real-backend.example
 ```
 
-Pushes to:
+for its configured alpha branch path. Do not trigger, reconfigure or treat that path as authorized from the PR #7 validation lane.
 
-```text
-work/real-session-ai-provider
-```
-
-can then build an alpha APK using that backend origin and update the mutable `android-alpha` prerelease.
-
-If `ALPHA_API_BASE_URL` is not configured, the automatic push release job is deliberately skipped so GitHub does not publish a knowingly broken APK.
+If no real HTTPS backend origin is configured, the alpha workflow must skip/fail closed rather than publish a knowingly unusable acceptance build.
 
 ### Manual alpha publishing
 
-Run the **Publish Android Alpha** workflow manually and provide:
+When explicitly authorized, the **Publish Android Alpha** workflow accepts a real HTTPS backend base URL.
 
-```text
-backend_base_url=https://your-real-backend.example
-```
+Production/provider/secrets scope remains separate from validation work.
 
-The URL must use HTTPS.
+## 4. Checksum verification
 
-## 3. Checksum verification
-
-The alpha workflow creates a SHA-256 file.
+Alpha/release artifacts should include a SHA-256 digest.
 
 Linux/macOS:
 
@@ -103,24 +116,35 @@ PowerShell example:
 Get-FileHash .\MR-SCRAP-android-alpha.apk -Algorithm SHA256
 ```
 
-Compare the output with the digest in `MR-SCRAP-android-alpha.apk.sha256`.
+`COMMIT_SHA.txt` should record the source commit used for the APK.
 
-`COMMIT_SHA.txt` records the source commit used for the APK.
+## 5. Alpha/debug is not production
 
-## 4. Alpha is not production
+Current validation/alpha APKs are **debug builds**.
 
-The current alpha APK is a **debug build**.
-
-It must not be presented as:
+They must not be presented as:
 
 - Play Store production signed;
 - security-reviewed final release;
-- production-ready multi-user app;
-- evidence that the physical Facebook session acceptance test passed.
+- production-ready multi-user distribution;
+- evidence that the complete physical Facebook/Instagram acceptance matrix passed.
 
-The alpha channel exists to test that flow.
+## 6. Clean promotion after physical PASS
 
-## 5. Future stable release process
+PR #7 is intentionally an evidence lane with substantial historical diagnostics/probes and an alpha/debug-only test keystore. **Do not merge PR #7 as-is**, even after physical acceptance succeeds.
+
+After the P0 physical matrix passes:
+
+1. preserve PR #7 as evidence;
+2. create a clean promotion branch from the then-current `main`;
+3. promote only intended product/server/Android/docs/tests plus minimal permanent CI;
+4. exclude obsolete diagnostic/probe/apply workflows/scripts;
+5. exclude the alpha/debug-only test keystore from the production/main promotion path;
+6. rerun the complete Code Complete Gate on the clean tree;
+7. perform focused security/data-flow review;
+8. only then consider merge and release progression.
+
+## 7. Future stable release process
 
 Stable releases should use immutable semantic-version tags, for example:
 
@@ -131,45 +155,61 @@ v1.0.1
 
 A future production release workflow should require all of the following before creating the tag/release:
 
-- architecture PR merged after P0 launch gates;
+- clean promotion candidate merged only after P0 launch gates;
 - full user authentication and tenant isolation;
 - physical Android acceptance protocol passed;
-- real FCM/push behavior either implemented or claims removed;
+- real FCM/push behavior either implemented or external-push claims kept out of product copy;
 - production Android keystore/signing configured through secure CI secrets;
 - release build (`assembleRelease`/AAB), not debug APK;
-- versionCode/versionName bump;
+- versionCode/versionName policy enforced;
 - Play Store/privacy declarations completed;
-- tests/CI green;
-- backend migration compatibility reviewed;
+- tests/CI green on the exact release source;
+- backend migration/API compatibility reviewed;
 - release notes and rollback target recorded.
 
-## 6. Signing keys
+## 8. Signing keys
 
-Do not commit production signing material to the repository.
+Never commit or expose **production** signing material.
 
 Future release signing secrets should be stored in an appropriate CI secret manager/GitHub Actions secrets and materialized only during the release job.
 
-Never commit:
+Never commit production:
 
 - `.jks` / keystore files;
 - signing passwords;
 - service-account private keys;
-- production environment `.env` files.
+- environment `.env` files.
 
-## 7. Backend compatibility
+The PR #7 validation branch currently contains an alpha/debug-only test keystore used solely to preserve sideload signature continuity across non-destructive `adb install -r` acceptance updates. It is **not** a production key and must be excluded from clean promotion/main and never reused for Play signing.
 
-Android builds compile `VITE_API_BASE_URL` into the frontend bundle. Before distributing an APK:
+## 9. Backend compatibility
 
-1. confirm that backend URL is final for the testing/release environment;
+Android builds compile `VITE_API_BASE_URL` into the frontend bundle. Before distributing an APK for real acceptance/release:
+
+1. confirm that backend URL is final for the intended environment;
 2. confirm HTTPS certificate is valid;
 3. confirm backend API contract matches the APK commit;
 4. confirm CORS allows the Capacitor origin;
 5. confirm PostgreSQL migrations are applied;
-6. confirm AI provider is configured centrally.
+6. confirm centrally managed AI configuration is healthy when that acceptance row requires it.
 
-## 8. Rollback
+Do not expose provider credentials in Android/frontend bundles.
 
-For alpha testing, keep the prior known-good APK/commit available until the next build passes acceptance testing.
+## 10. Dependency / CI provenance
+
+The validation lane uses a committed `package-lock.json`, `npm ci` and reviewed immutable GitHub Action commit SHAs in permanent gates.
+
+Current audit state recorded in PR #7:
+
+- 0 critical vulnerabilities;
+- 0 high vulnerabilities;
+- 5 moderate residual advisories.
+
+A guarded non-forced lockfile-only audit remediation made no supported change. Do not use unsupported overrides/downgrades or a framework/server-major migration merely to make audit output cosmetically green on the validated lane. Reassess residuals on the clean promotion/dependency-upgrade path.
+
+## 11. Rollback
+
+For controlled alpha testing, keep the prior known-good APK/commit available until the next candidate passes acceptance testing.
 
 For future stable releases:
 
@@ -178,6 +218,6 @@ For future stable releases:
 - verify DB backward compatibility before deploying an older backend;
 - record both Android and backend commit SHA in release evidence.
 
-## 9. Current release gate
+## 12. Current release gate
 
-Do not promote `android-alpha` to a stable release until P0 blockers in `PRODUCTION_STATUS.md` are closed.
+Do not promote any alpha/debug artifact to a stable release until P0 blockers in `PRODUCTION_STATUS.md` are closed, a clean promotion candidate has passed full CI/security review, and production signing/distribution is explicitly authorized.

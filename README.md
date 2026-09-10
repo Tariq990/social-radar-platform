@@ -6,11 +6,17 @@ MR SCRAP monitors selected Facebook/Instagram sources and alerts the user only w
 
 ## Current status
 
-This repository is in **alpha / production-architecture implementation**. The active integration branch is:
+This repository is in **alpha / production-architecture implementation**.
 
-`work/real-session-ai-provider`
+Current validation/evidence lane:
 
-Draft PR #1 remains intentionally unmerged until the physical Android acceptance flow and final launch gates are closed.
+`test/android-headless-emulator-20260909` — Draft PR #7, validation-only, **DO NOT MERGE AS-IS**.
+
+Protected provider/production lane:
+
+`work/real-session-ai-provider` — Draft PR #1, `OWNER_BLOCKED` unless its Production/provider scope is explicitly reopened.
+
+The software/CI validation tree is GREEN. The remaining P0 gate is the complete physical Android Facebook-session acceptance protocol on a real device. After that passes, create a clean promotion branch from the then-current `main`; do not merge PR #7 directly.
 
 ### What is real now
 
@@ -31,7 +37,8 @@ Draft PR #1 remains intentionally unmerged until the physical Android acceptance
 - Deterministic, race-safe source-scoped post/match deduplication.
 - Provider-neutral AI architecture controlled by the application operator.
 - Production mode does not silently fall back to fake posts/matches/local JSON persistence.
-- CI typechecks, runs unit/integration tests, bundles web/server, syncs Capacitor and compiles an Android APK.
+- Reproducible CI validation through committed `package-lock.json` + `npm ci`.
+- Code Complete Gate typechecks, runs tests, bundles web/server, syncs Capacitor, compiles Android and uploads a debug APK artifact.
 
 ### Not production-ready yet
 
@@ -141,8 +148,10 @@ See [`.env.example`](./.env.example).
 
 ## Local development
 
+Install the exact locked dependency graph:
+
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
@@ -159,6 +168,8 @@ Or:
 ```bash
 npm run verify
 ```
+
+If dependency manifests are intentionally changed, update and review `package-lock.json` in the same change rather than relying on an uncommitted local graph.
 
 Development/demo mode may use:
 
@@ -189,35 +200,30 @@ The Android build must have a real HTTPS `VITE_API_BASE_URL` for end-to-end test
 
 Physical-device test checklist: [`docs/ANDROID_ACCEPTANCE_TEST.md`](./docs/ANDROID_ACCEPTANCE_TEST.md).
 
+The physical acceptance update path is intentionally non-destructive: when a compatible app is already installed, verify signing compatibility and use `adb install -r`; do not uninstall or clear app/WebView/session data merely to update the candidate.
+
 ---
 
 ## APKs and releases
 
-### CI artifact
+### Validation artifact
 
-Every PR verification run compiles a debug APK and uploads it as a short-lived GitHub Actions artifact when the workflow is green.
+`.github/workflows/code-complete-gate.yml` builds a short-lived debug APK artifact on the isolated validation branch after locked dependency install, tests and build checks pass.
+
+The generic hosted `.github/workflows/verify-real-session.yml` remains available for manual/general verification, but its automatic PR job is intentionally skipped on the validation lane and protected provider lane to avoid duplicate/failing hosted-runner noise.
+
+A CI APK compiled with `https://example.invalid` proves build integrity only; it is not physical/backend acceptance evidence.
 
 ### Android Alpha Release
 
-`.github/workflows/android-alpha-release.yml` can publish/update a mutable prerelease named:
+`.github/workflows/android-alpha-release.yml` is a separate controlled alpha-distribution path. It is outside the current PR #7 validation authority and is not a Play Store production-signing workflow.
 
-`MR SCRAP Android Alpha`
+Mutable prerelease name/tag when that lane is explicitly used:
 
-Tag:
-
-`android-alpha`
-
-The release contains:
-
-- `MR-SCRAP-android-alpha.apk`
-- `MR-SCRAP-android-alpha.apk.sha256`
-- `COMMIT_SHA.txt`
-
-For automatic branch publishing, configure:
-
-`ALPHA_API_BASE_URL=https://your-real-backend.example`
-
-The alpha release is intentionally a **debug build**, not a Play Store production release.
+```text
+MR SCRAP Android Alpha
+android-alpha
+```
 
 Release process: [`docs/RELEASES.md`](./docs/RELEASES.md).
 
@@ -238,7 +244,7 @@ A future foreground-service mode could reduce latency but would require a persis
 - Private CRUD is tenant-scoped and cross-tenant negative tests are part of CI.
 - Android backend device credentials are bound to the authenticated MR SCRAP user.
 - Facebook credentials are entered only into Facebook's real WebView page.
-- Raw Facebook cookies do not leave the Android device.
+- Raw Facebook cookies do not leave the Android device by contract; physical network/log validation remains part of P0 acceptance.
 - Backend device tokens are hashed server-side.
 - Android stores its backend device token using AndroidKeyStore-backed AES-GCM encryption.
 - App-data backup is disabled for the Android package.
