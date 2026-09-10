@@ -46,6 +46,7 @@ function safeHttpUrl(value: unknown, maxLength: number = 4096): string | undefin
   try {
     const parsed = new URL(value.trim());
     if (!['http:', 'https:'].includes(parsed.protocol)) return undefined;
+    if (parsed.protocol === 'http:') parsed.protocol = 'https:';
     return parsed.toString().slice(0, maxLength);
   } catch {
     return undefined;
@@ -55,10 +56,13 @@ function safeHttpUrl(value: unknown, maxLength: number = 4096): string | undefin
 function sanitizeMedia(value: unknown): { type: 'image' | 'video'; url: string }[] {
   if (!Array.isArray(value)) return [];
   const result: { type: 'image' | 'video'; url: string }[] = [];
+  const seen = new Set<string>();
   for (const item of value.slice(0, 10)) {
     if (!item || (item.type !== 'image' && item.type !== 'video')) continue;
     const url = safeHttpUrl(item.url);
-    if (url) result.push({ type: item.type, url });
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    result.push({ type: item.type, url });
   }
   return result;
 }
@@ -85,7 +89,7 @@ function sanitizeExploreComments(value: unknown): { authorName: string; text: st
 function sanitizeMetadata(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   const input = value as Record<string, unknown>;
-  const blocked = ['cookie', 'cookies', 'password', 'passwd', 'session', 'sessionid', 'xs', 'c_user', 'token', 'access_token'];
+  const blocked = ['cookie', 'cookies', 'password', 'passwd', 'session', 'sessionid', 'xs', 'c_user', 'token', 'access_token', 'authorization'];
   const result: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(input)) {
     if (blocked.some(blockedKey => key.toLowerCase().includes(blockedKey))) continue;
@@ -144,7 +148,7 @@ export async function exploreDeviceSnapshots(
     totalInput += batch.posts.length;
     if (totalInput > 100) throw new Error('Explore accepts at most 100 posts per request');
 
-    sourceInfo.set(source.id, { name: source.name, avatar: source.avatar_url });
+    sourceInfo.set(source.id, { name: source.name, avatar: safeHttpUrl(source.avatar_url) });
     for (const raw of batch.posts.slice(0, 20)) {
       const originalUrl = typeof raw.originalUrl === 'string' ? raw.originalUrl.trim() : '';
       if (!originalUrl || !allowedPostUrl(originalUrl, source.platform)) {
@@ -170,7 +174,7 @@ export async function exploreDeviceSnapshots(
         videoPresent: raw.videoPresent === true
       };
       const authorName = typeof raw.authorName === 'string' && raw.authorName.trim() ? raw.authorName.trim().slice(0, 255) : source.name;
-      const authorAvatar = safeHttpUrl(raw.authorAvatar) || source.avatar_url;
+      const authorAvatar = safeHttpUrl(raw.authorAvatar) || safeHttpUrl(source.avatar_url);
       const media = sanitizeMedia(raw.media);
       const publishedAt = sanitizePublishedAt(raw.publishedAt);
       const candidateId = `post_${source.platform}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -203,8 +207,6 @@ export async function exploreDeviceSnapshots(
     }
   }
 
-  // A dynamic feed can expose the same link in more than one DOM container. Classify each real
-  // persisted post only once even if the raw collection contained a duplicate representation.
   const uniquePosts = [...new Map(analysisPosts.map(post => [post.id, post])).values()];
   if (uniquePosts.length === 0) return { accepted, duplicates, rejected, postsAnalyzed: 0, items: [] };
 
