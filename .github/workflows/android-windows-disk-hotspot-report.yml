@@ -1,0 +1,55 @@
+name: Android Windows Disk Hotspot Report
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-windows-disk-hotspot-report.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 15
+    steps:
+      - name: Report technical disk hotspots only
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          u="/mnt/c/Users/${win_user}"
+          sdk="$u/AppData/Local/MRSCRAP/AndroidSdk"
+          avd="$u/.android/avd/test_avd.avd"
+          echo '=== C DRIVE ==='
+          df -h /mnt/c
+          echo '=== AVD FILES (protected; report only) ==='
+          find "$avd" -maxdepth 2 -type f -printf '%s\t%p\n' 2>/dev/null | sort -nr | head -n 25 | awk '{printf "%.2f GiB\t%s\n", $1/1073741824, $2}' || true
+          echo '=== ANDROID SDK TOP LEVEL ==='
+          for p in "$sdk"/*; do [ -e "$p" ] && du -sh "$p" 2>/dev/null || true; done | sort -hr
+          echo '=== KNOWN WINDOWS TECHNICAL LOCATIONS ==='
+          for p in \
+            "$u/AppData/Local/Temp" \
+            "$u/AppData/Local/Packages" \
+            "$u/AppData/Local/wsl" \
+            "$u/AppData/Local/Docker" \
+            "$u/AppData/Local/Google/Chrome/User Data" \
+            "$u/AppData/Local/BraveSoftware/Brave-Browser/User Data" \
+            "$u/AppData/Local/Microsoft/Edge/User Data" \
+            "$u/AppData/Local/npm-cache" \
+            "$u/AppData/Roaming/npm-cache" \
+            "$u/.android" \
+            "$u/.gradle" \
+            "$u/.cache"; do
+            if [ -e "$p" ]; then du -sh "$p" 2>/dev/null || true; fi
+          done | sort -hr
+          echo '=== WSL / VHDX FILES ==='
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -Command "Get-ChildItem -LiteralPath '$([ -n "$win_user" ] && wslpath -w "$u/AppData/Local" || true)' -Filter *.vhdx -File -Recurse -ErrorAction SilentlyContinue | Sort-Object Length -Descending | Select-Object -First 12 @{N='GiB';E={[math]::Round(\$_.Length/1GB,2)}},FullName | Format-Table -AutoSize" 2>/dev/null | tr -d '\r' || true
+          echo '=== ROOT SYSTEM FILE SIZES ==='
+          for p in /mnt/c/hiberfil.sys /mnt/c/pagefile.sys /mnt/c/swapfile.sys; do [ -e "$p" ] && ls -lh "$p" 2>/dev/null || true; done
+          echo WINDOWS_DISK_HOTSPOT_REPORT=PASS
