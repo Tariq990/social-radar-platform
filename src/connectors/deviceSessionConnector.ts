@@ -98,6 +98,31 @@ function isAndroidNative(): boolean {
   return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
 }
 
+function safeHttpsUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  try {
+    const parsed = new URL(value.trim());
+    if (!['http:', 'https:'].includes(parsed.protocol)) return undefined;
+    if (parsed.protocol === 'http:') parsed.protocol = 'https:';
+    return parsed.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeSocialUrl(value: unknown, platform: SourcePlatform): string | undefined {
+  const normalized = safeHttpsUrl(value);
+  if (!normalized || (platform !== 'facebook' && platform !== 'instagram')) return undefined;
+  try {
+    const host = new URL(normalized).hostname.toLowerCase();
+    const facebook = host === 'facebook.com' || host.endsWith('.facebook.com') || host === 'fb.com' || host.endsWith('.fb.com') || host === 'fb.watch';
+    const instagram = host === 'instagram.com' || host.endsWith('.instagram.com') || host === 'instagr.am' || host.endsWith('.instagr.am');
+    return (platform === 'facebook' ? facebook : instagram) ? normalized : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function clampPostLimit(limit: number): number {
   return Math.max(1, Math.min(20, Number.isFinite(limit) ? Math.floor(limit) : 10));
 }
@@ -114,16 +139,20 @@ function normalizeComment(raw: NativeCollectedComment): SocialComment | null {
   const text = typeof raw?.text === 'string' ? raw.text.trim().slice(0, 5000) : '';
   if (!authorName || !text) return null;
   const media = Array.isArray(raw.media)
-    ? raw.media.filter(item => item && (item.type === 'image' || item.type === 'video') && typeof item.url === 'string' && /^https?:\/\//i.test(item.url)).slice(0, 4)
+    ? raw.media.flatMap(item => {
+        if (!item || (item.type !== 'image' && item.type !== 'video')) return [];
+        const url = safeHttpsUrl(item.url);
+        return url ? [{ type: item.type, url }] : [];
+      }).slice(0, 4)
     : [];
   return {
     externalCommentId: typeof raw.externalCommentId === 'string' ? raw.externalCommentId.slice(0, 512) : undefined,
     authorName,
-    authorUrl: typeof raw.authorUrl === 'string' && /^https?:\/\//i.test(raw.authorUrl) ? raw.authorUrl : undefined,
-    authorAvatar: typeof raw.authorAvatar === 'string' && /^https?:\/\//i.test(raw.authorAvatar) ? raw.authorAvatar : undefined,
+    authorUrl: safeHttpsUrl(raw.authorUrl),
+    authorAvatar: safeHttpsUrl(raw.authorAvatar),
     text,
     publishedLabel: typeof raw.publishedLabel === 'string' ? raw.publishedLabel.slice(0, 200) : undefined,
-    originalUrl: typeof raw.originalUrl === 'string' && /^https?:\/\//i.test(raw.originalUrl) ? raw.originalUrl : undefined,
+    originalUrl: safeHttpsUrl(raw.originalUrl),
     isPublisher: raw.isPublisher === true,
     depth: Math.max(0, Math.min(4, Number(raw.depth) || 0)),
     media
@@ -134,10 +163,11 @@ function mergeMedia(base: NormalizedPost['media'], detail: { type: 'image' | 'vi
   const seen = new Set<string>();
   const output: NormalizedPost['media'] = [];
   for (const item of [...(base || []), ...(Array.isArray(detail) ? detail : [])]) {
-    if (!item || (item.type !== 'image' && item.type !== 'video') || typeof item.url !== 'string' || !/^https?:\/\//i.test(item.url)) continue;
-    if (seen.has(item.url)) continue;
-    seen.add(item.url);
-    output.push({ type: item.type, url: item.url });
+    if (!item || (item.type !== 'image' && item.type !== 'video')) continue;
+    const url = safeHttpsUrl(item.url);
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    output.push({ type: item.type, url });
     if (output.length >= 20) break;
   }
   return output;
@@ -153,23 +183,25 @@ function isGenericIdentityName(value: string | undefined, externalId: string): b
   return !name || name === id || ['facebook', 'instagram', 'page', 'profile'].includes(name);
 }
 
-function toNormalizedPost(source: { id: string; platform: SourcePlatform; url: string; externalId: string; displayName?: string; avatarUrl?: string }, post: NativeCollectedPost): NormalizedPost {
+function toNormalizedPost(source: { id: string; platform: SourcePlatform; url: string; externalId: string; displayName?: string; avatarUrl?: string }, post: NativeCollectedPost): NormalizedPost | null {
+  const originalUrl = normalizeSocialUrl(post.originalUrl, source.platform);
+  if (!originalUrl) return null;
   const detectedAt = new Date().toISOString();
   return {
-    id: post.externalPostId || `${source.id}:${post.originalUrl}`,
+    id: typeof post.externalPostId === 'string' && post.externalPostId.trim() ? post.externalPostId.slice(0, 512) : `${source.id}:${originalUrl}`,
     sourceId: source.id,
     platform: source.platform,
-    externalPostId: post.externalPostId,
-    originalUrl: post.originalUrl,
+    externalPostId: typeof post.externalPostId === 'string' ? post.externalPostId.trim().slice(0, 512) || undefined : undefined,
+    originalUrl,
     authorName: !isGenericIdentityName(post.authorName, source.externalId)
-      ? post.authorName!.trim()
-      : (!isGenericIdentityName(source.displayName, source.externalId) ? source.displayName!.trim() : source.externalId),
-    authorAvatar: post.authorAvatar || source.avatarUrl,
-    text: post.text || '',
-    media: Array.isArray(post.media) ? post.media : [],
-    publishedAt: post.publishedAt || '',
+      ? post.authorName!.trim().slice(0, 255)
+      : (!isGenericIdentityName(source.displayName, source.externalId) ? source.displayName!.trim().slice(0, 255) : source.externalId),
+    authorAvatar: safeHttpsUrl(post.authorAvatar) || safeHttpsUrl(source.avatarUrl),
+    text: typeof post.text === 'string' ? post.text.slice(0, 100_000) : '',
+    media: mergeMedia([], Array.isArray(post.media) ? post.media : []),
+    publishedAt: typeof post.publishedAt === 'string' ? post.publishedAt.slice(0, 255) : '',
     detectedAt,
-    fingerprint: post.externalPostId || post.originalUrl,
+    fingerprint: (typeof post.externalPostId === 'string' && post.externalPostId.trim()) || originalUrl,
     metadata: { ...(post.metadata || {}), ingestion: 'android_device_session' }
   };
 }
@@ -242,9 +274,11 @@ export class DeviceSessionConnector implements SourceConnector {
     locale: 'ar' | 'en' = 'en'
   ): Promise<void> {
     if (!isAndroidNative()) throw new Error('Background authenticated monitoring requires the Android app.');
+    const sourceUrl = normalizeSocialUrl(source.url, source.platform);
+    if (!sourceUrl) throw new Error('Invalid Facebook/Instagram source URL.');
     const auth = await ensureApiDeviceAuth();
     await NativeSession.saveBackendAuth({ userId: auth.userId, deviceId: auth.deviceId, token: auth.token, platform: auth.platform });
-    await NativeSession.scheduleSource({ sourceId: source.id, url: source.url, platform: source.platform, backendBaseUrl, locale });
+    await NativeSession.scheduleSource({ sourceId: source.id, url: sourceUrl, platform: source.platform, backendBaseUrl, locale });
   }
 
   static async cancelBackgroundSource(sourceId: string): Promise<void> {
@@ -262,6 +296,7 @@ export class DeviceSessionConnector implements SourceConnector {
       if (!['http:', 'https:'].includes(parsed.protocol) || (!isFacebook && !isInstagram)) {
         return { valid: false, platform: 'other', cleanedUrl: raw, handleOrId: '', isPostUrl: false, error: 'Only Facebook and Instagram URLs are supported.' };
       }
+      if (parsed.protocol === 'http:') parsed.protocol = 'https:';
       parsed.hash = '';
       const segments = parsed.pathname.split('/').filter(Boolean);
       return {
@@ -285,14 +320,17 @@ export class DeviceSessionConnector implements SourceConnector {
       throw new Error(`${validation.platform === 'instagram' ? 'Instagram' : 'Facebook'} session is not connected.`);
     }
     const resolved = await NativeSession.resolveSource({ url: validation.cleanedUrl });
+    if (resolved.platform !== validation.platform) throw new Error('Resolved source platform does not match the requested URL.');
+    const resolvedUrl = normalizeSocialUrl(resolved.url || validation.cleanedUrl, resolved.platform);
+    if (!resolvedUrl) throw new Error('Resolved source returned an invalid social URL.');
     return {
       platform: resolved.platform,
-      externalId: resolved.externalId,
-      url: resolved.url,
-      displayName: resolved.displayName,
-      handle: resolved.handle || '',
-      avatarUrl: resolved.avatarUrl || '',
-      bio: resolved.bio || '',
+      externalId: typeof resolved.externalId === 'string' ? resolved.externalId.trim().slice(0, 255) : '',
+      url: resolvedUrl,
+      displayName: typeof resolved.displayName === 'string' ? resolved.displayName.trim().slice(0, 255) : '',
+      handle: typeof resolved.handle === 'string' ? resolved.handle.trim().replace(/^@/, '').slice(0, 255) : '',
+      avatarUrl: safeHttpsUrl(resolved.avatarUrl) || '',
+      bio: typeof resolved.bio === 'string' ? resolved.bio.slice(0, 5000) : '',
       visibilityType: resolved.visibilityType || 'authenticated',
       connectorType: 'device_session',
       connectorStatus: 'authenticated_monitoring',
@@ -306,31 +344,35 @@ export class DeviceSessionConnector implements SourceConnector {
     detailOptions: GrabDetailOptions = {}
   ): Promise<NormalizedPost[]> {
     if (!isAndroidNative()) throw new Error('Authenticated source collection requires the Android app.');
+    const sourceUrl = normalizeSocialUrl(source.url, source.platform);
+    if (!sourceUrl) throw new Error('Invalid Facebook/Instagram source URL.');
     const status = await DeviceSessionConnector.getLocalSession();
     if (!DeviceSessionConnector.isPlatformConnected(status, source.platform)) {
       throw new Error(`${source.platform === 'instagram' ? 'Instagram' : 'Facebook'} session expired or is not connected.`);
     }
-    let normalizedSource = source;
+    let normalizedSource = { ...source, url: sourceUrl, avatarUrl: safeHttpsUrl(source.avatarUrl) };
     const needsIdentity = isGenericIdentityName(source.displayName, source.externalId) || !source.avatarUrl?.trim();
     if (needsIdentity) {
       try {
-        const resolved = await this.resolveSource({ url: source.url });
+        const resolved = await this.resolveSource({ url: sourceUrl });
         normalizedSource = {
-          ...source,
+          ...normalizedSource,
           externalId: resolved.externalId || source.externalId,
           displayName: resolved.displayName || source.displayName,
-          avatarUrl: resolved.avatarUrl || source.avatarUrl
+          avatarUrl: resolved.avatarUrl || normalizedSource.avatarUrl
         };
       } catch { /* collection remains usable even if metadata enrichment is unavailable */ }
     }
 
     const result = await NativeSession.collectSource({
       sourceId: source.id,
-      url: source.url,
+      url: sourceUrl,
       platform: source.platform,
       limit: clampPostLimit(limit)
     });
-    const posts = (result.posts || []).map(post => toNormalizedPost(normalizedSource, post));
+    const posts = (result.posts || [])
+      .map(post => toNormalizedPost(normalizedSource, post))
+      .filter((post): post is NormalizedPost => Boolean(post));
     const commentsMode: CommentGrabMode = ['publisher', 'top', 'all'].includes(detailOptions.commentsMode || '')
       ? detailOptions.commentsMode as CommentGrabMode
       : 'none';
@@ -351,7 +393,7 @@ export class DeviceSessionConnector implements SourceConnector {
       try {
         const detail = await NativeSession.collectPostDetails({
           url: post.originalUrl,
-          sourceUrl: source.url,
+          sourceUrl,
           platform: source.platform,
           publisherName: post.authorName || normalizedSource.displayName || normalizedSource.externalId,
           commentsMode,
