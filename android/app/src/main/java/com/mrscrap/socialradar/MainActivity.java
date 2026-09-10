@@ -19,6 +19,8 @@ import java.util.List;
 
 public class MainActivity extends BridgeActivity {
     private static final int REQUEST_NOTIFICATIONS = 2401;
+    private static final int MAX_SHARED_TEXT_CHARS = 16_384;
+    private static final int MAX_SHARED_SUBJECT_CHARS = 512;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -106,15 +108,24 @@ public class MainActivity extends BridgeActivity {
         return screen;
     }
 
+    private static String bounded(String value, int maxChars) {
+        if (value == null) return null;
+        String trimmed = value.trim();
+        if (trimmed.isEmpty()) return "";
+        return trimmed.length() <= maxChars ? trimmed : trimmed.substring(0, maxChars);
+    }
+
     private void deliverSharedIntent(Intent intent) {
-        String text = intent.getStringExtra(Intent.EXTRA_TEXT);
-        String subject = intent.getStringExtra(Intent.EXTRA_SUBJECT);
-        if (text == null || text.trim().isEmpty()) return;
+        String text = bounded(intent.getStringExtra(Intent.EXTRA_TEXT), MAX_SHARED_TEXT_CHARS);
+        String subject = bounded(intent.getStringExtra(Intent.EXTRA_SUBJECT), MAX_SHARED_SUBJECT_CHARS);
+        if (text == null || text.isEmpty()) return;
 
         try {
             JSONObject payload = new JSONObject();
             payload.put("text", text);
-            if (subject != null) payload.put("subject", subject);
+            if (subject != null && !subject.isEmpty()) payload.put("subject", subject);
+            // JSONObject serialization is used as a JavaScript literal so quotes/newlines from a
+            // third-party share intent cannot escape into executable source.
             String javascript = "const d=" + payload.toString() + ";" +
                 "sessionStorage.setItem('mrscrap_pending_share',JSON.stringify(d));" +
                 "window.dispatchEvent(new CustomEvent('mrscrap:share',{detail:d}));";
