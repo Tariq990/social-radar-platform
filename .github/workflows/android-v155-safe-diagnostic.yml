@@ -1,0 +1,122 @@
+name: Android v155 Safe Diagnostic
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-v155-safe-diagnostic.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 12
+    env:
+      PKG: com.mrscrap.socialradar
+    steps:
+      - name: Probe installed v155 safely
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1;exit}')"
+          test -n "$serial"
+          version="$($adb -s "$serial" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"
+          echo "INSTALLED_VERSION_CODE=$version"
+          test "$version" = 155
+          marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          printf '%s' "$marker" | grep -q facebook_connected_at
+          echo FACEBOOK_SESSION_PRESENT=1
+          $adb -s "$serial" shell am force-stop "$PKG" >/dev/null 2>&1 || true
+          $adb -s "$serial" shell am start -W -n "$PKG/.MainActivity" >/dev/null
+          sleep 8
+          pid="$($adb -s "$serial" shell pidof "$PKG" 2>/dev/null | tr -d '\r')"
+          test -n "$pid"
+          socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | grep -E "${pid}$|_${pid}($|_)" | head -n1 || true)"
+          [ -n "$socket" ] || socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | head -n1)"
+          test -n "$socket"
+          $adb -s "$serial" forward --remove tcp:9224 >/dev/null 2>&1 || true
+          $adb -s "$serial" forward tcp:9224 "localabstract:$socket" >/dev/null
+          $adb -s "$serial" logcat -c >/dev/null 2>&1 || true
+          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-v155-safe-diagnostic.ps1"
+          cat > "$ps1" <<'PS'
+          $ErrorActionPreference='Stop'
+          function Target {
+            for($i=0;$i -lt 50;$i++){
+              try{$t=@(Invoke-RestMethod -Uri 'http://127.0.0.1:9224/json/list' -TimeoutSec 2|Where-Object{$_.type -eq 'page' -and [string]$_.url -like 'https://localhost*'}|Select-Object -First 1);if($t.Count){return $t[0]}}catch{}
+              Start-Sleep -Milliseconds 250
+            }
+            throw 'app target missing'
+          }
+          function Eval([string]$raw,[string]$expr,[int]$seconds=300){
+            $u=[Uri]$raw;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($seconds));
+            $ws.ConnectAsync([Uri]('ws://127.0.0.1:9224'+$u.PathAndQuery),$cts.Token).GetAwaiter().GetResult()|Out-Null
+            $payload=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 8
+            $bytes=[Text.Encoding]::UTF8.GetBytes($payload);$ws.SendAsync([ArraySegment[byte]]::new($bytes),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null
+            $buf=New-Object byte[] 262144;$sb=[Text.StringBuilder]::new()
+            while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id -ne 1){continue};if($m.result.exceptionDetails){throw 'runtime eval exception'};$v=$m.result.result.value;try{$ws.Abort()}catch{};return $v}
+          }
+          $app=Target
+          $expr=@'
+          (async()=>{
+            const safe=(e)=>String(e?.message||e||'unknown').split('|')[0].replace(/[^A-Za-z0-9_.: -]/g,'_').slice(0,120);
+            const cap=globalThis.Capacitor?.Plugins?.AuthenticatedSocialSession;
+            if(!cap)return{plugin:false};
+            const sr=await fetch('https://mr-scrap-api-live.onrender.com/api/sources',{credentials:'include'});
+            if(!sr.ok)return{plugin:true,sources:false,http:sr.status};
+            const rows=await sr.json();
+            const source=(Array.isArray(rows)?rows:[]).find(x=>x&&x.platform==='facebook'&&(x.connector_type||x.connectorType||'device_session')==='device_session');
+            if(!source)return{plugin:true,sources:true,source:false};
+            let meta={ok:false};
+            try{
+              const m=await cap.resolveSource({url:source.url});
+              const h=String(m?.handle||m?.externalId||'').trim().replace(/^@/,'').toLowerCase();
+              const n=String(m?.displayName||'').trim();
+              meta={ok:true,namePresent:Boolean(n),nameEqualsHandle:Boolean(h&&n.replace(/^@/,'').toLowerCase()===h),avatar:/^https?:\/\//i.test(String(m?.avatarUrl||''))};
+            }catch(e){meta={ok:false,error:safe(e)}}
+            let collect={ok:false,count:0};let first=null;
+            try{
+              const c=await cap.collectSource({sourceId:source.id,url:source.url,platform:'facebook',limit:3});
+              const posts=Array.isArray(c?.posts)?c.posts:[];
+              collect={ok:true,count:posts.length,firstHasMedia:Boolean(posts[0]&&Array.isArray(posts[0].media)&&posts[0].media.length)};
+              first=posts[0]||null;
+            }catch(e){collect={ok:false,count:0,error:safe(e)}}
+            let detail={skipped:true};
+            if(first?.originalUrl){
+              try{
+                const d=await cap.collectPostDetails({url:first.originalUrl,sourceUrl:source.url,platform:'facebook',publisherName:first.authorName||'',commentsMode:'none',commentLimit:1,includeReplies:false});
+                detail={skipped:false,ok:true,mediaCount:Array.isArray(d?.media)?d.media.length:0,videoPresent:d?.videoPresent===true};
+              }catch(e){detail={skipped:false,ok:false,error:safe(e)}}
+            }
+            return{plugin:true,sources:true,source:true,meta,collect,detail};
+          })()
+          '@
+          $r=Eval ([string]$app.webSocketDebuggerUrl) $expr 300
+          Write-Output ('PLUGIN='+$(if($r.plugin){'1'}else{'0'}))
+          Write-Output ('SOURCE_API='+$(if($r.sources){'1'}else{'0'}))
+          Write-Output ('SOURCE_FOUND='+$(if($r.source){'1'}else{'0'}))
+          Write-Output ('META_OK='+$(if($r.meta.ok){'1'}else{'0'}))
+          Write-Output ('META_NAME_PRESENT='+$(if($r.meta.namePresent){'1'}else{'0'}))
+          Write-Output ('META_NAME_EQUALS_HANDLE='+$(if($r.meta.nameEqualsHandle){'1'}else{'0'}))
+          Write-Output ('META_AVATAR='+$(if($r.meta.avatar){'1'}else{'0'}))
+          if($r.meta.error){Write-Output ('META_ERROR_CODE='+$r.meta.error)}
+          Write-Output ('COLLECT_OK='+$(if($r.collect.ok){'1'}else{'0'}))
+          Write-Output ('COLLECT_COUNT='+[int]$r.collect.count)
+          Write-Output ('COLLECT_FIRST_HAS_MEDIA='+$(if($r.collect.firstHasMedia){'1'}else{'0'}))
+          if($r.collect.error){Write-Output ('COLLECT_ERROR_CODE='+$r.collect.error)}
+          Write-Output ('DETAIL_SKIPPED='+$(if($r.detail.skipped){'1'}else{'0'}))
+          if(!$r.detail.skipped){Write-Output ('DETAIL_OK='+$(if($r.detail.ok){'1'}else{'0'}));Write-Output ('DETAIL_MEDIA_COUNT='+[int]$r.detail.mediaCount);Write-Output ('DETAIL_VIDEO_PRESENT='+$(if($r.detail.videoPresent){'1'}else{'0'}));if($r.detail.error){Write-Output ('DETAIL_ERROR_CODE='+$r.detail.error)}}
+          PS
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
+          echo '--- SAFE COLLECTOR TRACE ---'
+          $adb -s "$serial" logcat -d -v brief MRSCRAP_FLOW:I MRSCRAP_DETAIL:I MRSCRAP_COLLECT:I '*:S' 2>/dev/null | tr -d '\r' | grep -E 'event=' | tail -n 160 || true
+          rm -f "$ps1" || true
+          $adb -s "$serial" forward --remove tcp:9224 >/dev/null 2>&1 || true
+          echo V155_SAFE_DIAGNOSTIC_COMPLETE=1
