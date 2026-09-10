@@ -49,3 +49,22 @@ test('production startup refuses local persistence', () => {
   assert.match(server, /APP_MODE === 'production' && !db\.isUsingPostgres\(\)/);
   assert.match(server, /Production startup aborted: DATABASE_URL is missing\/unreachable/);
 });
+
+test('main UI script CSP rejects inline script execution and uses packaged boot code', () => {
+  const index = read('index.html');
+  const boot = read('public/boot.js');
+  const scriptPolicy = index.match(/script-src\s+([^;]+);/)?.[1] || '';
+
+  assert.equal(scriptPolicy.trim(), "'self'");
+  assert.doesNotMatch(scriptPolicy, /unsafe-inline/);
+  assert.match(index, /<script src="\/boot\.js"><\/script>/);
+  assert.doesNotMatch(index, /\sonload=/i);
+  assert.match(boot, /mrscrap_theme_v2/);
+  assert.match(boot, /mrscrap_locale_v2/);
+});
+
+test('malformed Smart Grab records never dump raw exceptions in production', () => {
+  const explore = read('src/services/explore.ts');
+  assert.match(explore, /catch \{\s*if \(import\.meta\.env\.DEV\) console\.warn\('\[apiExploreDevicePosts\] Ignoring malformed item'\);\s*\}/s);
+  assert.doesNotMatch(explore, /Ignoring malformed item',\s*error/);
+});
