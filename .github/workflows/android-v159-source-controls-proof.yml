@@ -1,0 +1,54 @@
+name: Android v159 Source Controls Proof
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-v159-source-controls-proof.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  prove:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 6
+    env:
+      PKG: com.mrscrap.socialradar
+    steps:
+      - name: Prove isolated pause resume and delete semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"; test -x "$adb"
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1;exit}')"; test -n "$serial"
+          test "$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1)" = 1
+          version="$($adb -s "$serial" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"; echo "INSTALLED_VERSION_CODE=$version"; test "$version" = 159
+          marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"; printf '%s' "$marker" | grep -q facebook_connected_at; echo FACEBOOK_SESSION_PRESENT=1
+          $adb -s "$serial" shell am force-stop "$PKG" >/dev/null 2>&1 || true
+          $adb -s "$serial" shell am start -W -n "$PKG/.MainActivity" >/dev/null
+          sleep 10
+          pid="$($adb -s "$serial" shell pidof "$PKG" 2>/dev/null | tr -d '\r' | awk '{print $1}')"; test -n "$pid"
+          socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | grep -E "${pid}$|_${pid}($|_)" | head -n1 || true)"
+          [ -n "$socket" ] || socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | head -n1 || true)"; test -n "$socket"
+          port=9244; $adb -s "$serial" forward --remove tcp:$port >/dev/null 2>&1 || true; $adb -s "$serial" forward tcp:$port "localabstract:$socket" >/dev/null
+          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-v159-source-controls.ps1"
+          cat > "$ps1" <<'PS'
+          $ErrorActionPreference='Stop';$port=9244
+          function Target { for($i=0;$i-lt 120;$i++){try{$rows=@(Invoke-RestMethod -Uri "http://127.0.0.1:$port/json/list" -TimeoutSec 2);$hits=@($rows|Where-Object{$_.type-eq'page'-and[string]$_.url-like'https://localhost*'});if($hits.Count-gt 0){return $hits[0]}}catch{};Start-Sleep -Milliseconds 250};throw 'app target missing'}
+          function Eval([string]$expr,[int]$seconds=240){$t=Target;$raw=[string](@($t)[0].webSocketDebuggerUrl);$u=[Uri]$raw;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($seconds));$ws.ConnectAsync([Uri]("ws://127.0.0.1:$port"+$u.PathAndQuery),$cts.Token).GetAwaiter().GetResult()|Out-Null;$p=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 12;$b=[Text.Encoding]::UTF8.GetBytes($p);$ws.SendAsync([ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null;$buf=New-Object byte[] 262144;$sb=[Text.StringBuilder]::new();while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id-ne 1){continue};if($m.result.exceptionDetails){throw 'runtime eval exception'};return $m.result.result.value}}
+          $expr=@'
+          (async()=>{const base='https://mr-scrap-api-live.onrender.com',j=async r=>{try{return await r.json()}catch{return null}};const cap=globalThis.Capacitor?.Plugins?.AuthenticatedSocialSession;const o={stage:'start',globalRules:-1,baseline:-1,created:false,initialActive:false,scheduled1:false,pausedApi:false,cancelledOnPause:false,pausedPersisted:false,resumedApi:false,scheduled2:false,resumedPersisted:false,cancelledBeforeDelete:false,deleted:false,restored:false,alertsStable:false,facebookAfter:false};let id='';try{if(!cap){o.stage='plugin';return o}let sr0=await fetch(base+'/api/sources',{credentials:'include'}),s0=await j(sr0);if(!sr0.ok||!Array.isArray(s0)){o.stage='sources';return o}for(const p of s0.filter(x=>typeof x?.external_id==='string'&&x.external_id.startsWith('controlprobe_emulator_'))){try{await cap.cancelSource({sourceId:p.id})}catch{};await fetch(base+'/api/sources/'+encodeURIComponent(p.id),{method:'DELETE',credentials:'include'})}const [sr,rr,ar]=await Promise.all([fetch(base+'/api/sources',{credentials:'include'}),fetch(base+'/api/rules',{credentials:'include'}),fetch(base+'/api/alerts',{credentials:'include'})]),sources=await j(sr),rules=await j(rr),alerts=await j(ar);if(!sr.ok||!rr.ok||!ar.ok||!Array.isArray(sources)||!Array.isArray(rules)||!Array.isArray(alerts)){o.stage='backend';return o}o.baseline=sources.length;o.globalRules=rules.filter(r=>r&&r.enabled===true&&(!Array.isArray(r.source_ids||r.sourceIds)||(r.source_ids||r.sourceIds).length===0)).length;const real=sources.find(x=>x&&x.platform==='facebook'&&!Boolean(x.is_paused??x.isPaused)&&(x.connector_type||x.connectorType||'device_session')==='device_session'),st=await cap.status();const connected=st?.facebookConnected===true||(st?.facebookConnected==null&&st?.connected===true);if(o.globalRules!==0||!real||!connected){o.stage='unsafe';return o}const cr=await fetch(base+'/api/sources',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({externalId:'controlprobe_emulator_'+Date.now(),url:real.url,name:'Control Emulator Probe',visibilityType:'authenticated',connectorType:'device_session'})}),created=await j(cr);if(!cr.ok||typeof created?.id!=='string'){o.stage='create';return o}id=created.id;o.created=true;o.initialActive=!Boolean(created.is_paused??created.isPaused);const sc1=await cap.scheduleSource({sourceId:id,url:real.url,platform:'facebook',backendBaseUrl:base,locale:'en'});o.scheduled1=sc1?.scheduled===true;const pr1=await fetch(base+'/api/sources/'+encodeURIComponent(id)+'/pause',{method:'PATCH',credentials:'include'}),p1=await j(pr1);o.pausedApi=pr1.ok&&p1?.isPaused===true;const cc1=await cap.cancelSource({sourceId:id});o.cancelledOnPause=cc1?.cancelled===true;const vr1=await fetch(base+'/api/sources',{credentials:'include'}),v1=await j(vr1),s1=vr1.ok&&Array.isArray(v1)?v1.find(x=>x?.id===id):null;o.pausedPersisted=Boolean(s1&&(s1.is_paused===true||s1.isPaused===true));const pr2=await fetch(base+'/api/sources/'+encodeURIComponent(id)+'/pause',{method:'PATCH',credentials:'include'}),p2=await j(pr2);o.resumedApi=pr2.ok&&p2?.isPaused===false;const sc2=await cap.scheduleSource({sourceId:id,url:real.url,platform:'facebook',backendBaseUrl:base,locale:'en'});o.scheduled2=sc2?.scheduled===true;const vr2=await fetch(base+'/api/sources',{credentials:'include'}),v2=await j(vr2),s2=vr2.ok&&Array.isArray(v2)?v2.find(x=>x?.id===id):null;o.resumedPersisted=Boolean(s2&&!(s2.is_paused===true||s2.isPaused===true));const cc2=await cap.cancelSource({sourceId:id});o.cancelledBeforeDelete=cc2?.cancelled===true;const dr=await fetch(base+'/api/sources/'+encodeURIComponent(id),{method:'DELETE',credentials:'include'});o.deleted=dr.ok;id='';const [sr3,ar3]=await Promise.all([fetch(base+'/api/sources',{credentials:'include'}),fetch(base+'/api/alerts',{credentials:'include'})]),v3=await j(sr3),a3=await j(ar3);o.restored=sr3.ok&&Array.isArray(v3)&&v3.length===o.baseline&&!v3.some(x=>typeof x?.external_id==='string'&&x.external_id.startsWith('controlprobe_emulator_'));o.alertsStable=ar3.ok&&Array.isArray(a3)&&a3.length===alerts.length;o.stage='done';return o}finally{if(id){try{await cap.cancelSource({sourceId:id})}catch{};try{await fetch(base+'/api/sources/'+encodeURIComponent(id),{method:'DELETE',credentials:'include'})}catch{}}try{const st2=cap?await cap.status():null;o.facebookAfter=st2?.facebookConnected===true||(st2?.facebookConnected==null&&st2?.connected===true)}catch{}}})()
+          '@
+          $r=Eval $expr 240
+          Write-Output ('CONTROL_STAGE='+[string]$r.stage);Write-Output ('GLOBAL_ENABLED_RULES='+[int]$r.globalRules);Write-Output ('SOURCE_CREATED='+$(if($r.created){'1'}else{'0'}));Write-Output ('INITIAL_ACTIVE='+$(if($r.initialActive){'1'}else{'0'}));Write-Output ('INITIAL_WORK_SCHEDULED='+$(if($r.scheduled1){'1'}else{'0'}));Write-Output ('PAUSE_API='+$(if($r.pausedApi){'1'}else{'0'}));Write-Output ('WORK_CANCELLED_ON_PAUSE='+$(if($r.cancelledOnPause){'1'}else{'0'}));Write-Output ('PAUSE_PERSISTED='+$(if($r.pausedPersisted){'1'}else{'0'}));Write-Output ('RESUME_API='+$(if($r.resumedApi){'1'}else{'0'}));Write-Output ('WORK_RESCHEDULED_ON_RESUME='+$(if($r.scheduled2){'1'}else{'0'}));Write-Output ('RESUME_PERSISTED='+$(if($r.resumedPersisted){'1'}else{'0'}));Write-Output ('WORK_CANCELLED_BEFORE_DELETE='+$(if($r.cancelledBeforeDelete){'1'}else{'0'}));Write-Output ('SOURCE_DELETED='+$(if($r.deleted){'1'}else{'0'}));Write-Output ('SOURCE_SET_RESTORED='+$(if($r.restored){'1'}else{'0'}));Write-Output ('ALERTS_STABLE='+$(if($r.alertsStable){'1'}else{'0'}));Write-Output ('FACEBOOK_SESSION_AFTER='+$(if($r.facebookAfter){'1'}else{'0'}))
+          if([string]$r.stage-ne'done' -or [int]$r.globalRules-ne 0 -or !$r.created -or !$r.initialActive -or !$r.scheduled1 -or !$r.pausedApi -or !$r.cancelledOnPause -or !$r.pausedPersisted -or !$r.resumedApi -or !$r.scheduled2 -or !$r.resumedPersisted -or !$r.cancelledBeforeDelete -or !$r.deleted -or !$r.restored -or !$r.alertsStable -or !$r.facebookAfter){exit 254}
+          Write-Output V159_SOURCE_CONTROLS_EMULATOR_PREPROOF=PASS
+          PS
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
+          marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"; printf '%s' "$marker" | grep -q facebook_connected_at
+          $adb -s "$serial" forward --remove tcp:$port >/dev/null 2>&1 || true; rm -f "$ps1" 2>/dev/null || true
