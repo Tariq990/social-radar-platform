@@ -1,5 +1,6 @@
 name: Android Physical USB Deep Classification
 
+# Read-only host/device visibility classifier; outputs counts only and does not mutate device state.
 on:
   push:
     branches: [test/android-headless-emulator-20260909]
