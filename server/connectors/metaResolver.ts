@@ -188,7 +188,7 @@ export class PublicMetaResolver {
         };
       }
     } catch (err: any) {
-      console.warn('[PublicMetaResolver] Direct metadata fetch unavailable:', err?.name === 'AbortError' ? 'timeout' : err?.message);
+      console.warn('[PublicMetaResolver] Direct metadata fetch unavailable:', err?.name === 'AbortError' ? 'timeout' : 'request_failed');
     } finally { clearTimeout(timeoutId); }
     return null;
   }
