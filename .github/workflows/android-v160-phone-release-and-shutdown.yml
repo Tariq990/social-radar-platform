@@ -43,15 +43,16 @@ jobs:
             sleep 1
           done
 
-          ps_count="$(/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -Command "\$p=@(Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -like '*-avd test_avd*' }); Write-Output \$p.Count" 2>/dev/null | tr -d '\r' | tail -n1)"
+          ps_filter="(\$_.Name -like 'emulator*' -or \$_.Name -like 'qemu-system-*') -and \$_.CommandLine -like '*test_avd*'"
+          ps_count="$(/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -Command "\$p=@(Get-CimInstance Win32_Process | Where-Object { $ps_filter }); Write-Output \$p.Count" 2>/dev/null | tr -d '\r' | tail -n1)"
           ps_count="${ps_count:-0}"
           if [ "$ps_count" -gt 0 ]; then
-            /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -like '*-avd test_avd*' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }" >/dev/null 2>&1 || true
+            /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $ps_filter } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }" >/dev/null 2>&1 || true
             sleep 3
           fi
 
           count="$("$adb" devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {n++} END{print n+0}')"
-          ps_count="$(/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -Command "\$p=@(Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -like '*-avd test_avd*' }); Write-Output \$p.Count" 2>/dev/null | tr -d '\r' | tail -n1)"
+          ps_count="$(/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -Command "\$p=@(Get-CimInstance Win32_Process | Where-Object { $ps_filter }); Write-Output \$p.Count" 2>/dev/null | tr -d '\r' | tail -n1)"
           ps_count="${ps_count:-0}"
           echo "EMULATOR_DEVICE_COUNT=$count"
           echo "TEST_AVD_PROCESS_COUNT=$ps_count"
