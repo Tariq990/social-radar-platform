@@ -8,7 +8,7 @@ const RESOLVE_TIMEOUT_MS = 3500;
 function platformForUrl(raw: string): SourcePlatform | 'other' {
   try {
     const parsed = new URL(raw);
-    if (!['http:', 'https:'].includes(parsed.protocol)) return 'other';
+    if (parsed.protocol !== 'https:') return 'other';
     const host = parsed.hostname.toLowerCase();
     if (host === 'facebook.com' || host.endsWith('.facebook.com') || host === 'fb.com' || host.endsWith('.fb.com') || host === 'fb.watch') return 'facebook';
     if (host === 'instagram.com' || host.endsWith('.instagram.com') || host === 'instagr.am' || host.endsWith('.instagr.am')) return 'instagram';
@@ -78,7 +78,11 @@ function embeddedProfileImage(html: string): string {
     const raw = html.match(pattern)?.[1];
     if (!raw) continue;
     const value = raw.replace(/\\u0026/gi, '&').replace(/\\\//g, '/').replace(/\\u0025/gi, '%');
-    if (/^https?:\/\//i.test(value)) return value;
+    try {
+      const parsed = new URL(value);
+      if (parsed.protocol === 'http:') parsed.protocol = 'https:';
+      if (parsed.protocol === 'https:') return parsed.toString();
+    } catch { /* ignore malformed embedded image */ }
   }
   return '';
 }
@@ -104,9 +108,10 @@ async function readBoundedText(response: Response): Promise<string> {
 }
 
 async function fetchMetaHtml(initialUrl: string, signal: AbortSignal): Promise<{ response: Response; finalUrl: string; html: string }> {
-  let current = initialUrl;
+  let current = canonicalizeSocialUrl(initialUrl);
   for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount++) {
-    if (platformForUrl(current) === 'other') throw new Error('Meta resolver refused a non-Facebook/Instagram URL');
+    if (platformForUrl(current) === 'other') throw new Error('Meta resolver refused a non-HTTPS Facebook/Instagram URL');
+    const currentPlatform = platformForUrl(current);
     const response = await fetch(current, {
       signal,
       headers: {
@@ -120,8 +125,11 @@ async function fetchMetaHtml(initialUrl: string, signal: AbortSignal): Promise<{
       if (redirectCount === MAX_REDIRECTS) throw new Error('Too many public metadata redirects');
       const location = response.headers.get('location');
       if (!location) throw new Error('Meta resolver received redirect without Location');
-      const nextUrl = new URL(location, current).toString();
-      if (platformForUrl(nextUrl) === 'other') throw new Error('Meta resolver refused redirect outside Facebook/Instagram');
+      const nextUrl = canonicalizeSocialUrl(new URL(location, current).toString());
+      const nextPlatform = platformForUrl(nextUrl);
+      if (nextPlatform === 'other' || nextPlatform !== currentPlatform) {
+        throw new Error('Meta resolver refused redirect outside the original HTTPS social platform');
+      }
       current = nextUrl;
       continue;
     }
@@ -134,9 +142,9 @@ export class PublicMetaResolver {
   async resolve(input: SourceInput): Promise<ResolvedSourceResult | null> {
     const raw = (input.url || '').trim();
     if (!raw) return null;
-    const platform = platformForUrl(raw);
-    if (platform === 'other') return null;
     const canonicalUrl = canonicalizeSocialUrl(raw);
+    const platform = platformForUrl(canonicalUrl);
+    if (platform === 'other') return null;
     const handle = deriveHandleOrId(canonicalUrl) || deriveHandleOrId(raw) || 'page';
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), RESOLVE_TIMEOUT_MS);
@@ -146,18 +154,30 @@ export class PublicMetaResolver {
       if (response.status === 404) {
         return { valid: false, platform, externalId: handle, name: '', handle: `@${handle}`, url: finalUrl, visibilityType: 'public', connectorType: 'public_cloud', connectorStatus: 'error', requiresAuthentication: false, error: `Page not found on ${platform === 'facebook' ? 'Facebook' : 'Instagram'}. Please verify the URL.` };
       }
+      if (!response.ok) return null;
+      const contentType = (response.headers.get('content-type') || '').toLowerCase();
+      if (contentType && !contentType.includes('text/html') && !contentType.includes('application/xhtml+xml')) return null;
+
       let title = metaContent(html, ['og:title', 'twitter:title', 'title']) || titleContent(html);
       title = decodeHtml(title).replace(/\s*[|·-]\s*Facebook\s*$/i, '').replace(/\s*[|·-]\s*Instagram\s*$/i, '').replace(/\s*•\s*Instagram photos and videos\s*$/i, '').trim();
-      const image = metaContent(html, ['og:image:secure_url', 'og:image', 'twitter:image', 'twitter:image:src']) || linkHref(html, 'image_src') || embeddedProfileImage(html);
+      const imageRaw = metaContent(html, ['og:image:secure_url', 'og:image', 'twitter:image', 'twitter:image:src']) || linkHref(html, 'image_src') || embeddedProfileImage(html);
+      let image = '';
+      try {
+        if (imageRaw) {
+          const parsed = new URL(imageRaw, finalUrl);
+          if (parsed.protocol === 'http:') parsed.protocol = 'https:';
+          if (parsed.protocol === 'https:') image = parsed.toString();
+        }
+      } catch { /* image remains unavailable */ }
       const description = metaContent(html, ['og:description', 'twitter:description', 'description']);
       const badTitle = /^(facebook|instagram|log in|log into facebook|welcome to facebook|error facebook)$/i.test(title) || /log in to facebook/i.test(title);
       if (title && title.length > 1 && !badTitle) {
         return {
           valid: true,
           platform,
-          externalId: handle,
+          externalId: handle.slice(0, 255),
           name: title.slice(0, 255),
-          handle: `@${handle}`,
+          handle: `@${handle.slice(0, 255)}`,
           avatarUrl: image || undefined,
           url: finalUrl,
           bio: description ? decodeHtml(description).slice(0, 5000) : undefined,
