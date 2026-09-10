@@ -22,7 +22,7 @@ export const SourceAvatar: React.FC<SourceAvatarProps> = ({
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [src]);
 
-  const usable = typeof src === 'string' && /^https?:\/\//i.test(src.trim()) && !failed;
+  const usable = typeof src === 'string' && /^https:\/\//i.test(src.trim()) && !failed;
   if (usable) {
     return (
       <img
