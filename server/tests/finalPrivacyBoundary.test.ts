@@ -58,3 +58,12 @@ test('database diagnostics do not print database URL fragments, local paths, or 
   assert.doesNotMatch(database, /Local persistent store loaded from/);
   assert.doesNotMatch(database, /starting fresh', e|persist data to disk', e/);
 });
+
+test('frontend runtime diagnostics do not expose raw exception objects or native error text', () => {
+  const radar = fs.readFileSync('src/context/RadarContext.tsx', 'utf8');
+  const settings = fs.readFileSync('src/screens/SettingsScreen.tsx', 'utf8');
+  assert.doesNotMatch(radar, /console\.warn\([^\n]*,\s*error\)/);
+  assert.doesNotMatch(radar, /Authenticated scan failed for \$\{source\.id\}/);
+  assert.doesNotMatch(settings, /setError\(err\?\.message/);
+  assert.match(settings, /if \(!connected\) \{\s*setError\(/s);
+});
