@@ -157,6 +157,7 @@ function friendlyError(error: unknown, locale: Locale): string {
     if (message === 'INVALID_SOCIAL_URL' || lower.includes('invalid url')) return 'Paste a valid Facebook or Instagram URL.';
     if (lower.includes('instagram') && (lower.includes('session') || lower.includes('login'))) return 'Connect Instagram first.';
     if (lower.includes('facebook') && (lower.includes('session') || lower.includes('login'))) return 'Connect Facebook first.';
+    if (message === 'INCOMPLETE_SOURCE_METADATA') return 'Could not read the real source name and profile image. Please retry.';
     return 'Could not verify this source. Please try again.';
   }
   if (message === 'INVALID_SOCIAL_URL' || lower.includes('invalid url') || lower.includes('only http') || lower.includes('unsupported')) {
@@ -164,6 +165,7 @@ function friendlyError(error: unknown, locale: Locale): string {
   }
   if (lower.includes('instagram') && (lower.includes('session') || lower.includes('login'))) return 'اربط Instagram أولًا.';
   if (lower.includes('facebook') && (lower.includes('session') || lower.includes('login'))) return 'اربط Facebook أولًا.';
+  if (message === 'INCOMPLETE_SOURCE_METADATA') return 'تعذر قراءة الاسم والصورة الحقيقيين للمصدر. أعد المحاولة.';
   return 'تعذر التحقق من المصدر الآن. أعد المحاولة.';
 }
 
@@ -309,8 +311,15 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onCl
     const provisional = provisionalSource(clean, nativeAvailable, connected);
     try {
       let winner: ResolvedSource;
-      try { winner = await Promise.race([firstSuccessful(realResolvers), timeoutAfter(2200)]); }
-      catch (error) { if (!provisional) throw error; winner = provisional; }
+      if (nativePromise) {
+        winner = await Promise.race([nativePromise, timeoutAfter(10_000)]);
+        if (isGenericName(winner.displayName, winner.handle) || !winner.avatarUrl?.trim()) {
+          throw new Error('INCOMPLETE_SOURCE_METADATA');
+        }
+      } else {
+        try { winner = await Promise.race([firstSuccessful(realResolvers), timeoutAfter(2200)]); }
+        catch (error) { if (!provisional) throw error; winner = provisional; }
+      }
       if (generation !== resolveGeneration.current) return;
       prepare(winner, clean, connected);
     } catch (error) {
@@ -368,17 +377,25 @@ export const AddSourceModal: React.FC<AddSourceModalProps> = ({ initialUrl, onCl
     setIsSubmitting(true);
     setResolveError(null);
     try {
+      let sourceToPersist = resolvedSource;
+      if (resolvedSource.connectorType === 'device_session' && DeviceSessionConnector.isNativeAvailable() && !isDemoMode &&
+          (isGenericName(resolvedSource.displayName, resolvedSource.handle) || !resolvedSource.avatarUrl?.trim())) {
+        const refreshed = normalizeResolvedSource(await connector.resolveSource({ url: resolvedSource.url }), resolvedSource.url);
+        if (isGenericName(refreshed.displayName, refreshed.handle) || !refreshed.avatarUrl?.trim()) throw new Error('INCOMPLETE_SOURCE_METADATA');
+        sourceToPersist = { ...resolvedSource, ...refreshed, connectorType: 'device_session', connectorStatus: 'authenticated_monitoring' };
+        setResolvedSource(sourceToPersist);
+      }
       await addSourceWithRule({
-        platform: resolvedSource.platform,
-        externalId: resolvedSource.externalId,
-        url: resolvedSource.url,
-        displayName: resolvedSource.displayName,
-        handle: resolvedSource.handle,
-        avatarUrl: resolvedSource.avatarUrl,
-        bio: resolvedSource.bio,
-        visibilityType: resolvedSource.visibilityType,
-        connectorType: resolvedSource.connectorType,
-        connectorStatus: resolvedSource.connectorStatus
+        platform: sourceToPersist.platform,
+        externalId: sourceToPersist.externalId,
+        url: sourceToPersist.url,
+        displayName: sourceToPersist.displayName,
+        handle: sourceToPersist.handle,
+        avatarUrl: sourceToPersist.avatarUrl,
+        bio: sourceToPersist.bio,
+        visibilityType: sourceToPersist.visibilityType,
+        connectorType: sourceToPersist.connectorType,
+        connectorStatus: sourceToPersist.connectorStatus
       }, ruleText, ruleName);
       setStep(4);
       window.setTimeout(onClose, 850);

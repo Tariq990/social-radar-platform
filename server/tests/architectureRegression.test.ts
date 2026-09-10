@@ -44,7 +44,7 @@ test('native collector supports bounded multi-post collection', () => {
   assert.match(collector, /evaluationInFlight/);
   assert.match(collector, /authority\("www\.facebook\.com"\)/);
   assert.match(collector, /webView\.loadUrl\(desktopUrl\)/);
-  assert.match(collector, /SURFACE_FALLBACK_ATTEMPT\s*=\s*4/);
+  assert.match(collector, /SURFACE_FALLBACK_ATTEMPT\s*=\s*20/);
   assert.match(collector, /mbasic\.facebook\.com/);
   assert.match(collector, /NO_EXTRACTABLE_POSTS/);
 });
@@ -249,11 +249,12 @@ test('foreground Smart Grab uses an Activity-attached Meta WebView while backgro
   const collector = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedWebCollector.java');
   const detail = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedPostDetailCollector.java');
   const worker = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSourceWorker.java');
-  assert.match(host, /root\.addView\(host, hostParams\)/);
+  assert.match(host, /root\.addView\(host, 0, hostParams\)/);
   assert.match(host, /host\.addView\(webView, webParams\)/);
   assert.match(host, /webView\.onResume\(\)/);
   assert.match(host, /context instanceof Activity/);
-  assert.match(plugin, /FacebookGraphqlWebViewCollector\.collect\(foregroundContext\(\)/);
+  assert.match(plugin, /AuthenticatedWebCollector\.collect\(foregroundContext\(\), url, limit, terminal\)/);
+  assert.match(plugin, /primary=dom/);
   assert.match(plugin, /AuthenticatedPostDetailCollector\.collect\([\s\S]*foregroundContext\(\)/);
   assert.match(collector, /ForegroundWebViewHost\.contextFor\(context\)/);
   assert.match(collector, /ForegroundWebViewHost\.attachIfPossible/);

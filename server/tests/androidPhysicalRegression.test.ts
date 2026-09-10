@@ -9,17 +9,17 @@ test('foreground Meta collector stays fully renderable and starts DOM polling be
   const host = read('android/app/src/main/java/com/mrscrap/socialradar/ForegroundWebViewHost.java');
   const collector = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedWebCollector.java');
 
-  assert.match(host, /root\.addView\(host, hostParams\)/);
+  assert.match(host, /root\.addView\(host, 0, hostParams\)/);
   assert.match(host, /host\.addView\(webView, webParams\)/);
-  assert.match(host, /new FrameLayout\.LayoutParams\(48, 48\)/);
+  assert.match(host, /Math\.max\(1, width\)[\s\S]*Math\.max\(1, height\)/);
   assert.match(host, /webView\.setAlpha\(1f\)/);
   assert.match(host, /webView\.setLayerType\(View\.LAYER_TYPE_HARDWARE, null\)/);
   assert.match(host, /webView\.resumeTimers\(\)/);
   assert.doesNotMatch(host, /setAlpha\(0\.01f\)/);
 
-  assert.match(collector, /TIMEOUT_MS = 45_000/);
-  assert.match(collector, /PAGE_STARTED_EXTRACTION_DELAY_MS = 900/);
-  assert.match(collector, /EVALUATION_WATCHDOG_MS = 2_500/);
+  assert.match(collector, /TIMEOUT_MS = 75_000/);
+  assert.match(collector, /PAGE_STARTED_EXTRACTION_DELAY_MS = 3_000/);
+  assert.match(collector, /EVALUATION_WATCHDOG_MS = 10_000/);
   assert.match(collector, /evaluationInFlight/);
   assert.match(collector, /void onPageStarted\(WebView view, String loadedUrl/);
   assert.match(collector, /scheduleExtraction\(PAGE_STARTED_EXTRACTION_DELAY_MS\)/);
@@ -30,7 +30,8 @@ test('foreground Meta collector stays fully renderable and starts DOM polling be
   const plugin = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSocialSessionPlugin.java');
   assert.match(plugin, /MRSCRAP_FLOW/);
   assert.match(plugin, /event=collect_source_enter/);
-  assert.match(plugin, /FacebookGraphqlWebViewCollector\.collect/);
+  assert.match(plugin, /AuthenticatedWebCollector\.collect\(foregroundContext\(\), url, limit, terminal\)/);
+  assert.match(plugin, /primary=dom/);
 
   const graphqlCollector = read('android/app/src/main/java/com/mrscrap/socialradar/FacebookGraphqlWebViewCollector.java');
   assert.match(graphqlCollector, /ProfileCometTimelineFeedRefetchQuery/);

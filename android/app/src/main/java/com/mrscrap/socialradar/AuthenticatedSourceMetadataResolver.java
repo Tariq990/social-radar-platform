@@ -4,6 +4,7 @@ import android.content.Context;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
+import android.view.View;
 import android.webkit.CookieManager;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
@@ -18,11 +19,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Fast metadata-only resolver for Facebook and Instagram source onboarding. */
 final class AuthenticatedSourceMetadataResolver {
-    private static final long TIMEOUT_MS = 7_000;
-    private static final long FIRST_EXTRACTION_DELAY_MS = 140;
-    private static final long RETRY_DELAY_MS = 240;
-    private static final int MAX_EXTRACTION_ATTEMPTS = 18;
-    private static final int AVATAR_GRACE_ATTEMPTS = 8;
+    private static final long TIMEOUT_MS = 12_000;
+    private static final long FIRST_EXTRACTION_DELAY_MS = 450;
+    private static final long RETRY_DELAY_MS = 500;
+    private static final int MAX_EXTRACTION_ATTEMPTS = 20;
+    private static final int AVATAR_GRACE_ATTEMPTS = 12;
 
     private AuthenticatedSourceMetadataResolver() {}
 
@@ -35,7 +36,7 @@ final class AuthenticatedSourceMetadataResolver {
         main.post(() -> {
             AtomicBoolean finished = new AtomicBoolean(false);
             int[] attempts = new int[] { 0 };
-            WebView webView = new WebView(context.getApplicationContext());
+            WebView webView = new WebView(ForegroundWebViewHost.contextFor(context));
             WebSettings settings = webView.getSettings();
             settings.setJavaScriptEnabled(true);
             settings.setDomStorageEnabled(true);
@@ -44,6 +45,18 @@ final class AuthenticatedSourceMetadataResolver {
             settings.setAllowContentAccess(false);
             settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
             settings.setLoadsImagesAutomatically(true);
+            settings.setOffscreenPreRaster(true);
+            settings.setUserAgentString("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36");
+
+            int viewportWidth = Math.max(360, context.getResources().getDisplayMetrics().widthPixels);
+            int viewportHeight = Math.max(740, context.getResources().getDisplayMetrics().heightPixels);
+            webView.measure(
+                View.MeasureSpec.makeMeasureSpec(viewportWidth, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(viewportHeight, View.MeasureSpec.EXACTLY)
+            );
+            webView.layout(0, 0, viewportWidth, viewportHeight);
+            ForegroundWebViewHost.attachIfPossible(context, webView, viewportWidth, viewportHeight);
+
             CookieManager manager = CookieManager.getInstance();
             manager.setAcceptCookie(true);
             manager.setAcceptThirdPartyCookies(webView, true);
@@ -59,6 +72,11 @@ final class AuthenticatedSourceMetadataResolver {
             final Runnable[] runner = new Runnable[1];
             runner[0] = () -> {
                 if (finished.get()) return;
+                String currentUrl = webView.getUrl();
+                if (currentUrl == null || !AuthenticatedWebCollector.isAllowedSocialUrl(currentUrl)) {
+                    main.postDelayed(runner[0], RETRY_DELAY_MS);
+                    return;
+                }
                 attempts[0]++;
                 webView.evaluateJavascript(extractionScript(url), value -> {
                     if (finished.get()) return;
@@ -98,11 +116,14 @@ final class AuthenticatedSourceMetadataResolver {
             webView.setWebViewClient(new WebViewClient() {
                 private void schedule(long delay) {
                     if (finished.get()) return;
-                    main.removeCallbacks(runner[0]);
                     main.postDelayed(runner[0], delay);
                 }
                 @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                     return !AuthenticatedWebCollector.isAllowedSocialUrl(request.getUrl().toString());
+                }
+                @Override public void onPageStarted(WebView view, String loadedUrl, android.graphics.Bitmap favicon) {
+                    super.onPageStarted(view, loadedUrl, favicon);
+                    if (AuthenticatedWebCollector.isAllowedSocialUrl(loadedUrl) && !finished.get()) schedule(3_000);
                 }
                 @Override public void onPageCommitVisible(WebView view, String loadedUrl) {
                     super.onPageCommitVisible(view, loadedUrl);
@@ -113,11 +134,12 @@ final class AuthenticatedSourceMetadataResolver {
                     if (AuthenticatedWebCollector.isAllowedSocialUrl(loadedUrl) && !finished.get()) schedule(80);
                 }
             });
-            webView.loadUrl(preferMobileFacebookUrl(url));
+            webView.loadUrl(preferDesktopFacebookUrl(url));
+            main.postDelayed(runner[0], 3_000);
         });
     }
 
-    private static String preferMobileFacebookUrl(String rawUrl) {
+    private static String preferDesktopFacebookUrl(String rawUrl) {
         try {
             Uri uri = Uri.parse(rawUrl);
             String host = uri.getHost();
@@ -125,7 +147,7 @@ final class AuthenticatedSourceMetadataResolver {
             String normalized = host.toLowerCase();
             boolean facebook = normalized.equals("facebook.com") || normalized.endsWith(".facebook.com") || normalized.equals("fb.com") || normalized.endsWith(".fb.com");
             if (!facebook || normalized.equals("fb.watch")) return rawUrl;
-            return uri.buildUpon().authority("m.facebook.com").build().toString();
+            return uri.buildUpon().authority("www.facebook.com").build().toString();
         } catch (Exception ignored) { return rawUrl; }
     }
 
@@ -136,14 +158,7 @@ final class AuthenticatedSourceMetadataResolver {
     }
 
     private static void destroy(WebView webView) {
-        new Handler(Looper.getMainLooper()).post(() -> {
-            try {
-                webView.stopLoading();
-                webView.clearHistory();
-                webView.removeAllViews();
-                webView.destroy();
-            } catch (Exception ignored) { }
-        });
+        new Handler(Looper.getMainLooper()).post(() -> ForegroundWebViewHost.destroy(webView));
     }
 
     private static String extractionScript(String requestedUrl) {
