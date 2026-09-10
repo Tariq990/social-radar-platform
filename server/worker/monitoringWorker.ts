@@ -28,10 +28,10 @@ function sanitizePublishedAt(value: unknown): string | undefined {
  * Those posts enter the same persistence/AI pipeline through /api/device/ingest.
  */
 export class MonitoringWorker {
-  private isRunning = false;
+  private readonly runningUsers = new Set<string>();
 
   async runScan(userId: string = 'user_default', isDemoMode: boolean = false): Promise<MonitoringJobResult> {
-    if (this.isRunning) {
+    if (this.runningUsers.has(userId)) {
       return {
         sourcesScanned: 0,
         deviceManagedSources: 0,
@@ -42,7 +42,7 @@ export class MonitoringWorker {
       };
     }
 
-    this.isRunning = true;
+    this.runningUsers.add(userId);
     const result: MonitoringJobResult = {
       sourcesScanned: 0,
       deviceManagedSources: 0,
@@ -55,8 +55,6 @@ export class MonitoringWorker {
     try {
       const allSources = await db.getSources(userId);
       const activeSources = allSources.filter(source => !source.is_paused);
-      result.sourcesScanned = activeSources.length;
-
       if (activeSources.length === 0) return result;
 
       const allRules = await db.getRules(userId);
@@ -74,6 +72,9 @@ export class MonitoringWorker {
           continue;
         }
 
+        // Count a server-side source as scanned only when this worker actually attempts its fetch.
+        // Device-managed sources are reported separately and are not double-counted by the client.
+        result.sourcesScanned++;
         try {
           const sourceRules = activeRules.filter(rule =>
             !rule.source_ids || rule.source_ids.length === 0 || rule.source_ids.includes(source.id)
@@ -168,7 +169,7 @@ export class MonitoringWorker {
         }
       }
     } finally {
-      this.isRunning = false;
+      this.runningUsers.delete(userId);
     }
 
     return result;
