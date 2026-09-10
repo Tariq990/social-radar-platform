@@ -1,0 +1,74 @@
+name: Android Product v155 Source Fix
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-product-v155-source-fix.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  commit-source:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: test/android-headless-emulator-20260909
+          fetch-depth: 0
+          clean: false
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Apply exact product patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/v155-product-patch.py
+          git diff --check
+          grep -q 'btn-extracted-posts-home' src/screens/RadarHomeScreen.tsx
+          grep -q 'data-extracted-video' src/components/ExtractedPostsModal.tsx
+          grep -q 'INCOMPLETE_SOURCE_METADATA' src/components/AddSourceModal.tsx
+          grep -q 'includeMedia' src/connectors/deviceSessionConnector.ts
+          grep -q 'ForegroundWebViewHost.attachIfPossible' android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSourceMetadataResolver.java
+          echo PRODUCT_PATCH_GATE=PASS
+
+      - name: Install dependencies if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -x node_modules/.bin/tsc ] || [ ! -x node_modules/.bin/tsx ]; then npm install --no-audit --no-fund; fi
+          node --version
+          npm --version
+
+      - name: Typecheck and tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run lint
+          npm test
+          echo PRODUCT_TYPES_TESTS_GATE=PASS
+
+      - name: Commit exact source changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/connectors/deviceSessionConnector.ts src/components/AddSourceModal.tsx src/components/ExtractedPostsModal.tsx src/screens/RadarHomeScreen.tsx android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSourceMetadataResolver.java android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSocialSessionPlugin.java
+          git diff --cached --check
+          git diff --cached --quiet && { echo 'NO_PRODUCT_CHANGES=1'; exit 1; }
+          git commit -m 'fix: show extracted media and require real source identity'
+          sha="$(git rev-parse HEAD)"
+          git push origin HEAD:test/android-headless-emulator-20260909
+          echo "PRODUCT_SOURCE_COMMIT=$sha"
+          echo PRODUCT_SOURCE_COMMIT_GATE=PASS
