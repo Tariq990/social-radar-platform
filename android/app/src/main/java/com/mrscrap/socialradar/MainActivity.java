@@ -15,6 +15,8 @@ import com.getcapacitor.BridgeActivity;
 
 import org.json.JSONObject;
 
+import java.util.List;
+
 public class MainActivity extends BridgeActivity {
     private static final int REQUEST_NOTIFICATIONS = 2401;
 
@@ -76,9 +78,8 @@ public class MainActivity extends BridgeActivity {
     }
 
     private void deliverNavigationIntent(Uri data) {
-        if (data == null || !"mrscrap".equalsIgnoreCase(data.getScheme())) return;
-        String screen = data.getHost();
-        if (!"alerts".equals(screen) && !"radar".equals(screen) && !"watchlist".equals(screen)) return;
+        String screen = screenFromNavigationUri(data);
+        if (screen == null) return;
         try {
             JSONObject payload = new JSONObject();
             payload.put("screen", screen);
@@ -86,6 +87,23 @@ public class MainActivity extends BridgeActivity {
                 "window.dispatchEvent(new CustomEvent('mrscrap:navigate',{detail:" + payload.toString() + "}));";
             bridge.getWebView().post(() -> bridge.getWebView().evaluateJavascript(javascript, null));
         } catch (Exception ignored) { }
+    }
+
+    private String screenFromNavigationUri(Uri data) {
+        if (data == null) return null;
+        String scheme = data.getScheme();
+        String screen = null;
+        if ("mrscrap".equalsIgnoreCase(scheme)) {
+            screen = data.getHost();
+        } else if ("https".equalsIgnoreCase(scheme) && "mrscrap.app".equalsIgnoreCase(data.getHost())) {
+            List<String> segments = data.getPathSegments();
+            if (!segments.isEmpty()) screen = segments.get(0);
+            if ((screen == null || screen.isBlank()) && data.getQueryParameter("screen") != null) {
+                screen = data.getQueryParameter("screen");
+            }
+        }
+        if (!"alerts".equals(screen) && !"radar".equals(screen) && !"watchlist".equals(screen)) return null;
+        return screen;
     }
 
     private void deliverSharedIntent(Intent intent) {
