@@ -54,6 +54,16 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      - name: Configure Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/.android/sdk}}"
+          sdk="$(realpath "$sdk")"
+          test -d "$sdk/platforms/android-36"
+          test -d "$sdk/build-tools/36.0.0"
+          printf 'sdk.dir=%s\n' "$sdk" > android/local.properties
+
       - name: Verify pinned Gradle 8.13
         shell: bash
         run: |
