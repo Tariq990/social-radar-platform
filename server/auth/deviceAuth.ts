@@ -142,7 +142,7 @@ export async function requireDeviceAuth(req: Request, res: Response, next: NextF
     res.locals.deviceId = identity.deviceId;
     res.locals.devicePlatform = identity.platform;
     return next();
-  } catch (error: any) {
-    return res.status(503).json({ error: error?.message || 'Device authorization unavailable' });
+  } catch {
+    return res.status(503).json({ error: 'Device authorization unavailable' });
   }
 }
