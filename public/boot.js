@@ -14,6 +14,13 @@
     const savedLocale = localStorage.getItem('mrscrap_locale_v2') || 'en';
     root.lang = savedLocale;
     root.dir = savedLocale === 'ar' ? 'rtl' : 'ltr';
+
+    const fonts = document.getElementById('mrscrap-fonts');
+    if (fonts) {
+      const enableFonts = () => fonts.setAttribute('media', 'all');
+      fonts.addEventListener('load', enableFonts, { once: true });
+      if (fonts.sheet) enableFonts();
+    }
   } catch {
     // Defaults from index.html remain authoritative when storage is unavailable.
   }
