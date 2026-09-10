@@ -1,0 +1,73 @@
+name: Android v159 Share Target Preproof
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-v159-share-target-preproof.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  prove:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 8
+    env:
+      PKG: com.mrscrap.socialradar
+    steps:
+      - name: Prove Android SEND opens Add Source and preserves identity-bearing URL text
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"; test -x "$adb"
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1;exit}')"; test -n "$serial"
+          test "$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1)" = 1
+          version="$($adb -s "$serial" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"; echo "INSTALLED_VERSION_CODE=$version"; test "$version" = 159
+          marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"; printf '%s' "$marker" | grep -q facebook_connected_at; echo FACEBOOK_SESSION_PRESENT=1
+
+          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-v159-share-target.ps1"
+          cat > "$ps1" <<'PS'
+          param([int]$Port,[string]$ExpectedB64,[string]$Label)
+          $ErrorActionPreference='Stop'
+          $expected=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($ExpectedB64))
+          function Target { for($i=0;$i-lt 120;$i++){try{$rows=@(Invoke-RestMethod -Uri "http://127.0.0.1:$Port/json/list" -TimeoutSec 2);$hits=@($rows|Where-Object{$_.type-eq'page'-and[string]$_.url-like'https://localhost*'});if($hits.Count-gt 0){return $hits[0]}}catch{};Start-Sleep -Milliseconds 250};throw 'app target missing'}
+          function Eval([string]$expr,[int]$seconds=90){$t=Target;$raw=[string](@($t)[0].webSocketDebuggerUrl);$u=[Uri]$raw;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($seconds));$ws.ConnectAsync([Uri]("ws://127.0.0.1:$Port"+$u.PathAndQuery),$cts.Token).GetAwaiter().GetResult()|Out-Null;$p=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 10;$b=[Text.Encoding]::UTF8.GetBytes($p);$ws.SendAsync([ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null;$buf=New-Object byte[] 131072;$sb=[Text.StringBuilder]::new();while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id-ne 1){continue};if($m.result.exceptionDetails){throw 'runtime eval exception'};return $m.result.result.value}}
+          $q=$expected|ConvertTo-Json -Compress
+          $expr="(()=>{const expected=$q;let text='';try{const p=JSON.parse(sessionStorage.getItem('mrscrap_pending_share')||'{}');text=typeof p?.text==='string'?p.text:''}catch{}const modal=Boolean(document.querySelector('#modal-add-source'));const input=document.querySelector('#input-source-url');const value=input&&typeof input.value==='string'?input.value:'';const exact=text===expected;let identity=true;try{const e=new URL(expected),a=new URL(text);for(const k of ['story_fbid','id','fbid']){if(e.searchParams.has(k)&&a.searchParams.get(k)!==e.searchParams.get(k))identity=false}}catch{identity=false}return{exact,identity,modal,inputPresent:Boolean(input),inputExact:!input||value===expected}})()"
+          $r=Eval $expr 90
+          Write-Output ($Label+'_PENDING_EXACT='+$(if($r.exact){'1'}else{'0'}))
+          Write-Output ($Label+'_IDENTITY_QUERY_PRESERVED='+$(if($r.identity){'1'}else{'0'}))
+          Write-Output ($Label+'_ADD_SOURCE_MODAL='+$(if($r.modal){'1'}else{'0'}))
+          Write-Output ($Label+'_INPUT_PRESENT='+$(if($r.inputPresent){'1'}else{'0'}))
+          Write-Output ($Label+'_INPUT_EXACT_OR_RESOLVING='+$(if($r.inputExact){'1'}else{'0'}))
+          if(!$r.exact -or !$r.identity -or !$r.modal -or !$r.inputExact){exit 253}
+          PS
+
+          probe_share() {
+            label="$1"; url="$2"; port="$3"
+            "$adb" -s "$serial" shell am force-stop "$PKG" >/dev/null 2>&1 || true
+            "$adb" -s "$serial" shell am start -W -a android.intent.action.SEND -t text/plain --es android.intent.extra.TEXT "$url" -n "$PKG/.MainActivity" >/dev/null
+            sleep 4
+            pid="$($adb -s "$serial" shell pidof "$PKG" 2>/dev/null | tr -d '\r' | awk '{print $1}')"; test -n "$pid"
+            socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | grep -E "${pid}$|_${pid}($|_)" | head -n1 || true)"
+            [ -n "$socket" ] || socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | head -n1 || true)"; test -n "$socket"
+            "$adb" -s "$serial" forward --remove tcp:$port >/dev/null 2>&1 || true
+            "$adb" -s "$serial" forward tcp:$port "localabstract:$socket" >/dev/null
+            b64="$(printf '%s' "$url" | base64 -w0)"
+            /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" -Port "$port" -ExpectedB64 "$b64" -Label "$label" | tr -d '\r'
+            "$adb" -s "$serial" forward --remove tcp:$port >/dev/null 2>&1 || true
+          }
+
+          probe_share PAGE 'https://www.facebook.com/NASA/' 9250
+          probe_share POST_PATH 'https://www.facebook.com/NASA/posts/123456789' 9251
+          probe_share STORY_QUERY 'https://www.facebook.com/story.php?story_fbid=111&id=222&utm_source=share_probe' 9252
+
+          marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"; printf '%s' "$marker" | grep -q facebook_connected_at
+          rm -f "$ps1" 2>/dev/null || true
+          echo FACEBOOK_SESSION_AFTER_SHARE_PREPROOF=1
+          echo V159_ANDROID_SHARE_TARGET_PREPROOF=PASS
