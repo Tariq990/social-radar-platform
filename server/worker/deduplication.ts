@@ -97,7 +97,7 @@ export function computePostFingerprint(
 /**
  * Normalizes a social URL without deleting query parameters that identify the actual post
  * (for example Facebook story_fbid/id). Cleartext HTTP is upgraded to HTTPS and only known
- * tracking/noise parameters are removed.
+ * tracking/noise parameters are removed. Malformed or unsupported inputs fail closed.
  */
 export function canonicalizeSocialUrl(rawUrl: string): string {
   if (!rawUrl) return '';
@@ -114,6 +114,6 @@ export function canonicalizeSocialUrl(rawUrl: string): string {
 
     return parsed.toString().replace(/\/$/, '');
   } catch {
-    return rawUrl.trim();
+    return '';
   }
 }
