@@ -1,0 +1,194 @@
+name: Android v159 Source Identity Commit
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-v159-source-identity-commit.yml]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  patch-test-commit:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 12
+    steps:
+      - name: Checkout exact lane
+        uses: actions/checkout@v4
+        with:
+          ref: test/android-headless-emulator-20260909
+          fetch-depth: 0
+          clean: false
+
+      - name: Integrate persisted presentation metadata cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          radar = Path('src/context/RadarContext.tsx')
+          s = radar.read_text()
+          imp = "import { extractSupportedSocialUrl } from '../lib/socialUrl';\n"
+          add = "import { isGenericSourceIdentityName, mergeCachedSourceIdentity, rememberSourceIdentity } from '../lib/sourceIdentityCache';\n"
+          if add not in s:
+              assert s.count(imp) == 1
+              s = s.replace(imp, imp + add, 1)
+
+          old = ("function isGenericVisibleSourceName(value: string | undefined, source: Pick<Source, 'externalId' | 'handle'>): boolean {\n"
+                 "  const normalize = (input?: string) => (input || '').trim().replace(/^@/, '').toLowerCase();\n"
+                 "  const name = normalize(value);\n"
+                 "  const generic = new Set(['facebook', 'instagram', 'page', 'profile', normalize(source.externalId), normalize(source.handle)].filter(Boolean));\n"
+                 "  return !name || generic.has(name);\n"
+                 "}\n")
+          new = ("function isGenericVisibleSourceName(value: string | undefined, source: Pick<Source, 'externalId' | 'handle'>): boolean {\n"
+                 "  return isGenericSourceIdentityName(value, source);\n"
+                 "}\n")
+          if old in s:
+              s = s.replace(old, new, 1)
+
+          old = ("  return {\n"
+                 "    ...source,\n"
+                 "    displayName: metadata.displayName?.trim() || source.displayName,\n"
+                 "    avatarUrl: metadata.avatarUrl?.trim() || source.avatarUrl,\n"
+                 "    handle: metadata.handle?.trim() || source.handle\n"
+                 "  };\n"
+                 "}\n")
+          new = ("  const healed = {\n"
+                 "    ...source,\n"
+                 "    displayName: metadata.displayName?.trim() || source.displayName,\n"
+                 "    avatarUrl: metadata.avatarUrl?.trim() || source.avatarUrl,\n"
+                 "    handle: metadata.handle?.trim() || source.handle\n"
+                 "  };\n"
+                 "  rememberSourceIdentity(healed);\n"
+                 "  return healed;\n"
+                 "}\n")
+          if old in s:
+              s = s.replace(old, new, 1)
+
+          old = ("        setSources(previous => previous.map(item => item.id === source.id ? {\n"
+                 "          ...item,\n"
+                 "          displayName: realName || item.displayName,\n"
+                 "          avatarUrl: avatarUrl || item.avatarUrl,\n"
+                 "          handle: resolved.handle?.trim() || item.handle,\n"
+                 "          connectorStatus: 'authenticated_monitoring'\n"
+                 "        } : item));\n")
+          new = ("        const healedIdentity: Source = {\n"
+                 "          ...source,\n"
+                 "          displayName: realName || source.displayName,\n"
+                 "          avatarUrl: avatarUrl || source.avatarUrl,\n"
+                 "          handle: resolved.handle?.trim() || source.handle,\n"
+                 "          connectorStatus: 'authenticated_monitoring'\n"
+                 "        };\n"
+                 "        rememberSourceIdentity(healedIdentity);\n"
+                 "        setSources(previous => previous.map(item => item.id === source.id ? {\n"
+                 "          ...item,\n"
+                 "          displayName: realName || item.displayName,\n"
+                 "          avatarUrl: avatarUrl || item.avatarUrl,\n"
+                 "          handle: resolved.handle?.trim() || item.handle,\n"
+                 "          connectorStatus: 'authenticated_monitoring'\n"
+                 "        } : item));\n")
+          if old in s:
+              s = s.replace(old, new, 1)
+
+          old = "      const hydratedSources = dbSources.map(source => ({\n"
+          new = "      const cachedSources = dbSources.map(mergeCachedSourceIdentity);\n      const hydratedSources = cachedSources.map(source => ({\n"
+          if old in s:
+              s = s.replace(old, new, 1)
+
+          old = ("    const persistedSource = await apiCreateSource({\n"
+                 "      platform: sourceData.platform, externalId: sourceData.externalId, url: sourceData.url, name: sourceData.displayName,\n"
+                 "      handle: sourceData.handle, avatarUrl: sourceData.avatarUrl, bio: sourceData.bio, visibilityType: sourceData.visibilityType, connectorType: sourceData.connectorType\n"
+                 "    });\n")
+          new = ("    let persistedSource = await apiCreateSource({\n"
+                 "      platform: sourceData.platform, externalId: sourceData.externalId, url: sourceData.url, name: sourceData.displayName,\n"
+                 "      handle: sourceData.handle, avatarUrl: sourceData.avatarUrl, bio: sourceData.bio, visibilityType: sourceData.visibilityType, connectorType: sourceData.connectorType\n"
+                 "    });\n"
+                 "    rememberSourceIdentity({ ...persistedSource, ...sourceData });\n"
+                 "    persistedSource = mergeCachedSourceIdentity(persistedSource);\n")
+          if old in s:
+              s = s.replace(old, new, 1)
+
+          for token in [add.strip(), 'rememberSourceIdentity(healed);', 'rememberSourceIdentity(healedIdentity);', 'dbSources.map(mergeCachedSourceIdentity)', 'rememberSourceIdentity({ ...persistedSource, ...sourceData });']:
+              assert token in s, token
+          radar.write_text(s)
+
+          modal = Path('src/components/ExtractedPostsModal.tsx')
+          m = modal.read_text()
+          imp = "import { apiFetchSources } from '../services/api';\n"
+          add = "import { mergeCachedSourceIdentity } from '../lib/sourceIdentityCache';\n"
+          if add not in m:
+              assert m.count(imp) == 1
+              m = m.replace(imp, imp + add, 1)
+          replacements = [
+              ("const [runtimeSources, setRuntimeSources] = useState<Source[]>(sources);", "const [runtimeSources, setRuntimeSources] = useState<Source[]>(() => sources.map(mergeCachedSourceIdentity));"),
+              ("useEffect(() => { if (sources.length > 0) setRuntimeSources(sources); }, [sources]);", "useEffect(() => { if (sources.length > 0) setRuntimeSources(sources.map(mergeCachedSourceIdentity)); }, [sources]);"),
+              ("if (Array.isArray(fresh) && fresh.length > 0) availableSources = fresh;", "if (Array.isArray(fresh) && fresh.length > 0) availableSources = fresh.map(mergeCachedSourceIdentity);"),
+              ("if (Array.isArray(retry) && retry.length > 0) availableSources = retry;", "if (Array.isArray(retry) && retry.length > 0) availableSources = retry.map(mergeCachedSourceIdentity);"),
+              ("setRuntimeSources(availableSources);", "setRuntimeSources(availableSources.map(mergeCachedSourceIdentity));")
+          ]
+          for old, new in replacements:
+              if old in m:
+                  m = m.replace(old, new, 1)
+          for token in [add.strip(), 'fresh.map(mergeCachedSourceIdentity)', 'retry.map(mergeCachedSourceIdentity)', 'availableSources.map(mergeCachedSourceIdentity)']:
+              assert token in m, token
+          modal.write_text(m)
+
+          tests = Path('server/tests/architectureRegression.test.ts')
+          t = tests.read_text()
+          marker = "test('safe source identity cache heals legacy placeholder metadata across Android restarts'"
+          if marker not in t:
+              lines = [
+                  '', '',
+                  "test('safe source identity cache heals legacy placeholder metadata across Android restarts', () => {",
+                  "  const cache = read('src/lib/sourceIdentityCache.ts');",
+                  "  const radar = read('src/context/RadarContext.tsx');",
+                  "  const modal = read('src/components/ExtractedPostsModal.tsx');",
+                  "  assert.match(cache, /mrscrap_source_identity_cache_v1/);",
+                  "  assert.match(cache, /rememberSourceIdentity/);",
+                  "  assert.match(cache, /mergeCachedSourceIdentity/);",
+                  "  assert.doesNotMatch(cache, /token\\s*\\?:\\s*string/);",
+                  "  assert.doesNotMatch(cache, /cookie\\s*\\?:\\s*string/i);",
+                  "  assert.match(radar, /dbSources\\.map\\(mergeCachedSourceIdentity\\)/);",
+                  "  assert.match(radar, /rememberSourceIdentity\\(healedIdentity\\)/);",
+                  "  assert.match(modal, /fresh\\.map\\(mergeCachedSourceIdentity\\)/);",
+                  "});",
+                  ''
+              ]
+              t += '\n'.join(lines)
+          tests.write_text(t)
+          print('V159_IDENTITY_INTEGRATION_PATCH=PASS')
+          PY
+          git diff --check
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Lint and test
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -x node_modules/.bin/tsc ] || [ ! -x node_modules/.bin/tsx ]; then npm install --no-audit --no-fund; fi
+          npm run lint
+          npm test
+          echo V159_LINT_TEST_GATE=PASS
+
+      - name: Commit only product source changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/lib/sourceIdentityCache.ts src/context/RadarContext.tsx src/components/ExtractedPostsModal.tsx server/tests/architectureRegression.test.ts
+          git diff --cached --check
+          git diff --cached --quiet && { echo NO_V159_SOURCE_CHANGES=1; exit 1; }
+          git commit -m 'fix: persist resolved source identity across Android restarts'
+          sha="$(git rev-parse HEAD)"
+          git push origin HEAD:test/android-headless-emulator-20260909
+          echo "V159_SOURCE_COMMIT=$sha"
+          echo V159_SOURCE_COMMIT_GATE=PASS
