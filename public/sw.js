@@ -1,7 +1,8 @@
-const CACHE_NAME = 'mr-scrap-v3';
+const CACHE_NAME = 'mr-scrap-v4';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
+  '/boot.js',
   '/manifest.json',
   '/icon.svg'
 ];
