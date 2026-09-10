@@ -1,0 +1,64 @@
+name: Android Physical Wireless ADB Recovery
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-physical-wireless-adb-recovery.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 5
+    steps:
+      - name: Probe paired wireless Android ADB without exposing endpoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"
+          test -x "$adb"
+
+          # Refresh mDNS discovery only; never print service names, IPs, ports, serials or hardware IDs.
+          mdns="$($adb mdns services 2>/dev/null | tr -d '\r' || true)"
+          connect_count="$(printf '%s\n' "$mdns" | awk '/_adb-tls-connect\._tcp/ {c++} END{print c+0}')"
+          pairing_count="$(printf '%s\n' "$mdns" | awk '/_adb-tls-pairing\._tcp/ {c++} END{print c+0}')"
+          echo "ADB_MDNS_CONNECT_SERVICE_COUNT=$connect_count"
+          echo "ADB_MDNS_PAIRING_SERVICE_COUNT=$pairing_count"
+
+          attempted=0
+          connected=0
+          if [ "$connect_count" -eq 1 ]; then
+            endpoint="$(printf '%s\n' "$mdns" | awk '/_adb-tls-connect\._tcp/ {print $NF; exit}')"
+            if [ -n "$endpoint" ]; then
+              attempted=1
+              if $adb connect "$endpoint" >/dev/null 2>&1; then connected=1; fi
+            fi
+          fi
+          echo "ADB_WIRELESS_CONNECT_ATTEMPTED=$attempted"
+          echo "ADB_WIRELESS_CONNECT_COMMAND_OK=$connected"
+
+          sleep 2
+          raw="$($adb devices 2>/dev/null | tr -d '\r' || true)"
+          physical_ok="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 !~ /^emulator-/ && $2=="device" {c++} END{print c+0}')"
+          physical_unauth="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 !~ /^emulator-/ && $2=="unauthorized" {c++} END{print c+0}')"
+          physical_offline="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 !~ /^emulator-/ && $2=="offline" {c++} END{print c+0}')"
+          echo "ADB_PHYSICAL_AUTHORIZED_COUNT=$physical_ok"
+          echo "ADB_PHYSICAL_UNAUTHORIZED_COUNT=$physical_unauth"
+          echo "ADB_PHYSICAL_OFFLINE_COUNT=$physical_offline"
+
+          if [ "$physical_ok" -gt 0 ]; then
+            echo PHYSICAL_WIRELESS_ADB_RECOVERED=1
+          elif [ "$connect_count" -eq 0 ] && [ "$pairing_count" -eq 0 ]; then
+            echo PHYSICAL_WIRELESS_ADB_DISCOVERY=NONE
+          elif [ "$pairing_count" -gt 0 ] && [ "$connect_count" -eq 0 ]; then
+            echo PHYSICAL_WIRELESS_ADB_DISCOVERY=PAIRING_REQUIRED
+          else
+            echo PHYSICAL_WIRELESS_ADB_DISCOVERY=CONNECT_NOT_AUTHORIZED
+          fi
