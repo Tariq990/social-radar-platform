@@ -4,6 +4,8 @@ import { Source, WatchRule, AlertMatch, NormalizedPost, ConnectorStatus, Connect
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
 const DEFAULT_ANDROID_API_BASE_URL = 'https://mr-scrap-api-live.onrender.com';
 const DEVICE_AUTH_STORAGE_KEY = 'mrscrap_backend_device_auth_v1';
+const DEFAULT_API_TIMEOUT_MS = 45_000;
+const MAX_API_RESPONSE_BYTES = 4 * 1024 * 1024;
 
 interface NativeBackendAuthPlugin {
   getBackendAuth(): Promise<{ configured: boolean; userId?: string; deviceId?: string; token?: string; platform?: string }>;
@@ -48,7 +50,18 @@ function isNativeAndroid(): boolean {
 }
 
 function resolvedApiBaseUrl(): string {
-  return API_BASE_URL || (isNativeAndroid() ? DEFAULT_ANDROID_API_BASE_URL : '');
+  const resolved = API_BASE_URL || (isNativeAndroid() ? DEFAULT_ANDROID_API_BASE_URL : '');
+  if (isNativeAndroid() && resolved) {
+    try {
+      const parsed = new URL(resolved);
+      if (parsed.protocol !== 'https:') throw new Error('Android API origin must use HTTPS.');
+      return parsed.toString().replace(/\/+$/, '');
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Android API origin must use HTTPS.') throw error;
+      throw new Error('Android API origin is invalid.');
+    }
+  }
+  return resolved;
 }
 
 export function getApiBaseUrl(): string {
@@ -58,29 +71,71 @@ export function getApiBaseUrl(): string {
 function apiUrl(path: string): string {
   if (!path.startsWith('/')) path = `/${path}`;
   const baseUrl = resolvedApiBaseUrl();
-  if (isNativeAndroid() && !baseUrl) {
-    throw new Error('Android build is missing a public HTTPS backend origin.');
-  }
+  if (isNativeAndroid() && !baseUrl) throw new Error('Android build is missing a public HTTPS backend origin.');
   return `${baseUrl}${path}`;
 }
 
-async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(apiUrl(path), {
-    credentials: 'include',
-    ...(init || {})
-  });
-  const raw = await response.text();
-  let body: any = null;
-  try {
-    body = raw ? JSON.parse(raw) : null;
-  } catch {
-    body = null;
-  }
+async function readBoundedResponseText(response: Response): Promise<string> {
+  const declared = Number(response.headers.get('content-length') || 0);
+  if (Number.isFinite(declared) && declared > MAX_API_RESPONSE_BYTES) throw new Error('Backend response exceeded the 4 MB safety limit.');
+  if (!response.body) return '';
 
-  if (!response.ok) {
-    throw new ApiRequestError(response.status, body?.error || body?.message || `Request failed with HTTP ${response.status}`);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let raw = '';
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_API_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw new Error('Backend response exceeded the 4 MB safety limit.');
+      }
+      raw += decoder.decode(value, { stream: true });
+    }
+    raw += decoder.decode();
+    return raw;
+  } finally {
+    reader.releaseLock();
   }
-  return body as T;
+}
+
+async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const controller = new AbortController();
+  const upstreamSignal = init?.signal;
+  const onUpstreamAbort = () => controller.abort();
+  if (upstreamSignal?.aborted) controller.abort();
+  else upstreamSignal?.addEventListener('abort', onUpstreamAbort, { once: true });
+  const timeout = globalThis.setTimeout(() => controller.abort(), DEFAULT_API_TIMEOUT_MS);
+  const { signal: _ignoredSignal, ...restInit } = init || {};
+
+  try {
+    const response = await fetch(apiUrl(path), {
+      credentials: 'include',
+      ...restInit,
+      signal: controller.signal
+    });
+    const raw = await readBoundedResponseText(response);
+    let body: any = null;
+    try {
+      body = raw ? JSON.parse(raw) : null;
+    } catch {
+      body = null;
+    }
+
+    if (!response.ok) {
+      throw new ApiRequestError(response.status, body?.error || body?.message || `Request failed with HTTP ${response.status}`);
+    }
+    return body as T;
+  } catch (error: any) {
+    if (error?.name === 'AbortError' && !upstreamSignal?.aborted) throw new Error('Backend request timed out.');
+    throw error;
+  } finally {
+    globalThis.clearTimeout(timeout);
+    upstreamSignal?.removeEventListener('abort', onUpstreamAbort);
+  }
 }
 
 function detectClientPlatform(): 'web' | 'android' | 'ios' {
@@ -98,10 +153,9 @@ function detectClientPlatform(): 'web' | 'android' | 'ios' {
 function validateDeviceAuth(value: any): ApiDeviceAuthSession | null {
   if (
     value &&
-    typeof value.userId === 'string' &&
-    typeof value.deviceId === 'string' &&
-    typeof value.token === 'string' &&
-    value.token.length >= 24 && value.token.length <= 512
+    typeof value.userId === 'string' && value.userId.length > 0 && value.userId.length <= 255 &&
+    typeof value.deviceId === 'string' && value.deviceId.length > 0 && value.deviceId.length <= 255 &&
+    typeof value.token === 'string' && value.token.length >= 24 && value.token.length <= 512
   ) {
     return {
       userId: value.userId,
@@ -156,9 +210,7 @@ export async function apiGetAuthSession(): Promise<AppAuthSessionResponse> {
   const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
   authSessionPromise = requestJson<AppAuthSessionResponse>('/api/auth/me', { signal: controller.signal })
     .catch(error => {
-      if (error instanceof ApiRequestError && error.status === 401) {
-        return { authenticated: false, user: null } as AppAuthSessionResponse;
-      }
+      if (error instanceof ApiRequestError && error.status === 401) return { authenticated: false, user: null } as AppAuthSessionResponse;
       throw error;
     })
     .finally(() => {
@@ -309,11 +361,36 @@ function normalizeSourcePlatform(value: unknown): SourcePlatform {
   return 'other';
 }
 
+function safeHttpsUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  try {
+    const parsed = new URL(value.trim());
+    if (!['http:', 'https:'].includes(parsed.protocol)) return undefined;
+    if (parsed.protocol === 'http:') parsed.protocol = 'https:';
+    return parsed.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function safeSocialUrl(value: unknown, platform: SourcePlatform): string | undefined {
+  const normalized = safeHttpsUrl(value);
+  if (!normalized || (platform !== 'facebook' && platform !== 'instagram')) return undefined;
+  const host = new URL(normalized).hostname.toLowerCase();
+  const facebook = host === 'facebook.com' || host.endsWith('.facebook.com') || host === 'fb.com' || host.endsWith('.fb.com') || host === 'fb.watch';
+  const instagram = host === 'instagram.com' || host.endsWith('.instagram.com') || host === 'instagr.am' || host.endsWith('.instagr.am');
+  return (platform === 'facebook' ? facebook : instagram) ? normalized : undefined;
+}
+
 function normalizeMedia(value: unknown): NormalizedPost['media'] {
   if (!Array.isArray(value)) return [];
-  return value
-    .filter((item: any) => item && (item.type === 'image' || item.type === 'video') && typeof item.url === 'string')
-    .map((item: any) => ({ type: item.type, url: item.url, previewUrl: item.previewUrl }));
+  return value.flatMap((item: any) => {
+    if (!item || (item.type !== 'image' && item.type !== 'video')) return [];
+    const url = safeHttpsUrl(item.url);
+    if (!url) return [];
+    const previewUrl = safeHttpsUrl(item.previewUrl);
+    return [{ type: item.type, url, ...(previewUrl ? { previewUrl } : {}) }];
+  }).slice(0, 20);
 }
 
 export async function apiCheckHealth(): Promise<HealthResponse> {
@@ -324,10 +401,7 @@ export async function apiGetConfig(): Promise<ConfigResponse> {
   return requestJson<ConfigResponse>('/api/config');
 }
 
-/**
- * Normalize only real persisted server matches. Malformed records are rejected instead of
- * manufacturing source names, images, post text, confidence, or timestamps.
- */
+/** Normalize only real persisted server matches; malformed records are rejected. */
 export function normalizeAlertMatch(raw: any): AlertMatch {
   if (!raw || typeof raw !== 'object') throw new Error('Malformed alert record');
   const id = raw.id;
@@ -335,42 +409,42 @@ export function normalizeAlertMatch(raw: any): AlertMatch {
   const postId = raw.post_id || raw.postId || postRaw?.id;
   const ruleId = raw.rule_id || raw.ruleId;
   const sourceId = raw.source_id || raw.sourceId;
-  if (![id, postId, ruleId, sourceId].every(v => typeof v === 'string' && v.length > 0)) {
-    throw new Error('Alert record is missing persistent identifiers');
-  }
+  if (![id, postId, ruleId, sourceId].every(v => typeof v === 'string' && v.length > 0)) throw new Error('Alert record is missing persistent identifiers');
   if (!postRaw || typeof postRaw !== 'object') throw new Error('Alert record is missing persisted post data');
 
-  const sourceName = raw.source_name || raw.sourceName || postRaw.author_name || postRaw.authorName || '';
-  const sourceAvatar = raw.source_avatar || raw.sourceAvatar || postRaw.author_avatar || postRaw.authorAvatar || '';
   const platform = normalizeSourcePlatform(raw.source_platform || raw.sourcePlatform || postRaw.platform);
-  const originalUrl = postRaw.canonical_url || postRaw.originalUrl;
-  if (typeof originalUrl !== 'string' || !originalUrl) throw new Error('Alert post is missing canonical URL');
-
+  if (platform === 'other') throw new Error('Alert record has an unsupported source platform');
+  const originalUrl = safeSocialUrl(postRaw.canonical_url || postRaw.originalUrl, platform);
+  if (!originalUrl) throw new Error('Alert post is missing a valid canonical social URL');
+  const sourceName = typeof (raw.source_name || raw.sourceName || postRaw.author_name || postRaw.authorName) === 'string'
+    ? String(raw.source_name || raw.sourceName || postRaw.author_name || postRaw.authorName).trim().slice(0, 255)
+    : '';
+  const sourceAvatar = safeHttpsUrl(raw.source_avatar || raw.sourceAvatar || postRaw.author_avatar || postRaw.authorAvatar) || '';
   const confidence = typeof raw.confidence === 'number' ? raw.confidence : Number(raw.confidence);
   if (!Number.isFinite(confidence)) throw new Error('Alert record has invalid confidence');
 
   const post: NormalizedPost = {
-    id: postRaw.id || postId,
+    id: typeof postRaw.id === 'string' && postRaw.id ? postRaw.id : postId,
     sourceId,
     platform,
-    externalPostId: postRaw.external_id || postRaw.externalPostId,
+    externalPostId: typeof (postRaw.external_id || postRaw.externalPostId) === 'string' ? (postRaw.external_id || postRaw.externalPostId) : undefined,
     originalUrl,
     authorName: sourceName,
     authorAvatar: sourceAvatar || undefined,
     text: typeof postRaw.text === 'string' ? postRaw.text : '',
     media: normalizeMedia(postRaw.media),
-    publishedAt: postRaw.published_at || postRaw.publishedAt || '',
-    detectedAt: postRaw.created_at || postRaw.detectedAt || '',
-    fingerprint: postRaw.fingerprint || postRaw.external_id || originalUrl,
-    metadata: postRaw.metadata && typeof postRaw.metadata === 'object' ? postRaw.metadata : {}
+    publishedAt: typeof (postRaw.published_at || postRaw.publishedAt) === 'string' ? (postRaw.published_at || postRaw.publishedAt) : '',
+    detectedAt: typeof (postRaw.created_at || postRaw.detectedAt) === 'string' ? (postRaw.created_at || postRaw.detectedAt) : '',
+    fingerprint: typeof postRaw.fingerprint === 'string' && postRaw.fingerprint ? postRaw.fingerprint : (postRaw.external_id || originalUrl),
+    metadata: postRaw.metadata && typeof postRaw.metadata === 'object' && !Array.isArray(postRaw.metadata) ? postRaw.metadata : {}
   };
 
   return {
     id,
-    userId: raw.user_id || raw.userId || '',
+    userId: typeof (raw.user_id || raw.userId) === 'string' ? (raw.user_id || raw.userId) : '',
     postId,
     ruleId,
-    ruleName: raw.rule_name || raw.ruleName || '',
+    ruleName: typeof (raw.rule_name || raw.ruleName) === 'string' ? (raw.rule_name || raw.ruleName) : '',
     sourceId,
     sourceName,
     sourceAvatar,
@@ -379,34 +453,48 @@ export function normalizeAlertMatch(raw: any): AlertMatch {
     confidence: Math.max(0, Math.min(1, confidence)),
     category: typeof raw.category === 'string' ? raw.category : '',
     reason: typeof raw.reason === 'string' ? raw.reason : '',
-    extracted: raw.extracted && typeof raw.extracted === 'object' ? raw.extracted : {},
+    extracted: raw.extracted && typeof raw.extracted === 'object' && !Array.isArray(raw.extracted) ? raw.extracted : {},
     feedback: raw.feedback === 'relevant' || raw.feedback === 'not_relevant' ? raw.feedback : 'unrated',
     isRead: Boolean(raw.is_read ?? raw.isRead),
     isSaved: Boolean(raw.is_saved ?? raw.isSaved),
-    createdAt: raw.created_at || raw.createdAt || ''
+    createdAt: typeof (raw.created_at || raw.createdAt) === 'string' ? (raw.created_at || raw.createdAt) : ''
+  };
+}
+
+function normalizeSourceRecord(s: any): Source | null {
+  if (!s || typeof s !== 'object' || typeof s.id !== 'string' || !s.id) return null;
+  const platform = normalizeSourcePlatform(s.platform);
+  if (platform === 'other') return null;
+  const url = safeSocialUrl(s.url, platform);
+  if (!url) return null;
+  const connectorType: ConnectorType = s.connector_type === 'public_cloud' || s.connectorType === 'public_cloud'
+    ? 'public_cloud'
+    : s.connector_type === 'official_meta' || s.connectorType === 'official_meta'
+      ? 'official_meta'
+      : 'device_session';
+  return {
+    id: s.id,
+    userId: typeof (s.user_id || s.userId) === 'string' ? (s.user_id || s.userId) : '',
+    platform,
+    externalId: typeof (s.external_id || s.externalId) === 'string' ? (s.external_id || s.externalId) : '',
+    url,
+    displayName: typeof (s.name || s.displayName) === 'string' ? (s.name || s.displayName) : '',
+    handle: typeof s.handle === 'string' ? s.handle : '',
+    avatarUrl: safeHttpsUrl(s.avatar_url || s.avatarUrl) || '',
+    bio: typeof s.bio === 'string' ? s.bio : undefined,
+    visibilityType: s.visibility_type === 'public' ? 'public' : 'authenticated',
+    connectorType,
+    connectorStatus: normalizeConnectorStatus(s.connector_status || s.connectorStatus),
+    activeRulesCount: Math.max(0, Number(s.activeRulesCount || 0) || 0),
+    lastCheckedAt: typeof (s.last_checked_at || s.lastCheckedAt) === 'string' ? (s.last_checked_at || s.lastCheckedAt) : '',
+    isPaused: Boolean(s.is_paused ?? s.isPaused),
+    recentPostsCount: Math.max(0, Number(s.recentPostsCount || 0) || 0)
   };
 }
 
 export async function apiFetchSources(): Promise<Source[]> {
   const data = await requestJson<any[]>('/api/sources');
-  return (data || []).map((s: any) => ({
-    id: s.id,
-    userId: s.user_id || s.userId || '',
-    platform: normalizeSourcePlatform(s.platform),
-    externalId: s.external_id || s.externalId || '',
-    url: s.url || '',
-    displayName: s.name || s.displayName || '',
-    handle: s.handle || '',
-    avatarUrl: s.avatar_url || s.avatarUrl || '',
-    bio: s.bio,
-    visibilityType: s.visibility_type === 'public' ? 'public' : 'authenticated',
-    connectorType: (s.connector_type || s.connectorType || 'device_session') as ConnectorType,
-    connectorStatus: normalizeConnectorStatus(s.connector_status || s.connectorStatus),
-    activeRulesCount: Number(s.activeRulesCount || 0),
-    lastCheckedAt: s.last_checked_at || s.lastCheckedAt || '',
-    isPaused: Boolean(s.is_paused ?? s.isPaused),
-    recentPostsCount: Number(s.recentPostsCount || 0)
-  }));
+  return (Array.isArray(data) ? data : []).map(normalizeSourceRecord).filter((source): source is Source => Boolean(source));
 }
 
 export async function apiCreateSource(source: any): Promise<Source> {
@@ -415,23 +503,9 @@ export async function apiCreateSource(source: any): Promise<Source> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(source)
   });
-  return {
-    id: s.id,
-    userId: s.user_id || '',
-    platform: normalizeSourcePlatform(s.platform),
-    externalId: s.external_id || '',
-    url: s.url || '',
-    displayName: s.name || '',
-    handle: s.handle || '',
-    avatarUrl: s.avatar_url || '',
-    bio: s.bio,
-    visibilityType: s.visibility_type === 'public' ? 'public' : 'authenticated',
-    connectorType: (s.connector_type || 'device_session') as ConnectorType,
-    connectorStatus: normalizeConnectorStatus(s.connector_status),
-    activeRulesCount: 0,
-    lastCheckedAt: s.last_checked_at || '',
-    isPaused: Boolean(s.is_paused)
-  };
+  const normalized = normalizeSourceRecord(s);
+  if (!normalized) throw new Error('Backend returned an invalid source record');
+  return normalized;
 }
 
 export async function apiDeleteSource(id: string): Promise<void> {
@@ -443,22 +517,31 @@ export async function apiToggleSourcePause(id: string): Promise<boolean> {
   return Boolean(data.isPaused);
 }
 
-export async function apiFetchRules(): Promise<WatchRule[]> {
-  const data = await requestJson<any[]>('/api/rules');
-  return (data || []).map((r: any) => ({
+function normalizeRuleRecord(r: any, fallbackSourceIds: string[] = []): WatchRule | null {
+  if (!r || typeof r !== 'object' || typeof r.id !== 'string' || !r.id) return null;
+  const rawConfidence = Number(r.min_confidence ?? r.minConfidence ?? 0.8);
+  const sourceIds = Array.isArray(r.source_ids || r.sourceIds)
+    ? [...new Set((r.source_ids || r.sourceIds).filter((value: unknown): value is string => typeof value === 'string' && value.length > 0))]
+    : fallbackSourceIds;
+  return {
     id: r.id,
-    userId: r.user_id || r.userId || '',
-    name: r.name || '',
-    naturalLanguage: r.natural_language || r.naturalLanguage || '',
-    includeTerms: r.include_terms || r.includeTerms || [],
-    excludeTerms: r.exclude_terms || r.excludeTerms || [],
-    minConfidence: Number(r.min_confidence ?? r.minConfidence ?? 0.8),
+    userId: typeof (r.user_id || r.userId) === 'string' ? (r.user_id || r.userId) : '',
+    name: typeof r.name === 'string' ? r.name : '',
+    naturalLanguage: typeof (r.natural_language || r.naturalLanguage) === 'string' ? (r.natural_language || r.naturalLanguage) : '',
+    includeTerms: Array.isArray(r.include_terms || r.includeTerms) ? (r.include_terms || r.includeTerms).filter((v: unknown): v is string => typeof v === 'string') : [],
+    excludeTerms: Array.isArray(r.exclude_terms || r.excludeTerms) ? (r.exclude_terms || r.excludeTerms).filter((v: unknown): v is string => typeof v === 'string') : [],
+    minConfidence: Number.isFinite(rawConfidence) ? Math.max(0, Math.min(1, rawConfidence)) : 0.8,
     alertMode: r.alert_mode === 'digest' ? 'digest' : 'instant',
     enabled: Boolean(r.enabled),
-    collectionId: r.collection_id || r.collectionId,
-    sourceIds: r.source_ids || r.sourceIds || [],
-    createdAt: r.created_at || r.createdAt || ''
-  }));
+    collectionId: typeof (r.collection_id || r.collectionId) === 'string' ? (r.collection_id || r.collectionId) : undefined,
+    sourceIds,
+    createdAt: typeof (r.created_at || r.createdAt) === 'string' ? (r.created_at || r.createdAt) : ''
+  };
+}
+
+export async function apiFetchRules(): Promise<WatchRule[]> {
+  const data = await requestJson<any[]>('/api/rules');
+  return (Array.isArray(data) ? data : []).map(r => normalizeRuleRecord(r)).filter((rule): rule is WatchRule => Boolean(rule));
 }
 
 export async function apiCreateRule(rule: any, sourceIds: string[] = []): Promise<WatchRule> {
@@ -467,20 +550,9 @@ export async function apiCreateRule(rule: any, sourceIds: string[] = []): Promis
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ...rule, sourceIds })
   });
-  return {
-    id: r.id,
-    userId: r.user_id || '',
-    name: r.name || '',
-    naturalLanguage: r.natural_language || '',
-    includeTerms: r.include_terms || [],
-    excludeTerms: r.exclude_terms || [],
-    minConfidence: Number(r.min_confidence ?? 0.8),
-    alertMode: r.alert_mode === 'digest' ? 'digest' : 'instant',
-    enabled: Boolean(r.enabled),
-    collectionId: r.collection_id,
-    sourceIds: r.source_ids || sourceIds,
-    createdAt: r.created_at || ''
-  };
+  const normalized = normalizeRuleRecord(r, sourceIds);
+  if (!normalized) throw new Error('Backend returned an invalid rule record');
+  return normalized;
 }
 
 export async function apiDeleteRule(id: string): Promise<void> {
@@ -495,12 +567,9 @@ export async function apiToggleRule(id: string): Promise<boolean> {
 export async function apiFetchAlerts(): Promise<AlertMatch[]> {
   const data = await requestJson<any[]>('/api/alerts');
   const normalized: AlertMatch[] = [];
-  for (const record of data || []) {
-    try {
-      normalized.push(normalizeAlertMatch(record));
-    } catch (error) {
-      console.warn('[apiFetchAlerts] Ignoring malformed persisted alert record', error);
-    }
+  for (const record of Array.isArray(data) ? data : []) {
+    try { normalized.push(normalizeAlertMatch(record)); }
+    catch (error) { console.warn('[apiFetchAlerts] Ignoring malformed persisted alert record', error); }
   }
   return normalized;
 }
@@ -520,21 +589,21 @@ export async function apiScanSources(demo: boolean = false): Promise<ScanRespons
     body: JSON.stringify({ demo })
   });
   const matches: AlertMatch[] = [];
-  for (const raw of Array.isArray(data.matches) ? data.matches : []) {
+  for (const raw of Array.isArray(data?.matches) ? data.matches : []) {
     try { matches.push(normalizeAlertMatch(raw)); } catch { /* malformed match is ignored */ }
   }
   return {
-    scanned: Number(data.scanned || 0),
-    deviceManagedSources: Number(data.deviceManagedSources || 0),
-    newPosts: Number(data.newPosts || 0),
+    scanned: Math.max(0, Number(data?.scanned || 0) || 0),
+    deviceManagedSources: Math.max(0, Number(data?.deviceManagedSources || 0) || 0),
+    newPosts: Math.max(0, Number(data?.newPosts || 0) || 0),
     matches,
-    errors: Array.isArray(data.errors) ? data.errors : [],
-    timestamp: data.timestamp || ''
+    errors: Array.isArray(data?.errors) ? data.errors : [],
+    timestamp: typeof data?.timestamp === 'string' ? data.timestamp : ''
   };
 }
 
 async function ingestWithAuth(auth: ApiDeviceAuthSession, sourceId: string, posts: NormalizedPost[], locale: 'en' | 'ar'): Promise<any> {
-  const payloadPosts = posts.map(post => ({
+  const payloadPosts = posts.slice(0, 50).map(post => ({
     externalPostId: post.externalPostId,
     originalUrl: post.originalUrl,
     authorName: post.authorName,
@@ -565,21 +634,19 @@ export async function apiIngestDevicePosts(sourceId: string, posts: NormalizedPo
     if (error instanceof ApiRequestError && (error.status === 401 || error.status === 403)) {
       auth = await ensureApiDeviceAuth(true);
       data = await ingestWithAuth(auth, sourceId, posts, locale);
-    } else {
-      throw error;
-    }
+    } else throw error;
   }
 
   const matches: AlertMatch[] = [];
-  for (const raw of Array.isArray(data.matchesCreated) ? data.matchesCreated : []) {
+  for (const raw of Array.isArray(data?.matchesCreated) ? data.matchesCreated : []) {
     try { matches.push(normalizeAlertMatch(raw)); } catch { /* ignore malformed response records */ }
   }
   return {
-    accepted: Number(data.accepted || 0),
-    duplicates: Number(data.duplicates || 0),
-    rejected: Number(data.rejected || 0),
+    accepted: Math.max(0, Number(data?.accepted || 0) || 0),
+    duplicates: Math.max(0, Number(data?.duplicates || 0) || 0),
+    rejected: Math.max(0, Number(data?.rejected || 0) || 0),
     matchesCreated: matches,
-    evaluationErrors: Array.isArray(data.evaluationErrors) ? data.evaluationErrors : []
+    evaluationErrors: Array.isArray(data?.evaluationErrors) ? data.evaluationErrors : []
   };
 }
 
@@ -597,7 +664,7 @@ export async function apiGetRuleSuggestions(sourceName: string, platform: string
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sourceName, platform, bio })
   });
-  return Array.isArray(data.suggestions) ? data.suggestions : [];
+  return Array.isArray(data.suggestions) ? data.suggestions.filter((value): value is string => typeof value === 'string').slice(0, 20) : [];
 }
 
 export async function apiPreviewMatch(ruleNaturalLanguage: string, sourceName?: string): Promise<any> {
@@ -608,10 +675,10 @@ export async function apiPreviewMatch(ruleNaturalLanguage: string, sourceName?: 
   });
 }
 
-export async function apiGenerateDigest(matches: AlertMatch[], locale: 'en' | 'ar'): Promise<DigestResponse> {
+export async function apiGenerateDigest(_matches: AlertMatch[], locale: 'en' | 'ar'): Promise<DigestResponse> {
   return requestJson<DigestResponse>('/api/ai/generate-digest', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ matches, locale })
+    body: JSON.stringify({ locale })
   });
 }
