@@ -386,20 +386,32 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const toggleSourcePause = async (sourceId: string) => {
     const source = sources.find(item => item.id === sourceId);
     if (!source) return;
-    const nextPaused = !source.isPaused;
-    setSources(previous => previous.map(item => item.id === sourceId ? { ...item, isPaused: nextPaused } : item));
+    const optimisticPaused = !source.isPaused;
+    setSources(previous => previous.map(item => item.id === sourceId ? { ...item, isPaused: optimisticPaused } : item));
+
+    let serverPaused: boolean;
     try {
-      await apiToggleSourcePause(sourceId);
-      if (source.connectorType === 'device_session' && DeviceSessionConnector.isNativeAvailable()) {
-        if (nextPaused) await DeviceSessionConnector.cancelBackgroundSource(sourceId);
-        else {
-          const backendBaseUrl = getApiBaseUrl();
-          if (backendBaseUrl) await DeviceSessionConnector.scheduleBackgroundSource(source, backendBaseUrl, locale);
-        }
-      }
+      serverPaused = await apiToggleSourcePause(sourceId);
+      setSources(previous => previous.map(item => item.id === sourceId ? { ...item, isPaused: serverPaused } : item));
     } catch (error) {
-      setSources(previous => previous.map(item => item.id === sourceId ? { ...item, isPaused: !nextPaused } : item));
+      setSources(previous => previous.map(item => item.id === sourceId ? { ...item, isPaused: source.isPaused } : item));
       console.warn('Failed to toggle source pause', error);
+      return;
+    }
+
+    if (source.connectorType === 'device_session' && DeviceSessionConnector.isNativeAvailable()) {
+      try {
+        if (serverPaused) {
+          await DeviceSessionConnector.cancelBackgroundSource(sourceId);
+        } else {
+          const backendBaseUrl = getApiBaseUrl();
+          if (backendBaseUrl) await DeviceSessionConnector.scheduleBackgroundSource({ ...source, isPaused: false }, backendBaseUrl, locale);
+        }
+      } catch (error) {
+        // The server state is authoritative. A local WorkManager failure must not roll the UI back
+        // to a state that no longer matches the persisted source; the next reconciliation can retry.
+        console.warn('Source pause state persisted but background scheduling did not reconcile', error);
+      }
     }
   };
 
@@ -496,8 +508,10 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (DeviceSessionConnector.isNativeAvailable() && deviceSources.length > 0) {
         const status = await DeviceSessionConnector.getLocalSession();
         applyDeviceStatus(status);
-        const results = await Promise.all(deviceSources.map(async source => {
-          if (!DeviceSessionConnector.isPlatformConnected(status, source.platform)) return { scanned: 0, matched: 0 };
+        // Authenticated collection creates real WebViews. Run sources sequentially so one manual
+        // scan cannot create multiple heavyweight Meta renderers and race their lifecycle/CPU/RAM.
+        for (const source of deviceSources) {
+          if (!DeviceSessionConnector.isPlatformConnected(status, source.platform)) continue;
           try {
             const posts = await deviceConnector.fetchLatest(source, 10);
             const ingest = await apiIngestDevicePosts(source.id, posts, locale);
@@ -510,14 +524,12 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   lastCheckedAt: locale === 'ar' ? 'الآن' : 'Just now'
                 }
               : item));
-            return { scanned: 1, matched: ingest.matchesCreated.length };
+            scanned += 1;
+            matched += ingest.matchesCreated.length;
           } catch (error) {
             console.warn(`[Radar] Authenticated scan failed for ${source.id}`, error);
-            return { scanned: 0, matched: 0 };
           }
-        }));
-        scanned += results.reduce((sum, result) => sum + result.scanned, 0);
-        matched += results.reduce((sum, result) => sum + result.matched, 0);
+        }
       }
 
       const hasServerManagedSources = sources.some(item => item.connectorType !== 'device_session' && !item.isPaused);
