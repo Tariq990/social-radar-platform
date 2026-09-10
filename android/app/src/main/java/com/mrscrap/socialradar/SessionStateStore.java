@@ -1,7 +1,6 @@
 package com.mrscrap.socialradar;
 
 import android.content.Context;
-import android.content.SharedPreferences;
 import android.net.Uri;
 import android.webkit.CookieManager;
 
@@ -18,12 +17,16 @@ final class SessionStateStore {
 
     static boolean isFacebookConnected() {
         String cookies = CookieManager.getInstance().getCookie("https://www.facebook.com/");
-        return hasCookie(cookies, "c_user");
+        // c_user alone can survive a partially expired Facebook session. Require the companion
+        // authenticated-session cookie as well so stale identity state becomes reconnect-required
+        // instead of being reported as a usable session.
+        return hasCookie(cookies, "c_user") && hasCookie(cookies, "xs");
     }
 
     static boolean isInstagramConnected() {
         String cookies = CookieManager.getInstance().getCookie("https://www.instagram.com/");
-        return hasCookie(cookies, "sessionid") || hasCookie(cookies, "ds_user_id");
+        // ds_user_id is an identity hint, not sufficient proof of an authenticated session.
+        return hasCookie(cookies, "sessionid");
     }
 
     static boolean isAnyMetaConnected() {
