@@ -75,8 +75,41 @@ const rateLimitCleanup = setInterval(() => {
 }, 5 * 60_000);
 rateLimitCleanup.unref();
 
-function safeError(error: any): string {
-  return error?.message || 'Unexpected server error';
+const NO_PUBLIC_ERRORS = new Set<string>();
+const REGISTER_PUBLIC_ERRORS = new Set([
+  'A valid email address is required',
+  'Password is required',
+  'Password must be at least 10 characters',
+  'Password is too long',
+  'An account with this email already exists'
+]);
+const LOGIN_PUBLIC_ERRORS = new Set(['Invalid email or password']);
+const SOURCE_CREATE_PUBLIC_ERRORS = new Set(['SOURCE_ALREADY_EXISTS']);
+const INGEST_PUBLIC_ERRORS = new Set([
+  'Source not found',
+  'Source is paused',
+  'Source is not configured for authenticated device monitoring'
+]);
+const EXPLORE_PUBLIC_ERRORS = new Set([
+  'Source not found',
+  'Choose between 1 and 10 sources',
+  'Explore requires an authenticated device-session source',
+  'posts must be an array',
+  'Explore accepts at most 100 posts per request'
+]);
+
+function errorMessage(error: any): string {
+  return typeof error?.message === 'string' ? error.message.trim() : '';
+}
+
+function safeError(
+  error: any,
+  fallback: string = 'Unexpected server error',
+  allowed: ReadonlySet<string> = NO_PUBLIC_ERRORS
+): string {
+  const message = errorMessage(error);
+  if (APP_MODE !== 'production' || allowed.has(message)) return message || fallback;
+  return fallback;
 }
 
 function secureEquals(a: string, b: string): boolean {
@@ -197,7 +230,10 @@ app.post('/api/auth/register', rateLimiter(5, 10 * 60_000), async (req, res) => 
     const user = await registerAppUser(req.body?.email, req.body?.password, req.body?.name);
     await establishAppSession(res, user);
     res.status(201).json({ authenticated: true, user });
-  } catch (error) { res.status(400).json({ error: safeError(error) }); }
+  } catch (error) {
+    const expected = REGISTER_PUBLIC_ERRORS.has(errorMessage(error));
+    res.status(expected ? 400 : 503).json({ error: safeError(error, 'Registration unavailable', REGISTER_PUBLIC_ERRORS) });
+  }
 });
 
 app.post('/api/auth/login', rateLimiter(8, 10 * 60_000), async (req, res) => {
@@ -205,21 +241,24 @@ app.post('/api/auth/login', rateLimiter(8, 10 * 60_000), async (req, res) => {
     const user = await loginAppUser(req.body?.email, req.body?.password);
     await establishAppSession(res, user);
     res.json({ authenticated: true, user });
-  } catch (error) { res.status(401).json({ error: safeError(error) }); }
+  } catch (error) {
+    const expected = LOGIN_PUBLIC_ERRORS.has(errorMessage(error));
+    res.status(expected ? 401 : 503).json({ error: safeError(error, 'Authentication unavailable', LOGIN_PUBLIC_ERRORS) });
+  }
 });
 
 app.get('/api/auth/me', async (req, res) => {
   try {
     const user = await getCurrentAppUser(req);
     res.json(user ? { authenticated: true, user } : { authenticated: false, user: null });
-  } catch (error) { res.status(503).json({ error: safeError(error) }); }
+  } catch (error) { res.status(503).json({ error: safeError(error, 'Authentication unavailable') }); }
 });
 
 app.post('/api/auth/logout', rateLimiter(20, 60_000), async (req, res) => {
   try {
     await logoutAppUser(req, res, true);
     res.json({ success: true });
-  } catch (error) { res.status(500).json({ error: safeError(error) }); }
+  } catch (error) { res.status(500).json({ error: safeError(error, 'Logout failed') }); }
 });
 
 app.post('/api/auth/logout-all', rateLimiter(10, 60_000), requireAppAuth, async (req, res) => {
@@ -228,14 +267,14 @@ app.post('/api/auth/logout-all', rateLimiter(10, 60_000), requireAppAuth, async 
     await logoutAppUser(req, res, false);
     await revokeAllAppSessions(userId);
     res.json({ success: true });
-  } catch (error) { res.status(500).json({ error: safeError(error) }); }
+  } catch (error) { res.status(500).json({ error: safeError(error, 'Logout failed') }); }
 });
 
 app.post('/api/auth/device/register', rateLimiter(8, 60_000), requireAppAuth, async (req, res) => {
   try {
     const registration = await registerDevice(req.body?.platform, currentUserId(res));
     res.status(201).json(registration);
-  } catch (error) { res.status(503).json({ error: safeError(error) }); }
+  } catch (error) { res.status(503).json({ error: safeError(error, 'Device registration unavailable') }); }
 });
 
 app.get('/api/internal/ai/health', rateLimiter(5, 60_000), requireInternalAdmin, async (_req, res) => {
@@ -245,7 +284,7 @@ app.get('/api/internal/ai/health', rateLimiter(5, 60_000), requireInternalAdmin,
 
 app.get('/api/sources', requireAppAuth, async (_req, res) => {
   try { res.json(await db.getSources(currentUserId(res))); }
-  catch (error) { res.status(500).json({ error: safeError(error) }); }
+  catch (error) { res.status(500).json({ error: safeError(error, 'Could not load sources') }); }
 });
 
 app.post('/api/sources', rateLimiter(30, 60_000), requireAppAuth, async (req, res) => {
@@ -285,8 +324,8 @@ app.post('/api/sources', rateLimiter(30, 60_000), requireAppAuth, async (req, re
     });
     res.status(201).json(source);
   } catch (error) {
-    const message = safeError(error);
-    res.status(message === 'SOURCE_ALREADY_EXISTS' ? 409 : 500).json({ error: message });
+    const duplicate = SOURCE_CREATE_PUBLIC_ERRORS.has(errorMessage(error));
+    res.status(duplicate ? 409 : 500).json({ error: safeError(error, 'Could not create source', SOURCE_CREATE_PUBLIC_ERRORS) });
   }
 });
 
@@ -294,7 +333,7 @@ app.delete('/api/sources/:id', requireAppAuth, async (req, res) => {
   try {
     if (!(await deleteOwnedSourceSafely(currentUserId(res), req.params.id))) return res.status(404).json({ error: 'Source not found' });
     res.json({ success: true });
-  } catch (error) { res.status(500).json({ error: safeError(error) }); }
+  } catch (error) { res.status(500).json({ error: safeError(error, 'Could not delete source') }); }
 });
 
 app.patch('/api/sources/:id/pause', requireAppAuth, async (req, res) => {
@@ -302,7 +341,7 @@ app.patch('/api/sources/:id/pause', requireAppAuth, async (req, res) => {
     const source = await db.getSource(req.params.id);
     if (!source || source.user_id !== currentUserId(res)) return res.status(404).json({ error: 'Source not found' });
     res.json({ success: true, isPaused: await db.toggleSourcePause(req.params.id) });
-  } catch (error) { res.status(500).json({ error: safeError(error) }); }
+  } catch (error) { res.status(500).json({ error: safeError(error, 'Could not update source') }); }
 });
 
 app.post('/api/sources/resolve', rateLimiter(20, 60_000), requireAppAuth, async (req, res) => {
@@ -324,12 +363,12 @@ app.post('/api/sources/resolve', rateLimiter(20, 60_000), requireAppAuth, async 
       requiresAuthentication: result.requiresAuthentication,
       error: result.error
     });
-  } catch (error) { res.status(500).json({ error: safeError(error) }); }
+  } catch (error) { res.status(500).json({ error: safeError(error, 'Could not resolve source') }); }
 });
 
 app.get('/api/rules', requireAppAuth, async (_req, res) => {
   try { res.json(await db.getRules(currentUserId(res))); }
-  catch (error) { res.status(500).json({ error: safeError(error) }); }
+  catch (error) { res.status(500).json({ error: safeError(error, 'Could not load rules') }); }
 });
 
 app.post('/api/rules', rateLimiter(40, 60_000), requireAppAuth, async (req, res) => {
@@ -359,7 +398,7 @@ app.post('/api/rules', rateLimiter(40, 60_000), requireAppAuth, async (req, res)
       collection_id: typeof collectionId === 'string' ? collectionId.trim().slice(0, 255) || undefined : undefined
     }, normalizedSourceIds);
     res.status(201).json(rule);
-  } catch (error) { res.status(500).json({ error: safeError(error) }); }
+  } catch (error) { res.status(500).json({ error: safeError(error, 'Could not create rule') }); }
 });
 
 app.delete('/api/rules/:id', requireAppAuth, async (req, res) => {
@@ -368,7 +407,7 @@ app.delete('/api/rules/:id', requireAppAuth, async (req, res) => {
     if (!rules.some(rule => rule.id === req.params.id)) return res.status(404).json({ error: 'Rule not found' });
     await db.deleteRule(req.params.id);
     res.json({ success: true });
-  } catch (error) { res.status(500).json({ error: safeError(error) }); }
+  } catch (error) { res.status(500).json({ error: safeError(error, 'Could not delete rule') }); }
 });
 
 app.patch('/api/rules/:id/toggle', requireAppAuth, async (req, res) => {
@@ -376,12 +415,12 @@ app.patch('/api/rules/:id/toggle', requireAppAuth, async (req, res) => {
     const rules = await db.getRules(currentUserId(res));
     if (!rules.some(rule => rule.id === req.params.id)) return res.status(404).json({ error: 'Rule not found' });
     res.json({ success: true, enabled: await db.toggleRule(req.params.id) });
-  } catch (error) { res.status(500).json({ error: safeError(error) }); }
+  } catch (error) { res.status(500).json({ error: safeError(error, 'Could not update rule') }); }
 });
 
 app.get('/api/alerts', requireAppAuth, async (_req, res) => {
   try { res.json(await db.getMatches(currentUserId(res))); }
-  catch (error) { res.status(500).json({ error: safeError(error) }); }
+  catch (error) { res.status(500).json({ error: safeError(error, 'Could not load alerts') }); }
 });
 
 app.patch('/api/alerts/:id', requireAppAuth, async (req, res) => {
@@ -396,14 +435,14 @@ app.patch('/api/alerts/:id', requireAppAuth, async (req, res) => {
       is_saved: typeof isSaved === 'boolean' ? isSaved : undefined
     });
     res.json({ success: true });
-  } catch (error) { res.status(500).json({ error: safeError(error) }); }
+  } catch (error) { res.status(500).json({ error: safeError(error, 'Could not update alert') }); }
 });
 
 app.post('/api/alerts/scan', rateLimiter(15, 60_000), requireAppAuth, async (_req, res) => {
   try {
     const scan = await monitoringWorker.runScan(currentUserId(res), isDemoMode());
     res.json({ scanned: scan.sourcesScanned, deviceManagedSources: scan.deviceManagedSources, newPosts: scan.newPostsFound, matches: scan.matchesCreated, errors: scan.errors, timestamp: scan.timestamp });
-  } catch (error) { res.status(500).json({ error: safeError(error) }); }
+  } catch (error) { res.status(500).json({ error: safeError(error, 'Scan failed') }); }
 });
 
 app.post('/api/device/ingest', rateLimiter(30, 60_000), requireDeviceAuth, async (req, res) => {
@@ -414,8 +453,10 @@ app.post('/api/device/ingest', rateLimiter(30, 60_000), requireDeviceAuth, async
     if (posts.length > 50) return res.status(413).json({ error: 'Maximum 50 posts per ingestion request' });
     res.json(await ingestDevicePosts(sourceId, posts, currentUserId(res), locale === 'ar' ? 'ar' : 'en'));
   } catch (error) {
-    const message = safeError(error);
-    res.status(message === 'Source not found' ? 404 : 400).json({ error: message });
+    const message = errorMessage(error);
+    const expected = INGEST_PUBLIC_ERRORS.has(message);
+    const status = message === 'Source not found' ? 404 : expected ? 400 : 500;
+    res.status(status).json({ error: safeError(error, 'Device ingestion failed', INGEST_PUBLIC_ERRORS) });
   }
 });
 
@@ -436,12 +477,10 @@ app.post('/api/device/explore', rateLimiter(8, 60_000), requireDeviceAuth, async
     if (mode === 'custom' && categories.length === 0) return res.status(400).json({ error: 'At least one custom category is required' });
     res.json(await exploreDeviceSnapshots(batches, currentUserId(res), { mode, prompt, categories, locale }));
   } catch (error) {
-    const message = safeError(error);
-    const normalized = message.toLowerCase();
-    const status = message === 'Source not found' ? 404
-      : normalized.includes('provider') || normalized.includes('ai ') || normalized.startsWith('ai') ? 503
-        : 400;
-    res.status(status).json({ error: message });
+    const message = errorMessage(error);
+    const expected = EXPLORE_PUBLIC_ERRORS.has(message);
+    const status = message === 'Source not found' ? 404 : expected ? 400 : 503;
+    res.status(status).json({ error: safeError(error, 'Explore analysis unavailable', EXPLORE_PUBLIC_ERRORS) });
   }
 });
 
@@ -450,7 +489,7 @@ app.post('/api/ai/evaluate-post', rateLimiter(10, 60_000), requireInternalAdmin,
     const { post, rule, locale } = req.body || {};
     if (!post || !rule) return res.status(400).json({ error: 'post and rule are required' });
     res.json(await evaluatePostAgainstRule(post, rule, locale === 'ar' ? 'ar' : 'en'));
-  } catch (error) { res.status(503).json({ error: safeError(error) }); }
+  } catch (error) { res.status(503).json({ error: safeError(error, 'AI evaluation unavailable') }); }
 });
 
 app.post('/api/ai/rule-suggestions', rateLimiter(20, 60_000), requireAppAuth, async (req, res) => {
@@ -464,7 +503,7 @@ app.post('/api/ai/rule-suggestions', rateLimiter(20, 60_000), requireAppAuth, as
       bio: typeof req.body?.bio === 'string' ? req.body.bio.slice(0, 5000) : undefined
     });
     res.json({ suggestions });
-  } catch (error) { res.status(503).json({ error: safeError(error), suggestions: [] }); }
+  } catch (error) { res.status(503).json({ error: safeError(error, 'Rule suggestions unavailable'), suggestions: [] }); }
 });
 
 app.post('/api/ai/generate-digest', rateLimiter(20, 60_000), requireAppAuth, async (req, res) => {
@@ -482,7 +521,7 @@ app.post('/api/ai/generate-digest', rateLimiter(20, 60_000), requireAppAuth, asy
       });
     }
     res.json(await aiService.generateDigest(matches, locale));
-  } catch (error) { res.status(503).json({ error: safeError(error) }); }
+  } catch (error) { res.status(503).json({ error: safeError(error, 'Digest generation unavailable') }); }
 });
 
 // Product invariant: production activity must never be represented by fabricated/hypothetical posts.
@@ -512,6 +551,6 @@ async function startServer() {
 }
 
 startServer().catch(error => {
-  console.error('[Fatal startup error]', safeError(error));
+  console.error('[Fatal startup error]', safeError(error, 'Production startup failed'));
   process.exitCode = 1;
 });
