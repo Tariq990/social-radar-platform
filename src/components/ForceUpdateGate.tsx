@@ -28,9 +28,7 @@ function readCachedDecision(): AndroidUpdateDecision | null {
       parsed.versionCode > 0 &&
       typeof parsed.sha256 === 'string' &&
       typeof parsed.downloadPath === 'string'
-    ) {
-      return parsed as AndroidUpdateDecision;
-    }
+    ) return parsed as AndroidUpdateDecision;
   } catch {
     // Ignore corrupt cache data.
   }
@@ -47,9 +45,10 @@ function cacheDecision(decision: AndroidUpdateDecision | null) {
 }
 
 export const ForceUpdateGate: React.FC<Props> = ({ children }) => {
-  // Native builds start covered from the first render. Children stay mounted behind the cover so
-  // authentication/session bootstrap can run in parallel without exposing an unchecked app UI.
-  const [checking, setChecking] = useState(() => isNativeAndroid());
+  const [checking, setChecking] = useState(false);
+  // Preserve the existing checking-state contract while covering the first native render before
+  // the effect has a chance to start refresh(). This prevents a one-frame unchecked dashboard.
+  const [bootCheckPending, setBootCheckPending] = useState(() => isNativeAndroid());
   const [requiredUpdate, setRequiredUpdate] = useState<AndroidUpdateDecision | null>(null);
   const [installing, setInstalling] = useState(false);
   const [message, setMessage] = useState('');
@@ -69,6 +68,7 @@ export const ForceUpdateGate: React.FC<Props> = ({ children }) => {
   const refresh = async () => {
     if (!isNativeAndroid()) {
       setChecking(false);
+      setBootCheckPending(false);
       setRequiredUpdate(null);
       return;
     }
@@ -91,14 +91,13 @@ export const ForceUpdateGate: React.FC<Props> = ({ children }) => {
       try {
         const installed = await getInstalledAndroidVersion();
         const cached = readCachedDecision();
-        if (cached?.versionCode && cached.versionCode > installed.versionCode) {
-          setRequiredUpdate(cached);
-        }
+        if (cached?.versionCode && cached.versionCode > installed.versionCode) setRequiredUpdate(cached);
       } catch {
         // The native plugin itself being unavailable should not affect web builds.
       }
       setLastError((error as Error)?.message || 'Could not check for updates');
     } finally {
+      setBootCheckPending(false);
       setChecking(false);
     }
   };
@@ -149,16 +148,12 @@ export const ForceUpdateGate: React.FC<Props> = ({ children }) => {
   if (!requiredUpdate) {
     return (
       <>
+        {/* Children stay mounted behind the cover so auth/session bootstrap can run in parallel. */}
         {children}
-        {checking ? (
-          <div
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950 text-slate-100 px-6"
-            dir={isArabic ? 'rtl' : 'ltr'}
-          >
+        {bootCheckPending || checking ? (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950 text-slate-100 px-6" dir={isArabic ? 'rtl' : 'ltr'}>
             <div className="flex max-w-sm flex-col items-center text-center">
-              <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-cyan-400/30 bg-cyan-400/10 text-lg font-black tracking-tight text-cyan-300 shadow-2xl">
-                MR
-              </div>
+              <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-cyan-400/30 bg-cyan-400/10 text-lg font-black tracking-tight text-cyan-300 shadow-2xl">MR</div>
               <div className="mt-4 text-xl font-black tracking-tight">MR SCRAP</div>
               <div className="mt-5 flex items-center gap-3 text-sm font-semibold text-slate-300">
                 <span className="h-5 w-5 animate-spin rounded-full border-2 border-cyan-500 border-r-transparent" />
@@ -184,9 +179,7 @@ export const ForceUpdateGate: React.FC<Props> = ({ children }) => {
 
         <div className="mt-5 rounded-2xl border border-slate-800 bg-slate-950/70 p-4 text-xs text-slate-400 space-y-2">
           <div className="flex justify-between gap-4"><span>{isArabic ? 'الإصدار الجديد' : 'New version'}</span><strong className="text-slate-200">{requiredUpdate.versionName || requiredUpdate.versionCode}</strong></div>
-          {requiredUpdate.sizeBytes ? (
-            <div className="flex justify-between gap-4"><span>{isArabic ? 'حجم التنزيل' : 'Download size'}</span><strong className="text-slate-200">{(requiredUpdate.sizeBytes / 1024 / 1024).toFixed(1)} MB</strong></div>
-          ) : null}
+          {requiredUpdate.sizeBytes ? <div className="flex justify-between gap-4"><span>{isArabic ? 'حجم التنزيل' : 'Download size'}</span><strong className="text-slate-200">{(requiredUpdate.sizeBytes / 1024 / 1024).toFixed(1)} MB</strong></div> : null}
         </div>
 
         {message ? <p className="mt-4 text-xs leading-5 text-cyan-300">{message}</p> : null}
