@@ -1,6 +1,36 @@
 import { AIProviderError } from './types';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+
+async function readBoundedText(response: Response): Promise<string> {
+  const declaredLength = Number(response.headers.get('content-length') || 0);
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
+    throw new AIProviderError('AI provider response exceeded the 2 MB safety limit');
+  }
+  if (!response.body) return '';
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let raw = '';
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw new AIProviderError('AI provider response exceeded the 2 MB safety limit');
+      }
+      raw += decoder.decode(value, { stream: true });
+    }
+    raw += decoder.decode();
+    return raw;
+  } finally {
+    reader.releaseLock();
+  }
+}
 
 export async function postJson(
   url: string,
@@ -24,7 +54,7 @@ export async function postJson(
       signal: controller.signal
     });
 
-    const raw = await response.text();
+    const raw = await readBoundedText(response);
     let parsed: any = null;
     try {
       parsed = raw ? JSON.parse(raw) : null;
@@ -47,7 +77,7 @@ export async function postJson(
 
     return parsed ?? raw;
   } catch (error: any) {
-    if (error?.name === 'AbortError') {
+    if (error?.name === 'AbortError' || error?.name === 'TimeoutError') {
       throw new AIProviderError('AI provider request timed out', { retryable: true });
     }
     if (error instanceof AIProviderError) throw error;
