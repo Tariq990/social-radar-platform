@@ -30,7 +30,7 @@ test('production radar state never boots with demo collections and trusts persis
   assert.ok(deleteFunction >= 0 && serverDelete > deleteFunction && localCancel > serverDelete, 'authoritative server deletion must happen before local WorkManager cleanup');
 });
 
-test('API and Smart Grab responses are bounded and social/media URLs are normalized to HTTPS', () => {
+test('API and Smart Grab responses are bounded, metadata healing propagates safely, and social/media URLs are normalized to HTTPS', () => {
   const api = read('src/services/api.ts');
   const explore = read('src/services/explore.ts');
   const avatar = read('src/components/SourceAvatar.tsx');
@@ -39,6 +39,11 @@ test('API and Smart Grab responses are bounded and social/media URLs are normali
   assert.match(api, /DEFAULT_API_TIMEOUT_MS = 45_000/);
   assert.match(api, /if \(parsed\.protocol === 'http:'\) parsed\.protocol = 'https:';/);
   assert.match(api, /function safeSocialUrl/);
+  assert.match(api, /function normalizeIngestSourceMetadata/);
+  assert.match(api, /displayName\.trim\(\)\.slice\(0, 255\)/);
+  assert.match(api, /safeHttpsUrl\(raw\.avatarUrl\)/);
+  assert.match(api, /raw\.handle\.trim\(\)\.replace\(\/\^@\//, ''\)\.slice\(0, 255\)/);
+  assert.match(api, /sourceMetadata: normalizeIngestSourceMetadata\(data\?\.sourceMetadata\)/);
 
   assert.match(explore, /MAX_EXPLORE_RESPONSE_BYTES = 4 \* 1024 \* 1024/);
   assert.match(explore, /EXPLORE_TIMEOUT_MS = 180_000/);
