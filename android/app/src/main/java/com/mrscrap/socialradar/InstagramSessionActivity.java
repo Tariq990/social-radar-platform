@@ -100,6 +100,8 @@ public class InstagramSessionActivity extends Activity {
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, android.webkit.WebResourceRequest request) {
+                String scheme = request.getUrl().getScheme();
+                if (!"https".equalsIgnoreCase(scheme)) return true;
                 String host = request.getUrl().getHost();
                 if (host == null) return true;
                 String normalized = host.toLowerCase();
