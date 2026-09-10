@@ -113,6 +113,18 @@ export interface DbConnectorEvent {
   created_at: string;
 }
 
+function safeHttpsUrl(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim()) return '';
+  try {
+    const parsed = new URL(value.trim());
+    if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+    if (parsed.protocol === 'http:') parsed.protocol = 'https:';
+    return parsed.toString().slice(0, 4096);
+  } catch {
+    return '';
+  }
+}
+
 export class DatabaseRepository {
   private pool: pg.Pool | null = null;
   private isPostgres = false;
@@ -141,10 +153,7 @@ export class DatabaseRepository {
     const dbUrl = process.env.DATABASE_URL;
     if (dbUrl && dbUrl.trim().length > 0) {
       try {
-        this.pool = new Pool({
-          connectionString: dbUrl,
-          ssl: postgresSsl(dbUrl)
-        });
+        this.pool = new Pool({ connectionString: dbUrl, ssl: postgresSsl(dbUrl) });
         const client = await this.pool.connect();
         try {
           const schemaPath = path.join(process.cwd(), 'server', 'db', 'schema.sql');
@@ -234,11 +243,8 @@ export class DatabaseRepository {
 
   async createSource(source: Omit<DbSource, 'created_at' | 'updated_at'>): Promise<DbSource> {
     const now = new Date().toISOString();
-    const fullSource: DbSource = { ...source, created_at: now, updated_at: now };
+    const fullSource: DbSource = { ...source, avatar_url: safeHttpsUrl(source.avatar_url) || undefined, created_at: now, updated_at: now };
     if (this.isPostgres && this.pool) {
-      // Identity collisions are not updates. Silently updating an existing source here used to
-      // replace its canonical page URL with a shared-post URL and then let the UI create a second
-      // rule. Keep the existing row untouched and surface a deterministic duplicate error instead.
       const query = `
         INSERT INTO sources (
           id, user_id, platform, external_id, url, name, handle, avatar_url, bio,
@@ -289,7 +295,7 @@ export class DatabaseRepository {
   ): Promise<DbSource | null> {
     const name = typeof updates.name === 'string' ? updates.name.trim().slice(0, 255) : '';
     const handle = typeof updates.handle === 'string' ? updates.handle.trim().replace(/^@/, '').slice(0, 255) : '';
-    const avatar = typeof updates.avatar_url === 'string' ? updates.avatar_url.trim().slice(0, 4096) : '';
+    const avatar = safeHttpsUrl(updates.avatar_url);
     const bio = typeof updates.bio === 'string' ? updates.bio.trim().slice(0, 5000) : '';
     if (!name && !handle && !avatar && !bio) return await this.getSource(id);
 
@@ -331,10 +337,14 @@ export class DatabaseRepository {
 
   async deleteSource(id: string): Promise<void> {
     if (this.isPostgres && this.pool) { await this.pool.query('DELETE FROM sources WHERE id = $1', [id]); return; }
-    this.memoryStore.sources = this.memoryStore.sources.filter(s => s.id !== id);
-    this.memoryStore.rule_sources = this.memoryStore.rule_sources.filter(rs => rs.source_id !== id);
-    this.memoryStore.posts = this.memoryStore.posts.filter(p => p.source_id !== id);
-    this.memoryStore.matches = this.memoryStore.matches.filter(m => m.source_id !== id);
+    const postIds = new Set(this.memoryStore.posts.filter(post => post.source_id === id).map(post => post.id));
+    const matchIds = new Set(this.memoryStore.matches.filter(match => match.source_id === id || postIds.has(match.post_id)).map(match => match.id));
+    this.memoryStore.sources = this.memoryStore.sources.filter(source => source.id !== id);
+    this.memoryStore.rule_sources = this.memoryStore.rule_sources.filter(mapping => mapping.source_id !== id);
+    this.memoryStore.posts = this.memoryStore.posts.filter(post => post.source_id !== id);
+    this.memoryStore.matches = this.memoryStore.matches.filter(match => !matchIds.has(match.id));
+    this.memoryStore.notifications = this.memoryStore.notifications.filter(notification => !matchIds.has(notification.match_id));
+    this.memoryStore.connector_events = this.memoryStore.connector_events.filter(event => event.source_id !== id);
     this.saveToDisk();
   }
 
@@ -392,8 +402,11 @@ export class DatabaseRepository {
 
   async deleteRule(id: string): Promise<void> {
     if (this.isPostgres && this.pool) { await this.pool.query('DELETE FROM rules WHERE id = $1', [id]); return; }
-    this.memoryStore.rules = this.memoryStore.rules.filter(r => r.id !== id);
-    this.memoryStore.rule_sources = this.memoryStore.rule_sources.filter(rs => rs.rule_id !== id);
+    const matchIds = new Set(this.memoryStore.matches.filter(match => match.rule_id === id).map(match => match.id));
+    this.memoryStore.rules = this.memoryStore.rules.filter(rule => rule.id !== id);
+    this.memoryStore.rule_sources = this.memoryStore.rule_sources.filter(mapping => mapping.rule_id !== id);
+    this.memoryStore.matches = this.memoryStore.matches.filter(match => match.rule_id !== id);
+    this.memoryStore.notifications = this.memoryStore.notifications.filter(notification => !matchIds.has(notification.match_id));
     this.saveToDisk();
   }
 
@@ -409,7 +422,7 @@ export class DatabaseRepository {
 
   async createPost(post: Omit<DbPost, 'created_at'>): Promise<DbPost> {
     const now = new Date().toISOString();
-    const fullPost: DbPost = { ...post, created_at: now };
+    const fullPost: DbPost = { ...post, author_avatar: safeHttpsUrl(post.author_avatar) || undefined, created_at: now };
     if (this.isPostgres && this.pool) {
       const res = await this.pool.query(`
         INSERT INTO posts (id,source_id,platform,external_id,canonical_url,author_name,author_avatar,text,media,published_at,fingerprint,metadata,created_at)
@@ -434,11 +447,13 @@ export class DatabaseRepository {
       `, [userId]);
       return res.rows.map(row => ({ ...row, confidence: Number(row.confidence), extracted: row.extracted || {} }));
     }
-    return this.memoryStore.matches.filter(m => m.user_id === userId).map(m => {
-      const source = this.memoryStore.sources.find(s => s.id === m.source_id);
-      const rule = this.memoryStore.rules.find(r => r.id === m.rule_id);
-      const post = this.memoryStore.posts.find(p => p.id === m.post_id);
-      return { ...m, source_name: source?.name || 'Monitored Page', source_avatar: source?.avatar_url, source_platform: source?.platform || 'facebook', rule_name: rule?.name || 'Watch Rule', post };
+    return this.memoryStore.matches.flatMap(match => {
+      if (match.user_id !== userId) return [];
+      const source = this.memoryStore.sources.find(item => item.id === match.source_id && item.user_id === userId);
+      const rule = this.memoryStore.rules.find(item => item.id === match.rule_id && item.user_id === userId);
+      const post = this.memoryStore.posts.find(item => item.id === match.post_id && item.source_id === match.source_id);
+      if (!source || !rule || !post) return [];
+      return [{ ...match, source_name: source.name, source_avatar: source.avatar_url, source_platform: source.platform, rule_name: rule.name, post }];
     });
   }
 
@@ -471,11 +486,11 @@ export class DatabaseRepository {
       if (sets.length > 0) await this.pool.query(`UPDATE matches SET ${sets.join(', ')} WHERE id = $1`, values);
       return;
     }
-    const m = this.memoryStore.matches.find(item => item.id === id);
-    if (m) {
-      if (updates.feedback !== undefined) m.feedback = updates.feedback;
-      if (updates.is_read !== undefined) m.is_read = updates.is_read;
-      if (updates.is_saved !== undefined) m.is_saved = updates.is_saved;
+    const match = this.memoryStore.matches.find(item => item.id === id);
+    if (match) {
+      if (updates.feedback !== undefined) match.feedback = updates.feedback;
+      if (updates.is_read !== undefined) match.is_read = updates.is_read;
+      if (updates.is_saved !== undefined) match.is_saved = updates.is_saved;
       this.saveToDisk();
     }
   }
@@ -486,7 +501,10 @@ export class DatabaseRepository {
     const now = new Date().toISOString();
     const full: DbNotification = { ...notif, created_at: now };
     if (this.isPostgres && this.pool) {
-      await this.pool.query('INSERT INTO notifications (id,user_id,match_id,channel,status,payload,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)', [full.id, full.user_id, full.match_id, full.channel, full.status, JSON.stringify(full.payload), now]);
+      await this.pool.query(
+        'INSERT INTO notifications (id,user_id,match_id,channel,status,payload,sent_at,error,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+        [full.id, full.user_id, full.match_id, full.channel, full.status, JSON.stringify(full.payload), full.sent_at || null, full.error || null, now]
+      );
       return full;
     }
     this.memoryStore.notifications.unshift(full); this.saveToDisk(); return full;
