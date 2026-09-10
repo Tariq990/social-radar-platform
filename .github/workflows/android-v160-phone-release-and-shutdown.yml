@@ -1,0 +1,189 @@
+name: Android v160 Phone Release and Emulator Shutdown
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-v160-phone-release-and-shutdown.yml]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  build-release:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 30
+    env:
+      ANDROID_VERSION_CODE: '160'
+      ANDROID_VERSION_NAME: '0.1.160-device-test'
+      RELEASE_TAG: android-v160-device-test
+      RELEASE_APK: MR-SCRAP-v160-device-test.apk
+
+    steps:
+      - name: Shut down Android emulator without wiping AVD data
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"
+          test -x "$adb"
+
+          mapfile -t emulator_serials < <("$adb" devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1}')
+          echo "EMULATORS_BEFORE=${#emulator_serials[@]}"
+          for serial in "${emulator_serials[@]}"; do
+            "$adb" -s "$serial" emu kill >/dev/null 2>&1 || true
+          done
+
+          for _ in $(seq 1 40); do
+            count="$("$adb" devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {n++} END{print n+0}')"
+            [ "$count" -eq 0 ] && break
+            sleep 1
+          done
+
+          ps_count="$(/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -Command "\$p=@(Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -like '*-avd test_avd*' }); Write-Output \$p.Count" 2>/dev/null | tr -d '\r' | tail -n1)"
+          ps_count="${ps_count:-0}"
+          if [ "$ps_count" -gt 0 ]; then
+            /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -like '*-avd test_avd*' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }" >/dev/null 2>&1 || true
+            sleep 3
+          fi
+
+          count="$("$adb" devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {n++} END{print n+0}')"
+          ps_count="$(/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -Command "\$p=@(Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -like '*-avd test_avd*' }); Write-Output \$p.Count" 2>/dev/null | tr -d '\r' | tail -n1)"
+          ps_count="${ps_count:-0}"
+          echo "EMULATOR_DEVICE_COUNT=$count"
+          echo "TEST_AVD_PROCESS_COUNT=$ps_count"
+          test "$count" -eq 0
+          test "$ps_count" -eq 0
+          echo EMULATOR_SHUTDOWN_GATE=PASS
+
+      - name: Checkout exact latest test lane
+        uses: actions/checkout@v4
+        with:
+          ref: test/android-headless-emulator-20260909
+          fetch-depth: 1
+          clean: false
+
+      - name: Verify exact source revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "BUILD_SOURCE_SHA=$(git rev-parse HEAD)"
+          test "$(git branch --show-current)" = "test/android-headless-emulator-20260909"
+          git diff --exit-code
+          echo SOURCE_REVISION_GATE=PASS
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Build latest Android app as v160
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -x node_modules/.bin/vite ] || [ ! -x node_modules/.bin/cap ]; then
+            npm install --no-audit --no-fund
+          fi
+
+          npx vite build
+          npx cap sync android
+
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/.android/sdk}}"
+          sdk="$(realpath "$sdk")"
+          test -d "$sdk/platforms/android-36"
+          test -d "$sdk/build-tools/36.0.0"
+          printf 'sdk.dir=%s\n' "$sdk" > android/local.properties
+
+          gradle="$HOME/.local/share/mrscrap-gradle/gradle-8.13/bin/gradle"
+          test -x "$gradle"
+          "$gradle" -p android :app:assembleDebug --stacktrace
+
+          apk="$GITHUB_WORKSPACE/android/app/build/outputs/apk/debug/app-debug.apk"
+          meta="$GITHUB_WORKSPACE/android/app/build/outputs/apk/debug/output-metadata.json"
+          test -s "$apk"
+          test -s "$meta"
+
+          python3 - "$meta" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1], encoding='utf-8'))
+          assert data.get('applicationId') == 'com.mrscrap.socialradar', data.get('applicationId')
+          els = data.get('elements') or []
+          assert els, 'missing APK metadata elements'
+          item = els[0]
+          assert int(item.get('versionCode')) == 160, item.get('versionCode')
+          assert item.get('versionName') == '0.1.160-device-test', item.get('versionName')
+          print('APK_APPLICATION_ID=com.mrscrap.socialradar')
+          print('APK_VERSION_CODE=160')
+          print('APK_VERSION_NAME=0.1.160-device-test')
+          PY
+
+          mkdir -p release
+          cp "$apk" "release/$RELEASE_APK"
+          sha256sum "release/$RELEASE_APK" > "release/$RELEASE_APK.sha256"
+          printf '%s\n' "$GITHUB_SHA" > release/COMMIT_SHA.txt
+          echo "APK_SIZE=$(stat -c '%s' "release/$RELEASE_APK")"
+          echo APK_BUILD_GATE=PASS
+
+      - name: Publish GitHub prerelease for physical phone testing
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          UPLOADS="https://uploads.github.com/repos/${GITHUB_REPOSITORY}"
+          AUTH="Authorization: Bearer ${GITHUB_TOKEN}"
+          ACCEPT="Accept: application/vnd.github+json"
+          VER="X-GitHub-Api-Version: 2022-11-28"
+
+          lookup="$(mktemp)"
+          status="$(curl -sS -o "$lookup" -w '%{http_code}' -H "$AUTH" -H "$ACCEPT" -H "$VER" "$API/releases/tags/$RELEASE_TAG")"
+          if [ "$status" != "404" ]; then
+            echo "Release tag already exists or lookup failed; refusing to move an existing tag. status=$status"
+            exit 250
+          fi
+          rm -f "$lookup"
+
+          export RELEASE_BODY="Build from test/android-headless-emulator-20260909 at ${GITHUB_SHA}. Physical-device Facebook test build. Install over the existing MR SCRAP app to preserve app data when signatures match. No production deployment or AI-provider configuration is changed by this release."
+          payload="$(python3 -c 'import json,os; print(json.dumps({"tag_name":os.environ["RELEASE_TAG"],"target_commitish":os.environ["GITHUB_SHA"],"name":"MR SCRAP Android v160 Device Test","body":os.environ["RELEASE_BODY"],"prerelease":True,"draft":False}))')"
+          release_json="$(mktemp)"
+          curl --fail-with-body -sS -X POST -H "$AUTH" -H "$ACCEPT" -H "$VER" -H 'Content-Type: application/json' -d "$payload" "$API/releases" > "$release_json"
+          release_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$release_json")"
+          html_url="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["html_url"])' "$release_json")"
+          rm -f "$release_json"
+
+          upload() {
+            local path="$1" type="$2" name
+            name="$(basename "$path")"
+            curl --fail-with-body -sS -X POST -H "$AUTH" -H "$ACCEPT" -H "$VER" -H "Content-Type: $type" --data-binary "@$path" "$UPLOADS/releases/$release_id/assets?name=$name" >/dev/null
+          }
+          upload "release/$RELEASE_APK" application/vnd.android.package-archive
+          upload "release/$RELEASE_APK.sha256" text/plain
+          upload release/COMMIT_SHA.txt text/plain
+
+          verify="$(mktemp)"
+          curl --fail-with-body -sS -H "$AUTH" -H "$ACCEPT" -H "$VER" "$API/releases/$release_id/assets?per_page=100" > "$verify"
+          expected="$(stat -c '%s' "release/$RELEASE_APK")"
+          python3 - "$verify" "$RELEASE_APK" "$expected" <<'PY'
+          import json, sys
+          assets = json.load(open(sys.argv[1], encoding='utf-8'))
+          name = sys.argv[2]
+          expected = int(sys.argv[3])
+          item = next((a for a in assets if a.get('name') == name), None)
+          assert item, 'APK release asset missing'
+          assert int(item.get('size', -1)) == expected, 'published APK size mismatch'
+          print('GITHUB_RELEASE_APK_SIZE=' + str(expected))
+          print('GITHUB_RELEASE_ASSET_GATE=PASS')
+          PY
+          rm -f "$verify"
+          echo "GITHUB_RELEASE_URL=$html_url"
+          echo GITHUB_PHONE_RELEASE_GATE=PASS
