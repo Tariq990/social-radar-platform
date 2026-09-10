@@ -52,17 +52,17 @@ export class ErrorBoundary extends Component<Props, State> {
             <div className="w-12 h-12 rounded-full bg-red-500/10 text-red-400 mx-auto flex items-center justify-center">
               <AlertTriangle className="w-6 h-6" />
             </div>
-            
+
             <div className="space-y-1">
               <h2 className="text-lg font-bold text-slate-100">
                 حدث خطأ غير متوقع أثناء عرض الصفحة
               </h2>
               <p className="text-xs text-slate-400">
-                An unexpected rendering error occurred. You can easily recover below:
+                An unexpected rendering error occurred. You can recover below.
               </p>
             </div>
 
-            {this.state.error && (
+            {import.meta.env.DEV && this.state.error && (
               <div className="p-3 rounded-xl bg-slate-950 text-start text-[11px] font-mono text-red-300 border border-slate-800 overflow-x-auto max-h-32">
                 {this.state.error.message}
               </div>
