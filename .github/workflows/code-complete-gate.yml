@@ -54,13 +54,20 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Setup Gradle 8.13
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.13'
+      - name: Verify pinned Gradle 8.13
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle="$HOME/.local/share/mrscrap-gradle/gradle-8.13/bin/gradle"
+          test -x "$gradle"
+          "$gradle" --version
 
       - name: Assemble Android debug APK
-        run: gradle -p android :app:assembleDebug --stacktrace
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle="$HOME/.local/share/mrscrap-gradle/gradle-8.13/bin/gradle"
+          "$gradle" -p android :app:assembleDebug --stacktrace
 
       - name: Upload Android debug APK
         uses: actions/upload-artifact@v4
