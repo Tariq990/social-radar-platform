@@ -80,7 +80,7 @@ export interface WatchRule {
   excludeTerms?: string[];
   categories?: string[];
   minConfidence: number; // e.g. 0.75
-  alertMode: 'instant' | 'digest';
+  alertMode: 'instant' | 'digest' | 'silent';
   quietHours?: {
     enabled: boolean;
     start: string;
