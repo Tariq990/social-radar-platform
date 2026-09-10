@@ -15,7 +15,10 @@ concurrency:
 
 jobs:
   frontend-backend-android:
-    runs-on: ubuntu-latest
+    # Hosted ubuntu jobs are currently failing before runner assignment on this repository.
+    # Use the existing isolated Linux self-hosted validation runner; this workflow has no
+    # secrets/deploy permissions and only one heavy validation job is scheduled at a time.
+    runs-on: [self-hosted, Linux]
     timeout-minutes: 35
 
     steps:
