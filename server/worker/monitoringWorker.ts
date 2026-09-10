@@ -1,4 +1,4 @@
-import { db, DbMatch } from '../db/database';
+import { db, DbMatch, DbPost, DbRule, DbSource } from '../db/database';
 import { sourceConnectorManager } from '../connectors/sourceConnector';
 import { computePostFingerprint, canonicalizeSocialUrl } from './deduplication';
 import { evaluatePostAgainstRule, isLatestPostIntent } from '../ai/ruleEvaluator';
@@ -86,6 +86,55 @@ function latestProviderCandidateIndex(posts: RawProviderPost[], platform: 'faceb
   return newest >= 0 ? newest : fallback;
 }
 
+async function evaluateAndPersistRules(
+  post: DbPost,
+  rules: DbRule[],
+  source: DbSource,
+  userId: string,
+  result: MonitoringJobResult
+): Promise<void> {
+  for (const rule of rules) {
+    try {
+      const evalResult = await evaluatePostAgainstRule(post, rule, 'en');
+      if (!evalResult.matched) continue;
+
+      const candidateMatchId = `match_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const createdMatch = await db.createMatch({
+        id: candidateMatchId,
+        user_id: userId,
+        post_id: post.id,
+        rule_id: rule.id,
+        source_id: source.id,
+        confidence: evalResult.confidence,
+        category: evalResult.category,
+        reason: evalResult.reason,
+        extracted: evalResult.extracted,
+        feedback: 'unrated',
+        is_read: false,
+        is_saved: false
+      });
+
+      if (createdMatch.id !== candidateMatchId) continue;
+
+      createdMatch.source_name = source.name;
+      createdMatch.source_avatar = safeHttpsUrl(source.avatar_url);
+      createdMatch.source_platform = source.platform;
+      createdMatch.rule_name = rule.name;
+      createdMatch.post = post;
+      result.matchesCreated.push(createdMatch);
+
+      try {
+        await notificationService.dispatchMatchNotification(createdMatch);
+      } catch {
+        await db.logConnectorEvent(source.id, 'notification', 'error', 'Match persisted but in-app notification persistence failed.').catch(() => {});
+      }
+    } catch (evalError: any) {
+      const message = String(evalError?.message || 'AI evaluation failed').slice(0, 500);
+      await db.logConnectorEvent(source.id, 'ai_evaluation', 'error', `Rule ${rule.id}: ${message}`);
+    }
+  }
+}
+
 /**
  * Server-side monitoring worker.
  * Authenticated device_session sources remain on-device and enter through /api/device/ingest.
@@ -166,8 +215,12 @@ export class MonitoringWorker {
               : undefined;
             const contentFingerprint = computePostFingerprint(source.platform, externalId, canonicalUrl, text);
             const fingerprint = `${source.id}:${contentFingerprint}`.slice(0, 255);
-
-            if (await db.hasPostFingerprint(fingerprint)) continue;
+            const currentMetadata = {
+              ...sanitizeProviderMetadata(raw.metadata),
+              feedIndex: rawIndex,
+              latestCandidate: rawIndex === latestCandidateIndex,
+              ingestion: 'server_public_provider'
+            };
 
             const candidatePostId = `post_${source.platform}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
             const savedPost = await db.createPost({
@@ -182,58 +235,31 @@ export class MonitoringWorker {
               media: sanitizeMedia(raw.media),
               published_at: sanitizePublishedAt(raw.publishedAt),
               fingerprint,
-              metadata: {
-                ...sanitizeProviderMetadata(raw.metadata),
-                feedIndex: rawIndex,
-                latestCandidate: rawIndex === latestCandidateIndex,
-                ingestion: 'server_public_provider'
-              }
+              metadata: currentMetadata
             });
 
-            if (savedPost.id !== candidatePostId) continue;
-            result.newPostsFound++;
-
-            const rulesToEvaluate = isInitialBaseline ? latestPostRules : sourceRules;
-            for (const rule of rulesToEvaluate) {
-              try {
-                const evalResult = await evaluatePostAgainstRule(savedPost, rule, 'en');
-                if (!evalResult.matched) continue;
-
-                const candidateMatchId = `match_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-                const createdMatch = await db.createMatch({
-                  id: candidateMatchId,
-                  user_id: userId,
-                  post_id: savedPost.id,
-                  rule_id: rule.id,
-                  source_id: source.id,
-                  confidence: evalResult.confidence,
-                  category: evalResult.category,
-                  reason: evalResult.reason,
-                  extracted: evalResult.extracted,
-                  feedback: 'unrated',
-                  is_read: false,
-                  is_saved: false
-                });
-
-                if (createdMatch.id !== candidateMatchId) continue;
-
-                createdMatch.source_name = source.name;
-                createdMatch.source_avatar = safeHttpsUrl(source.avatar_url);
-                createdMatch.source_platform = source.platform;
-                createdMatch.rule_name = rule.name;
-                createdMatch.post = savedPost;
-                result.matchesCreated.push(createdMatch);
-
-                try {
-                  await notificationService.dispatchMatchNotification(createdMatch);
-                } catch {
-                  await db.logConnectorEvent(source.id, 'notification', 'error', 'Match persisted but in-app notification persistence failed.').catch(() => {});
-                }
-              } catch (evalError: any) {
-                const message = evalError?.message || 'AI evaluation failed';
-                await db.logConnectorEvent(source.id, 'ai_evaluation', 'error', `Rule ${rule.id}: ${message}`);
+            if (savedPost.id !== candidatePostId) {
+              if (latestPostRules.length > 0) {
+                const currentViewPost: DbPost = {
+                  ...savedPost,
+                  metadata: {
+                    ...(savedPost.metadata || {}),
+                    ...currentMetadata
+                  }
+                };
+                await evaluateAndPersistRules(currentViewPost, latestPostRules, source, userId, result);
               }
+              continue;
             }
+
+            result.newPostsFound++;
+            await evaluateAndPersistRules(
+              savedPost,
+              isInitialBaseline ? latestPostRules : sourceRules,
+              source,
+              userId,
+              result
+            );
           }
 
           await db.updateSourceHealth(source.id, 'connected', true);
@@ -244,7 +270,7 @@ export class MonitoringWorker {
             `Fetched ${rawPosts.length} posts from server-side provider${isInitialBaseline ? '; initial snapshot stored as baseline' : ''}`
           );
         } catch (sourceError: any) {
-          const message = sourceError?.message || 'Unknown source fetch error';
+          const message = String(sourceError?.message || 'Unknown source fetch error').slice(0, 500);
           result.errors.push({ sourceId: source.id, error: message });
           const status = (source.consecutive_failures || 0) >= 2 ? 'needs_attention' : 'error';
           await db.updateSourceHealth(source.id, status, false, message);
