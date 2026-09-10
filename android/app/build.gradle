@@ -1,5 +1,7 @@
 apply plugin: 'com.android.application'
 
+def mrScrapBackendOrigin = System.getenv('VITE_API_BASE_URL') ?: 'https://mr-scrap-api-live.onrender.com'
+
 android {
     namespace = 'com.mrscrap.socialradar'
     compileSdk = rootProject.ext.compileSdkVersion
@@ -10,10 +12,15 @@ android {
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode Integer.parseInt(System.getenv('ANDROID_VERSION_CODE') ?: '1')
         versionName System.getenv('ANDROID_VERSION_NAME') ?: '0.1.0'
+        buildConfigField 'String', 'MR_SCRAP_BACKEND_ORIGIN', groovy.json.JsonOutput.toJson(mrScrapBackendOrigin)
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
         aaptOptions {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     signingConfigs {
