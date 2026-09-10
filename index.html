@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; media-src 'self' blob: https:; connect-src 'self' https: ws: wss:; worker-src 'self' blob:; manifest-src 'self'" />
     <title>MR SCRAP - Social Radar | Watch What Matters</title>
     <meta name="description" content="AI-powered social watchlist for Facebook and Instagram. Watch what matters, ignore the rest." />
     <meta property="og:title" content="MR SCRAP - Social Radar" />
@@ -13,11 +14,11 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <link rel="manifest" href="/manifest.json" />
-    <!-- Immediate theme initializer script to avoid flash -->
+    <!-- Immediate theme initializer script to avoid flash. Keep keys aligned with RadarContext. -->
     <script>
       (function() {
         try {
-          var savedTheme = localStorage.getItem('mrscrap_theme_v1') || 'dark';
+          var savedTheme = localStorage.getItem('mrscrap_theme_v2') || 'dark';
           var root = document.documentElement;
           if (savedTheme === 'light') {
             root.classList.remove('dark');
@@ -28,7 +29,7 @@
             root.classList.remove('light');
             root.classList.add('dark');
           }
-          var savedLocale = localStorage.getItem('mrscrap_locale_v1') || 'en';
+          var savedLocale = localStorage.getItem('mrscrap_locale_v2') || 'en';
           root.lang = savedLocale;
           root.dir = savedLocale === 'ar' ? 'rtl' : 'ltr';
         } catch(e) {}
@@ -50,4 +51,3 @@
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-
