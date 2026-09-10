@@ -38,7 +38,7 @@ test('native collector supports bounded multi-post collection', () => {
   const collector = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedWebCollector.java');
   assert.match(collector, /MAX_LIMIT\s*=\s*20/);
   assert.match(collector, /window\.scrollBy/);
-  assert.match(collector, /posts\.slice\(0, LIMIT\)/);
+  assert.match(collector, /(?:posts|accumulatedPosts)\.slice\(0, LIMIT\)/);
   assert.match(collector, /setOffscreenPreRaster\(true\)/);
   assert.match(collector, /EVALUATION_WATCHDOG_MS/);
   assert.match(collector, /evaluationInFlight/);
