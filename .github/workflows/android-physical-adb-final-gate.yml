@@ -1,5 +1,6 @@
 name: Android Physical ADB Final Gate
 
+# Fresh continuation run after the previous GitHub rerun attempt budget was exhausted.
 on:
   push:
     branches: [test/android-headless-emulator-20260909]
