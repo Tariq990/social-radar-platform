@@ -66,3 +66,51 @@ test('Android update check keeps the app bootstrap mounted instead of serializin
   const checkingOverlay = gate.indexOf('{checking ?', nativeBlock);
   assert.ok(nativeBlock >= 0 && childMount > nativeBlock && checkingOverlay > childMount);
 });
+
+test('Meta session status requires authenticated cookies rather than identity hints alone', () => {
+  const store = read('android/app/src/main/java/com/mrscrap/socialradar/SessionStateStore.java');
+  assert.match(store, /hasCookie\(cookies, "c_user"\) && hasCookie\(cookies, "xs"\)/);
+  assert.match(store, /return hasCookie\(cookies, "sessionid"\);/);
+  assert.doesNotMatch(store, /hasCookie\(cookies, "sessionid"\) \|\| hasCookie\(cookies, "ds_user_id"\)/);
+});
+
+test('background worker outlives the native collector terminal timeout and rejects platform mismatch', () => {
+  const worker = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSourceWorker.java');
+  assert.match(worker, /COLLECTOR_WAIT_SECONDS = 85/);
+  assert.match(worker, /latch\.await\(COLLECTOR_WAIT_SECONDS, TimeUnit\.SECONDS\)/);
+  assert.doesNotMatch(worker, /latch\.await\(35, TimeUnit\.SECONDS\)/);
+  assert.match(worker, /derivedPlatform\.equalsIgnoreCase\(platform\)/);
+  assert.match(worker, /Worker source platform does not match source URL/);
+});
+
+test('declared HTTPS MR SCRAP app links resolve to the same bounded navigation screens as custom scheme links', () => {
+  const activity = read('android/app/src/main/java/com/mrscrap/socialradar/MainActivity.java');
+  assert.match(activity, /screenFromNavigationUri/);
+  assert.match(activity, /"https"\.equalsIgnoreCase\(scheme\)/);
+  assert.match(activity, /"mrscrap\.app"\.equalsIgnoreCase\(data\.getHost\(\)\)/);
+  assert.match(activity, /"alerts"\.equals\(screen\).*"radar"\.equals\(screen\).*"watchlist"\.equals\(screen\)/s);
+});
+
+test('social entry URLs are normalized to HTTPS before they reach Android cleartext-blocked WebViews', () => {
+  const helper = read('src/lib/socialUrl.ts');
+  assert.match(helper, /if \(parsed\.protocol === 'http:'\) parsed\.protocol = 'https:';/);
+  assert.match(helper, /if \(parsed\.protocol !== 'https:'\) return false;/);
+});
+
+test('platform disconnect and background scheduling are bound to the URL-derived platform', () => {
+  const plugin = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSocialSessionPlugin.java');
+  assert.match(plugin, /cancelAllWorkByTag\(platformWorkTag\("facebook"\)\)/);
+  assert.match(plugin, /cancelAllWorkByTag\(platformWorkTag\("instagram"\)\)/);
+  assert.match(plugin, /Source platform does not match source URL/);
+  assert.match(plugin, /addTag\(platformWorkTag\(platform\)\)/);
+  assert.match(plugin, /SessionStateStore\.isConnectedForPlatform\(platform\)/);
+});
+
+test('manual device scans are serialized and source pause UI follows persisted server state', () => {
+  const radar = read('src/context/RadarContext.tsx');
+  assert.match(radar, /serverPaused = await apiToggleSourcePause\(sourceId\)/);
+  assert.match(radar, /isPaused: serverPaused/);
+  assert.match(radar, /for \(const source of deviceSources\)/);
+  assert.doesNotMatch(radar, /Promise\.all\(deviceSources\.map/);
+  assert.match(radar, /Source pause state persisted but background scheduling did not reconcile/);
+});
