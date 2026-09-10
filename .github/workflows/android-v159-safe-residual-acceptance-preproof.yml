@@ -1,0 +1,80 @@
+name: Android v159 Safe Residual Acceptance Preproof
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-v159-safe-residual-acceptance-preproof.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  prove:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 6
+    env:
+      PKG: com.mrscrap.socialradar
+      BACKEND: https://mr-scrap-api-live.onrender.com
+    steps:
+      - name: Prove backend privacy boundary and app-session persistence without mutations
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"; test -x "$adb"
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1;exit}')"; test -n "$serial"
+          test "$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1)" = 1
+          version="$($adb -s "$serial" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"; echo "INSTALLED_VERSION_CODE=$version"; test "$version" = 159
+
+          health="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$BACKEND/api/health" || true)"
+          anon="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$BACKEND/api/sources" || true)"
+          echo "PUBLIC_HEALTH_HTTP=$health"
+          echo "ANONYMOUS_PRIVATE_API_HTTP=$anon"
+          test "$health" = 200
+          test "$anon" = 401
+
+          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-v159-session-persist.ps1"
+          cat > "$ps1" <<'PS'
+          param([int]$Port,[string]$Label)
+          $ErrorActionPreference='Stop'
+          function Target { for($i=0;$i-lt 120;$i++){try{$rows=@(Invoke-RestMethod -Uri "http://127.0.0.1:$Port/json/list" -TimeoutSec 2);$hits=@($rows|Where-Object{$_.type-eq'page'-and[string]$_.url-like'https://localhost*'});if($hits.Count-gt 0){return $hits[0]}}catch{};Start-Sleep -Milliseconds 250};throw 'app target missing'}
+          function Eval([string]$expr){$t=Target;$u=[Uri][string]$t.webSocketDebuggerUrl;$w=[System.Net.WebSockets.ClientWebSocket]::new();$c=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds(90));$w.ConnectAsync([Uri]("ws://127.0.0.1:$Port"+$u.PathAndQuery),$c.Token).GetAwaiter().GetResult()|Out-Null;$p=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 10;$b=[Text.Encoding]::UTF8.GetBytes($p);$w.SendAsync([ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$c.Token).GetAwaiter().GetResult()|Out-Null;$buf=New-Object byte[] 131072;$sb=[Text.StringBuilder]::new();while($true){$r=$w.ReceiveAsync([ArraySegment[byte]]::new($buf),$c.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id-ne 1){continue};if($m.result.exceptionDetails){throw 'eval'};return $m.result.result.value}}
+          $expr=@'
+          (async()=>{const b='https://mr-scrap-api-live.onrender.com',j=async r=>{try{return await r.json()}catch{return null}};for(let i=0;i<20;i++){try{const [a,s,r,l,c]=await Promise.all([fetch(b+'/api/auth/me',{credentials:'include'}),fetch(b+'/api/sources',{credentials:'include'}),fetch(b+'/api/rules',{credentials:'include'}),fetch(b+'/api/alerts',{credentials:'include'}),fetch(b+'/api/config',{credentials:'include'})]);const [aj,sj,rj,lj,cj]=await Promise.all([j(a),j(s),j(r),j(l),j(c)]);if(a.ok&&s.ok&&r.ok&&l.ok&&c.ok&&aj?.authenticated===true&&Array.isArray(sj)&&Array.isArray(rj)&&Array.isArray(lj)){return{auth:true,sources:sj.length,rules:rj.length,alerts:lj.length,production:cj?.appMode==='production',postgres:cj?.isPostgres===true}}}catch{};await new Promise(x=>setTimeout(x,500))}return{auth:false,sources:-1,rules:-1,alerts:-1,production:false,postgres:false}})()
+          '@
+          $r=Eval $expr
+          Write-Output ($Label+'_AUTHENTICATED='+$(if($r.auth){'1'}else{'0'}));Write-Output ($Label+'_SOURCE_COUNT='+[int]$r.sources);Write-Output ($Label+'_RULE_COUNT='+[int]$r.rules);Write-Output ($Label+'_ALERT_COUNT='+[int]$r.alerts);Write-Output ($Label+'_PRODUCTION_MODE='+$(if($r.production){'1'}else{'0'}));Write-Output ($Label+'_POSTGRES_MODE='+$(if($r.postgres){'1'}else{'0'}))
+          if(!$r.auth-or!$r.production-or!$r.postgres){exit 253}
+          PS
+
+          snapshot() {
+            label="$1"; port="$2"; outfile="$3"
+            "$adb" -s "$serial" shell am force-stop "$PKG" >/dev/null 2>&1 || true
+            "$adb" -s "$serial" shell am start -W -n "$PKG/.MainActivity" >/dev/null
+            sleep 8
+            pid="$($adb -s "$serial" shell pidof "$PKG" 2>/dev/null | tr -d '\r' | awk '{print $1}')"; test -n "$pid"
+            socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | grep -E "${pid}$|_${pid}($|_)" | head -n1 || true)"
+            [ -n "$socket" ] || socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | head -n1 || true)"; test -n "$socket"
+            "$adb" -s "$serial" forward --remove tcp:$port >/dev/null 2>&1 || true; "$adb" -s "$serial" forward tcp:$port "localabstract:$socket" >/dev/null
+            /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" -Port "$port" -Label "$label" | tr -d '\r' | tee "$outfile"
+            "$adb" -s "$serial" forward --remove tcp:$port >/dev/null 2>&1 || true
+          }
+
+          before="$RUNNER_TEMP/v159-before.txt"; after="$RUNNER_TEMP/v159-after.txt"
+          snapshot BEFORE 9255 "$before"
+          fb_before="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"; printf '%s' "$fb_before" | grep -q facebook_connected_at; echo FACEBOOK_SESSION_BEFORE_RESTART=1
+          snapshot AFTER 9256 "$after"
+          fb_after="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"; printf '%s' "$fb_after" | grep -q facebook_connected_at; echo FACEBOOK_SESSION_AFTER_RESTART=1
+
+          bsrc="$(sed -n 's/^BEFORE_SOURCE_COUNT=//p' "$before")"; asrc="$(sed -n 's/^AFTER_SOURCE_COUNT=//p' "$after")"
+          brule="$(sed -n 's/^BEFORE_RULE_COUNT=//p' "$before")"; arule="$(sed -n 's/^AFTER_RULE_COUNT=//p' "$after")"
+          balert="$(sed -n 's/^BEFORE_ALERT_COUNT=//p' "$before")"; aalert="$(sed -n 's/^AFTER_ALERT_COUNT=//p' "$after")"
+          test "$bsrc" = "$asrc"; test "$brule" = "$arule"; test "$balert" = "$aalert"
+          echo PERSISTED_STATE_COUNTS_STABLE=1
+          echo APP_HTTPONLY_SESSION_SURVIVES_RESTART=1
+          rm -f "$ps1" 2>/dev/null || true
+          echo V159_SAFE_RESIDUAL_ACCEPTANCE_PREPROOF=PASS
