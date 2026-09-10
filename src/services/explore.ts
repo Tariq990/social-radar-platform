@@ -273,8 +273,8 @@ export async function apiExploreDevicePosts(
         confidence: Math.max(0, Math.min(1, Number(raw.confidence) || 0)),
         reason: typeof raw.reason === 'string' ? raw.reason.trim().slice(0, 1000) : ''
       });
-    } catch (error) {
-      console.warn('[apiExploreDevicePosts] Ignoring malformed item', error);
+    } catch {
+      if (import.meta.env.DEV) console.warn('[apiExploreDevicePosts] Ignoring malformed item');
     }
   }
   return {
