@@ -15,9 +15,10 @@ concurrency:
 
 jobs:
   web-and-android:
-    # The active Android alpha branch already runs the same checks plus packaging/publishing in
-    # android-alpha-release.yml. Skip this duplicate PR runner so one push consumes one runner.
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.head.ref != 'work/real-session-ai-provider' }}
+    # Dedicated lanes already have their own controlled validation path. Skip this hosted duplicate
+    # on the protected provider lane and on the isolated Android validation lane, where the
+    # self-hosted Code Complete Gate is the executable source of truth. Manual dispatch stays available.
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.ref != 'work/real-session-ai-provider' && github.event.pull_request.head.ref != 'test/android-headless-emulator-20260909') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
