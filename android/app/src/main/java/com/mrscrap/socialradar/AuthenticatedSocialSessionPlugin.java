@@ -111,6 +111,7 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
 
     @PluginMethod
     public void disconnectFacebook(PluginCall call) {
+        WorkManager.getInstance(getContext()).cancelAllWorkByTag(platformWorkTag("facebook"));
         expirePlatformCookies("facebook");
         SessionStateStore.clearFacebook(getContext());
         resolveDisconnect(call, "facebook");
@@ -118,6 +119,7 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
 
     @PluginMethod
     public void disconnectInstagram(PluginCall call) {
+        WorkManager.getInstance(getContext()).cancelAllWorkByTag(platformWorkTag("instagram"));
         expirePlatformCookies("instagram");
         SessionStateStore.clearInstagram(getContext());
         resolveDisconnect(call, "instagram");
@@ -324,7 +326,7 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
     public void scheduleSource(PluginCall call) {
         String sourceId = call.getString("sourceId");
         String url = call.getString("url");
-        String platform = call.getString("platform", SessionStateStore.platformForUrl(url));
+        String requestedPlatform = call.getString("platform", "");
         String backendBaseUrl = call.getString("backendBaseUrl");
         String locale = "ar".equalsIgnoreCase(call.getString("locale", "en")) ? "ar" : "en";
         if (sourceId == null || sourceId.isBlank() || url == null || backendBaseUrl == null || backendBaseUrl.isBlank()) {
@@ -337,6 +339,19 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
         }
         if (!AuthenticatedWebCollector.isAllowedSocialUrl(url)) {
             call.reject("Invalid source URL");
+            return;
+        }
+        String platform = SessionStateStore.platformForUrl(url);
+        if (platform.isBlank()) {
+            call.reject("Could not determine source platform");
+            return;
+        }
+        if (!requestedPlatform.isBlank() && !platform.equalsIgnoreCase(requestedPlatform)) {
+            call.reject("Source platform does not match source URL");
+            return;
+        }
+        if (!SessionStateStore.isConnectedForPlatform(platform)) {
+            call.reject(("instagram".equals(platform) ? "Instagram" : "Facebook") + " session is not connected");
             return;
         }
 
@@ -353,6 +368,7 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
             .setInputData(input)
             .setConstraints(constraints)
             .addTag("mrscrap-authenticated-source")
+            .addTag(platformWorkTag(platform))
             .addTag("mrscrap-source-" + sourceId)
             .build();
         WorkManager.getInstance(getContext()).enqueueUniquePeriodicWork(
@@ -418,6 +434,10 @@ public class AuthenticatedSocialSessionPlugin extends Plugin {
         String code = message.split("\\|", 2)[0];
         String safe = code.replaceAll("[^A-Za-z0-9_.:-]", "_");
         return safe.substring(0, Math.min(80, safe.length()));
+    }
+
+    private static String platformWorkTag(String platform) {
+        return "mrscrap-platform-" + platform.toLowerCase();
     }
 
     private static String uniqueWorkName(String sourceId) {
