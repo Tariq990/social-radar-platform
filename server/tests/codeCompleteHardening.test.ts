@@ -46,8 +46,8 @@ test('API and Smart Grab responses are bounded and social/media URLs are normali
   assert.match(explore, /Explore response contained an invalid post URL/);
   assert.match(explore, /if \(parsed\.protocol === 'http:'\) parsed\.protocol = 'https:';/);
 
-  assert.match(avatar, /\^https:\\\/\\\//);
-  assert.doesNotMatch(avatar, /\^https\?:\\\/\\\//);
+  assert.ok(avatar.includes("/^https:\\/\\//i.test(src.trim())"));
+  assert.ok(!avatar.includes("/^https?:\\/\\//i.test(src.trim())"));
 });
 
 test('Android updater validates bounded metadata and pins APK downloads to the backend HTTPS origin', () => {
@@ -56,8 +56,8 @@ test('Android updater validates bounded metadata and pins APK downloads to the b
   assert.match(update, /function normalizeDecision/);
   assert.match(update, /value\.channel !== 'android-alpha'/);
   assert.match(update, /value\.versionCode <= installedVersionCode/);
-  assert.match(update, /\^\[a-f0-9\]\{64\}\$/i);
-  assert.match(update, /url\.origin !== backendOrigin\.origin \|\| url\.protocol !== 'https:' /);
+  assert.ok(update.includes("/^[a-f0-9]{64}$/i.test(value.sha256)"));
+  assert.ok(update.includes("url.origin !== backendOrigin.origin || url.protocol !== 'https:'"));
 });
 
 test('device ingestion and explore persistence upgrade cleartext media and strip secret-shaped metadata', () => {
@@ -96,7 +96,7 @@ test('legacy public client connector is fail-closed instead of fabricating ident
 test('Apify credentials are sent in Authorization headers, never query strings', () => {
   const connector = read('server/connectors/apifyConnector.ts');
   assert.doesNotMatch(connector, /[?&]token=\$\{/);
-  assert.match(connector, /Authorization:\s*`Bearer \$\{token\}`/);
+  assert.ok(connector.includes('Authorization: `Bearer ${token}`'));
 });
 
 test('database local cascades match relational ownership semantics and notification timestamps persist', () => {
