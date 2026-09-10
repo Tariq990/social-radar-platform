@@ -44,10 +44,15 @@ test('foreground Meta collector stays fully renderable and starts DOM polling be
 
 test('native startup paints before remote fonts or auth network complete', () => {
   const index = read('index.html');
+  const boot = read('public/boot.js');
   const app = read('src/App.tsx');
   const api = read('src/services/api.ts');
   assert.match(index, /id="mrscrap-boot-shell"/);
-  assert.match(index, /media="print" onload="this.media='all'"/);
+  assert.match(index, /id="mrscrap-fonts"[\s\S]*media="print"/);
+  assert.doesNotMatch(index, /onload=/);
+  assert.match(boot, /document\.getElementById\('mrscrap-fonts'\)/);
+  assert.match(boot, /fonts\.addEventListener\('load', enableFonts/);
+  assert.match(boot, /setAttribute\('media', 'all'\)/);
   assert.match(app, /isNativeAndroid\(\) \? 'authenticated' : 'checking'/);
   assert.match(api, /authSessionPromise/);
   assert.match(api, /6_000/);
@@ -55,15 +60,14 @@ test('native startup paints before remote fonts or auth network complete', () =>
 
 test('Android update check keeps the app bootstrap mounted instead of serializing startup behind a dark screen', () => {
   const gate = read('src/components/ForceUpdateGate.tsx');
-  const marker = 'Keep children mounted while the update check runs so auth/session bootstrap happens in parallel instead of serially.';
-  assert.match(gate, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(gate, /const \[checking, setChecking\] = useState\(false\)/);
+  assert.match(gate, /const \[bootCheckPending, setBootCheckPending\] = useState\(\(\) => isNativeAndroid\(\)\)/);
   assert.match(gate, /fixed inset-0 z-\[100\]/);
   assert.match(gate, /MR SCRAP/);
 
   const nativeBlock = gate.indexOf('if (!requiredUpdate)');
   const childMount = gate.indexOf('{children}', nativeBlock);
-  const checkingOverlay = gate.indexOf('{checking ?', nativeBlock);
+  const checkingOverlay = gate.indexOf('{bootCheckPending || checking ?', nativeBlock);
   assert.ok(nativeBlock >= 0 && childMount > nativeBlock && checkingOverlay > childMount);
 });
 
