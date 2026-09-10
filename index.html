@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; media-src 'self' blob: https:; connect-src 'self' https: ws: wss:; worker-src 'self' blob:; manifest-src 'self'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; media-src 'self' blob: https:; connect-src 'self' https: ws: wss:; worker-src 'self' blob:; manifest-src 'self'" />
     <title>MR SCRAP - Social Radar | Watch What Matters</title>
     <meta name="description" content="AI-powered social watchlist for Facebook and Instagram. Watch what matters, ignore the rest." />
     <meta property="og:title" content="MR SCRAP - Social Radar" />
@@ -14,33 +14,13 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <link rel="manifest" href="/manifest.json" />
-    <!-- Immediate theme initializer script to avoid flash. Keep keys aligned with RadarContext. -->
-    <script>
-      (function() {
-        try {
-          var savedTheme = localStorage.getItem('mrscrap_theme_v2') || 'dark';
-          var root = document.documentElement;
-          if (savedTheme === 'light') {
-            root.classList.remove('dark');
-            root.classList.add('light');
-            var meta = document.getElementById('theme-color-meta');
-            if (meta) meta.setAttribute('content', '#f8fafc');
-          } else {
-            root.classList.remove('light');
-            root.classList.add('dark');
-          }
-          var savedLocale = localStorage.getItem('mrscrap_locale_v2') || 'en';
-          root.lang = savedLocale;
-          root.dir = savedLocale === 'ar' ? 'rtl' : 'ltr';
-        } catch(e) {}
-      })();
-    </script>
-    <!-- Remote fonts are progressive enhancement only. Never block the native first paint. -->
+    <!-- Packaged same-origin bootstrap avoids unsafe-inline script while applying theme before paint. -->
+    <script src="/boot.js"></script>
+    <!-- Remote fonts are progressive enhancement only. -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap">
-    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
-    <noscript><link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet"></noscript>
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   </head>
   <body class="bg-slate-950 text-slate-100 antialiased selection:bg-cyan-500/20 selection:text-cyan-400 min-h-screen transition-colors duration-200">
     <div id="root">
