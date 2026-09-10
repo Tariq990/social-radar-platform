@@ -91,8 +91,9 @@ export async function handleReleasePreRoute(req: Request, res: Response, next: N
     if (req.method === 'PUT' && req.path === RELEASE_UPLOAD_PATH) {
       try {
         await verifyGitHubReleasePublisher(header(req, 'authorization'));
-      } catch (error) {
-        throw new ReleaseHttpError(403, (error as Error)?.message || 'Release publisher authorization failed');
+      } catch {
+        // OIDC verification details are useful internally but should never be reflected to callers.
+        throw new ReleaseHttpError(403, 'Release publisher authorization failed');
       }
 
       const contentType = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
@@ -127,8 +128,10 @@ export async function handleReleasePreRoute(req: Request, res: Response, next: N
 
     next();
   } catch (error) {
-    const status = error instanceof ReleaseHttpError ? error.status : 503;
-    const message = (error as Error)?.message || 'Android release service unavailable';
-    res.status(status).json({ error: message });
+    if (error instanceof ReleaseHttpError) {
+      res.status(error.status).json({ error: error.message });
+      return;
+    }
+    res.status(503).json({ error: 'Android release service unavailable' });
   }
 }
