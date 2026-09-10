@@ -1,6 +1,7 @@
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { SourceConnector, SourceInput, ValidationResult, ResolvedSource, ConnectorHealth } from './types';
 import { NormalizedPost, SocialComment, SourcePlatform } from '../types';
+import { sanitizeTransportMetadata } from '../lib/privacy';
 import { ensureApiDeviceAuth } from '../services/api';
 
 export interface NativeSessionStatus {
@@ -183,6 +184,14 @@ function isGenericIdentityName(value: string | undefined, externalId: string): b
   return !name || name === id || ['facebook', 'instagram', 'page', 'profile'].includes(name);
 }
 
+function detailCollectionErrorCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error || '');
+  if (/SESSION_CHECKPOINT/i.test(message)) return 'SESSION_CHECKPOINT';
+  if (/SESSION_REQUIRED|session expired|session is not connected/i.test(message)) return 'SESSION_REQUIRED';
+  if (/timed out|timeout/i.test(message)) return 'DETAIL_TIMEOUT';
+  return 'DETAIL_COLLECTION_FAILED';
+}
+
 function toNormalizedPost(source: { id: string; platform: SourcePlatform; url: string; externalId: string; displayName?: string; avatarUrl?: string }, post: NativeCollectedPost): NormalizedPost | null {
   const originalUrl = normalizeSocialUrl(post.originalUrl, source.platform);
   if (!originalUrl) return null;
@@ -202,7 +211,7 @@ function toNormalizedPost(source: { id: string; platform: SourcePlatform; url: s
     publishedAt: typeof post.publishedAt === 'string' ? post.publishedAt.slice(0, 255) : '',
     detectedAt,
     fingerprint: (typeof post.externalPostId === 'string' && post.externalPostId.trim()) || originalUrl,
-    metadata: { ...(post.metadata || {}), ingestion: 'android_device_session' }
+    metadata: { ...sanitizeTransportMetadata(post.metadata), ingestion: 'android_device_session' }
   };
 }
 
@@ -421,7 +430,7 @@ export class DeviceSessionConnector implements SourceConnector {
           ...post.metadata,
           detailCollection: 'authenticated_post_detail',
           detailAvailable: false,
-          detailError: String(error?.message || 'Post detail collection failed').slice(0, 300)
+          detailError: detailCollectionErrorCode(error)
         };
       }
     }

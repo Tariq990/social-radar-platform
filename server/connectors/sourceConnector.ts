@@ -8,6 +8,19 @@ import {
 import { ApifyConnector } from './apifyConnector';
 import { PublicMetaResolver } from './metaResolver';
 
+function detectSourcePlatform(rawUrl: string): SourcePlatform {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return 'other';
+    const host = parsed.hostname.toLowerCase();
+    if (host === 'instagram.com' || host.endsWith('.instagram.com') || host === 'instagr.am' || host.endsWith('.instagr.am')) return 'instagram';
+    if (host === 'facebook.com' || host.endsWith('.facebook.com') || host === 'fb.com' || host.endsWith('.fb.com') || host === 'fb.watch') return 'facebook';
+  } catch {
+    return 'other';
+  }
+  return 'other';
+}
+
 /**
  * Server-side connector manager.
  *
@@ -50,7 +63,15 @@ export class SourceConnectorManager {
     }
 
     if (isDemoMode) {
-      const isFb = rawUrl.includes('facebook.com');
+      const demoPlatform = detectSourcePlatform(rawUrl);
+      if (demoPlatform === 'other') {
+        return {
+          valid: false, platform: 'other', externalId: '', name: '', handle: '', url: '',
+          visibilityType: 'authenticated', connectorType: 'device_session', connectorStatus: 'error',
+          requiresAuthentication: true, error: 'Only Facebook and Instagram sources are supported in this phase.'
+        };
+      }
+      const isFb = demoPlatform === 'facebook';
       return {
         valid: true,
         platform: isFb ? 'facebook' : 'instagram',
@@ -67,7 +88,7 @@ export class SourceConnectorManager {
       };
     }
 
-    const platform: SourcePlatform = rawUrl.includes('instagram.com') ? 'instagram' : rawUrl.includes('facebook.com') || rawUrl.includes('fb.com') || rawUrl.includes('fb.watch') ? 'facebook' : 'other';
+    const platform: SourcePlatform = detectSourcePlatform(rawUrl);
     if (platform === 'other') {
       return {
         valid: false,

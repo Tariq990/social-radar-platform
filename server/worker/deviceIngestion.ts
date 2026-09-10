@@ -208,11 +208,11 @@ async function evaluateAndPersistMatches(
           ).catch(() => {});
         }
       }
-    } catch (error: any) {
+    } catch {
       result.evaluationErrors.push({
         postId: post.id,
         ruleId: rule.id,
-        error: String(error?.message || 'AI evaluation failed').slice(0, 500)
+        error: 'EVALUATION_FAILED'
       });
     }
   }

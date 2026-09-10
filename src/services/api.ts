@@ -1,5 +1,6 @@
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { Source, WatchRule, AlertMatch, NormalizedPost, ConnectorStatus, ConnectorType, SourcePlatform } from '../types';
+import { sanitizeTransportMetadata } from '../lib/privacy';
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
 const DEFAULT_ANDROID_API_BASE_URL = 'https://mr-scrap-api-live.onrender.com';
@@ -631,7 +632,7 @@ async function ingestWithAuth(auth: ApiDeviceAuthSession, sourceId: string, post
     text: post.text,
     media: post.media,
     publishedAt: post.publishedAt,
-    metadata: post.metadata
+    metadata: sanitizeTransportMetadata(post.metadata)
   }));
 
   return requestJson<any>('/api/device/ingest', {

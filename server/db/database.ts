@@ -162,18 +162,18 @@ export class DatabaseRepository {
             console.log('[Database] PostgreSQL schema migration executed successfully.');
           }
           this.isPostgres = true;
-          console.log('[Database] Connected to PostgreSQL at', dbUrl.split('@')[1] || 'remote instance');
+          console.log('[Database] PostgreSQL connection established.');
         } finally { client.release(); }
         return;
       } catch (err) {
-        console.warn('[Database] PostgreSQL connection failed, falling back to local persistent store:', (err as any)?.message);
+        console.warn('[Database] PostgreSQL connection failed; local fallback will be used only where application mode permits it.');
         this.pool = null;
         this.isPostgres = false;
       }
     }
 
     this.loadFromDisk();
-    console.log('[Database] Local persistent store loaded from', this.localFilePath);
+    console.log('[Database] Local persistent store loaded.');
     if (!this.memoryStore.users.some(u => u.id === 'user_default')) {
       this.memoryStore.users.push({
         id: 'user_default', email: 'user@mrscrap.app', name: 'Radar Operator', tier: 'pro',
@@ -193,7 +193,7 @@ export class DatabaseRepository {
           notifications: parsed.notifications || [], connector_events: parsed.connector_events || []
         };
       }
-    } catch (e) { console.error('[Database] Failed to read local storage file, starting fresh', e); }
+    } catch { console.error('[Database] Failed to read local storage file; starting with an empty local store.'); }
   }
 
   private saveToDisk(): void {
@@ -201,7 +201,7 @@ export class DatabaseRepository {
       const tempPath = `${this.localFilePath}.tmp`;
       fs.writeFileSync(tempPath, JSON.stringify(this.memoryStore, null, 2), 'utf8');
       fs.renameSync(tempPath, this.localFilePath);
-    } catch (e) { console.error('[Database] Failed to persist data to disk', e); }
+    } catch { console.error('[Database] Failed to persist local data.'); }
   }
 
   isUsingPostgres(): boolean { return this.isPostgres; }
