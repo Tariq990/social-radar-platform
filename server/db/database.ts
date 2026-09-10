@@ -162,18 +162,21 @@ export class DatabaseRepository {
             console.log('[Database] PostgreSQL schema migration executed successfully.');
           }
           this.isPostgres = true;
-          console.log('[Database] Connected to PostgreSQL at', dbUrl.split('@')[1] || 'remote instance');
+          console.log('[Database] Connected to PostgreSQL.');
         } finally { client.release(); }
         return;
       } catch (err) {
-        console.warn('[Database] PostgreSQL connection failed, falling back to local persistent store:', (err as any)?.message);
+        const errorCode = typeof (err as any)?.code === 'string'
+          ? String((err as any).code).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64)
+          : '';
+        console.warn(`[Database] PostgreSQL connection failed${errorCode ? ` (${errorCode})` : ''}.`);
         this.pool = null;
         this.isPostgres = false;
       }
     }
 
     this.loadFromDisk();
-    console.log('[Database] Local persistent store loaded from', this.localFilePath);
+    console.log('[Database] Local persistent store loaded.');
     if (!this.memoryStore.users.some(u => u.id === 'user_default')) {
       this.memoryStore.users.push({
         id: 'user_default', email: 'user@mrscrap.app', name: 'Radar Operator', tier: 'pro',
@@ -193,7 +196,7 @@ export class DatabaseRepository {
           notifications: parsed.notifications || [], connector_events: parsed.connector_events || []
         };
       }
-    } catch (e) { console.error('[Database] Failed to read local storage file, starting fresh', e); }
+    } catch { console.error('[Database] Failed to read local storage file; starting fresh.'); }
   }
 
   private saveToDisk(): void {
@@ -201,7 +204,7 @@ export class DatabaseRepository {
       const tempPath = `${this.localFilePath}.tmp`;
       fs.writeFileSync(tempPath, JSON.stringify(this.memoryStore, null, 2), 'utf8');
       fs.renameSync(tempPath, this.localFilePath);
-    } catch (e) { console.error('[Database] Failed to persist data to disk', e); }
+    } catch { console.error('[Database] Failed to persist data to disk.'); }
   }
 
   isUsingPostgres(): boolean { return this.isPostgres; }
@@ -401,7 +404,7 @@ export class DatabaseRepository {
   }
 
   async deleteRule(id: string): Promise<void> {
-    if (this.isPostgres && this.pool) { await this.pool.query('DELETE FROM rules WHERE id = $1', [id]); return; }
+    if (this.isPostgres && this.pool) { await this.pool.query('DELETE FROM rules WHERE id = $1'); return; }
     const matchIds = new Set(this.memoryStore.matches.filter(match => match.rule_id === id).map(match => match.id));
     this.memoryStore.rules = this.memoryStore.rules.filter(rule => rule.id !== id);
     this.memoryStore.rule_sources = this.memoryStore.rule_sources.filter(mapping => mapping.rule_id !== id);
