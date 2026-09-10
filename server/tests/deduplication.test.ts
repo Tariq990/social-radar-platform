@@ -41,3 +41,8 @@ test('external post ID takes precedence over URL/text', () => {
     'instagram:id:ABC123'
   );
 });
+
+test('canonicalization fails closed for malformed or unsupported URL input', () => {
+  assert.equal(canonicalizeSocialUrl('http://[invalid'), '');
+  assert.equal(canonicalizeSocialUrl('javascript:alert(1)'), '');
+});
