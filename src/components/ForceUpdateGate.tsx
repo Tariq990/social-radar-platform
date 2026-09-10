@@ -47,7 +47,9 @@ function cacheDecision(decision: AndroidUpdateDecision | null) {
 }
 
 export const ForceUpdateGate: React.FC<Props> = ({ children }) => {
-  const [checking, setChecking] = useState(false);
+  // Native builds start covered from the first render. Children stay mounted behind the cover so
+  // authentication/session bootstrap can run in parallel without exposing an unchecked app UI.
+  const [checking, setChecking] = useState(() => isNativeAndroid());
   const [requiredUpdate, setRequiredUpdate] = useState<AndroidUpdateDecision | null>(null);
   const [installing, setInstalling] = useState(false);
   const [message, setMessage] = useState('');
@@ -71,6 +73,7 @@ export const ForceUpdateGate: React.FC<Props> = ({ children }) => {
       return;
     }
 
+    setChecking(true);
     try {
       const { installed, decision } = await checkAndroidUpdate();
       if (decision.updateRequired && decision.versionCode && decision.versionCode > installed.versionCode) {
@@ -146,7 +149,6 @@ export const ForceUpdateGate: React.FC<Props> = ({ children }) => {
   if (!requiredUpdate) {
     return (
       <>
-        {/* Keep children mounted while the update check runs so auth/session bootstrap happens in parallel instead of serially. */}
         {children}
         {checking ? (
           <div
@@ -172,12 +174,8 @@ export const ForceUpdateGate: React.FC<Props> = ({ children }) => {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center px-5" dir={isArabic ? 'rtl' : 'ltr'}>
       <div className="w-full max-w-md rounded-3xl border border-slate-800 bg-slate-900/95 p-7 shadow-2xl">
-        <div className="w-14 h-14 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center mb-5 text-cyan-300 text-2xl font-black">
-          ↑
-        </div>
-        <h1 className="text-2xl font-black tracking-tight">
-          {isArabic ? 'تحديث إلزامي متوفر' : 'Required update available'}
-        </h1>
+        <div className="w-14 h-14 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center mb-5 text-cyan-300 text-2xl font-black">↑</div>
+        <h1 className="text-2xl font-black tracking-tight">{isArabic ? 'تحديث إلزامي متوفر' : 'Required update available'}</h1>
         <p className="mt-3 text-sm leading-6 text-slate-400">
           {isArabic
             ? 'لا يمكن متابعة استخدام MR SCRAP قبل تثبيت آخر إصدار. سيتم تنزيل ملف التحديث من خادم MR SCRAP والتحقق من بصمته وهوية الحزمة وتوقيعها قبل فتح مثبت Android.'
@@ -185,39 +183,20 @@ export const ForceUpdateGate: React.FC<Props> = ({ children }) => {
         </p>
 
         <div className="mt-5 rounded-2xl border border-slate-800 bg-slate-950/70 p-4 text-xs text-slate-400 space-y-2">
-          <div className="flex justify-between gap-4">
-            <span>{isArabic ? 'الإصدار الجديد' : 'New version'}</span>
-            <strong className="text-slate-200">{requiredUpdate.versionName || requiredUpdate.versionCode}</strong>
-          </div>
+          <div className="flex justify-between gap-4"><span>{isArabic ? 'الإصدار الجديد' : 'New version'}</span><strong className="text-slate-200">{requiredUpdate.versionName || requiredUpdate.versionCode}</strong></div>
           {requiredUpdate.sizeBytes ? (
-            <div className="flex justify-between gap-4">
-              <span>{isArabic ? 'حجم التنزيل' : 'Download size'}</span>
-              <strong className="text-slate-200">{(requiredUpdate.sizeBytes / 1024 / 1024).toFixed(1)} MB</strong>
-            </div>
+            <div className="flex justify-between gap-4"><span>{isArabic ? 'حجم التنزيل' : 'Download size'}</span><strong className="text-slate-200">{(requiredUpdate.sizeBytes / 1024 / 1024).toFixed(1)} MB</strong></div>
           ) : null}
         </div>
 
         {message ? <p className="mt-4 text-xs leading-5 text-cyan-300">{message}</p> : null}
         {lastError ? <p className="mt-4 text-xs leading-5 text-rose-300">{lastError}</p> : null}
 
-        <button
-          type="button"
-          onClick={startUpdate}
-          disabled={installing}
-          className="mt-6 w-full rounded-2xl bg-cyan-400 px-5 py-3.5 font-black text-slate-950 disabled:opacity-60"
-        >
-          {installing
-            ? (isArabic ? 'جاري تنزيل التحديث...' : 'Downloading update...')
-            : (isArabic ? 'تحديث الآن' : 'Update now')}
+        <button type="button" onClick={startUpdate} disabled={installing} className="mt-6 w-full rounded-2xl bg-cyan-400 px-5 py-3.5 font-black text-slate-950 disabled:opacity-60">
+          {installing ? (isArabic ? 'جاري تنزيل التحديث...' : 'Downloading update...') : (isArabic ? 'تحديث الآن' : 'Update now')}
         </button>
-
-        <button
-          type="button"
-          onClick={() => void refresh()}
-          disabled={installing}
-          className="mt-3 w-full rounded-2xl border border-slate-700 px-5 py-3 text-sm font-bold text-slate-300 disabled:opacity-60"
-        >
-          {isArabic ? 'إعادة فحص التحديث' : 'Check again'}
+        <button type="button" onClick={() => void refresh()} disabled={installing || checking} className="mt-3 w-full rounded-2xl border border-slate-700 px-5 py-3 text-sm font-bold text-slate-300 disabled:opacity-60">
+          {checking ? (isArabic ? 'جاري الفحص...' : 'Checking...') : (isArabic ? 'إعادة فحص التحديث' : 'Check again')}
         </button>
 
         <p className="mt-5 text-[11px] leading-5 text-slate-500">
