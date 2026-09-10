@@ -91,7 +91,7 @@ export class ApifyConnector implements ISourceConnector {
       return {
         ok: false,
         latencyMs: Date.now() - start,
-        message: timeout ? 'Apify health check timed out' : (err?.message || 'Network error connecting to Apify')
+        message: timeout ? 'Apify health check timed out' : 'Network error connecting to Apify'
       };
     }
   }
@@ -140,7 +140,7 @@ export class ApifyConnector implements ISourceConnector {
       return {
         valid: false, platform, externalId: handle, name: '', handle: `@${handle}`, url: canonicalUrl,
         visibilityType: 'public', connectorType: 'public_cloud', connectorStatus: 'error',
-        requiresAuthentication: false, error: 'APIFY_API_TOKEN is not configured. Add the server-side token to use the optional public provider.'
+        requiresAuthentication: false, error: 'The optional public provider is not configured.'
       };
     }
 
@@ -163,11 +163,10 @@ export class ApifyConnector implements ISourceConnector {
       );
 
       if (!res.ok) {
-        const errorText = (await res.text()).slice(0, 150);
         return {
           valid: false, platform, externalId: handle, name: '', handle: `@${handle}`, url: canonicalUrl,
           visibilityType: 'public', connectorType: 'public_cloud', connectorStatus: 'error',
-          requiresAuthentication: false, error: `Apify Actor error (${res.status}): ${errorText}`
+          requiresAuthentication: false, error: `Public provider could not resolve this source (HTTP ${res.status}).`
         };
       }
 
@@ -177,7 +176,7 @@ export class ApifyConnector implements ISourceConnector {
           valid: false, platform, externalId: handle, name: '', handle: `@${handle}`, url: canonicalUrl,
           visibilityType: 'public', connectorType: 'public_cloud', connectorStatus: 'error',
           requiresAuthentication: false,
-          error: `No public data returned by Apify for this ${platform} URL. The page might be private or geo-restricted.`
+          error: `No public data was returned for this ${platform} source. It may be private or unavailable.`
         };
       }
 
@@ -189,7 +188,7 @@ export class ApifyConnector implements ISourceConnector {
         return {
           valid: false, platform, externalId, name: '', handle: `@${ownerUsername}`, url: canonicalUrl,
           visibilityType: 'public', connectorType: 'public_cloud', connectorStatus: 'error',
-          requiresAuthentication: false, error: 'Apify did not return reliable source identity metadata'
+          requiresAuthentication: false, error: 'The public provider did not return reliable source identity metadata.'
         };
       }
 
@@ -215,7 +214,7 @@ export class ApifyConnector implements ISourceConnector {
         valid: false, platform, externalId: handle, name: '', handle: `@${handle}`, url: canonicalUrl,
         visibilityType: 'public', connectorType: 'public_cloud', connectorStatus: 'error',
         requiresAuthentication: false,
-        error: `Apify execution failed: ${timeout ? 'Request timed out' : (err?.message || 'Unknown provider error')}`
+        error: timeout ? 'Public provider request timed out.' : 'Public provider request failed.'
       };
     }
   }
@@ -227,7 +226,7 @@ export class ApifyConnector implements ISourceConnector {
     externalId: string;
   }): Promise<RawProviderPost[]> {
     const token = this.getToken();
-    if (!token) throw new Error('APIFY_API_TOKEN is not configured on the server.');
+    if (!token) throw new Error('The optional public provider is not configured.');
     if (source.platform !== 'facebook' && source.platform !== 'instagram') throw new Error('Unsupported source platform');
     if (platformForSocialUrl(source.url) !== source.platform) throw new Error('Source URL does not match source platform');
 
@@ -252,13 +251,12 @@ export class ApifyConnector implements ISourceConnector {
         }
       );
     } catch (err: any) {
-      if (err?.name === 'AbortError' || err?.name === 'TimeoutError') throw new Error('Apify scraping request timed out');
-      throw err;
+      if (err?.name === 'AbortError' || err?.name === 'TimeoutError') throw new Error('Public provider collection timed out');
+      throw new Error('Public provider collection failed');
     }
 
     if (!res.ok) {
-      const errText = (await res.text()).slice(0, 150);
-      throw new Error(`Apify scraping error (HTTP ${res.status}): ${errText}`);
+      throw new Error(`Public provider rejected collection with HTTP ${res.status}`);
     }
 
     const items = await res.json() as any;
