@@ -26,6 +26,19 @@ VITE_API_BASE_URL=https://your-real-backend.example
 
 Do not use a CI APK built with `https://example.invalid` for this acceptance test.
 
+### Non-destructive install/update rule
+
+The physical acceptance gate must preserve the existing application state and Meta session unless a specific acceptance row is explicitly testing logout/disconnect behavior.
+
+- **Do not uninstall MR SCRAP to update the candidate.**
+- **Do not clear app data, WebView data, Facebook cookies, or the AVD/device session as an update step.**
+- When MR SCRAP is already installed, verify the installed APK and candidate APK have the same signing certificate before replacing it.
+- If signatures are compatible, update only with `adb install -r` so app data remains intact.
+- If signatures are incompatible, **stop** and record the blocker. Do not work around it with uninstall/reinstall because that would destroy the session evidence being tested.
+- The repository workflow **Android Physical ADB Final Gate** implements this fail-closed update rule and also requires exactly one authorized physical target plus an existing Facebook-session marker before it builds or installs anything.
+
+The automated Physical ADB Final Gate is a **non-destructive prerequisite and collector proof**, not a substitute for the complete manual acceptance matrix below. A successful automated run proves the candidate can preserve the installed session and execute the real collector boundary; all required matrix rows still need evidence before the P0 gate can close.
+
 ---
 
 ## Test record
@@ -48,16 +61,16 @@ Record these values before starting:
 
 ## A. Installation / backend connectivity
 
-1. Install the current alpha APK.
+1. If MR SCRAP is already installed and has the Facebook session that will be tested, **preserve it**: verify signing compatibility and replace the APK with `adb install -r`. Do not uninstall or clear data. If MR SCRAP is not installed yet, install the candidate normally.
 2. Launch MR SCRAP.
 3. Confirm the application loads without a blank screen/crash.
 4. Confirm the public backend status is reachable.
 5. Confirm production mode does not display seeded demo alerts.
 6. Confirm the backend health endpoint reports PostgreSQL and configured AI successfully.
 
-**Pass:** app launches and talks to the configured HTTPS backend.
+**Pass:** app launches and talks to the configured HTTPS backend while an existing app/social session survives a replacement update when applicable.
 
-**Fail:** app uses a placeholder backend, silently enters demo mode, or crashes.
+**Fail:** app uses a placeholder backend, silently enters demo mode, crashes, requires an unnecessary uninstall/data clear, or loses an existing session during a signature-compatible replacement update.
 
 ---
 
