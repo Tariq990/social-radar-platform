@@ -28,6 +28,10 @@ public class AuthenticatedSourceWorker extends Worker {
     public static final String KEY_BACKEND_BASE_URL = "backendBaseUrl";
     public static final String KEY_LOCALE = "locale";
 
+    // AuthenticatedWebCollector has a 75 second terminal timeout. The worker must remain alive
+    // longer than that so it never returns RETRY while the collector WebView is still running.
+    private static final long COLLECTOR_WAIT_SECONDS = 85;
+
     private static final class HttpResult {
         final int status;
         final String body;
@@ -57,12 +61,20 @@ public class AuthenticatedSourceWorker extends Worker {
         if (authToken == null || authToken.length() < 24 || authToken.length() > 512) {
             return Result.failure(errorData("Backend device authorization is missing; reopen the app to re-register this device"));
         }
-        if (platform == null || platform.isBlank()) platform = SessionStateStore.platformForUrl(sourceUrl);
-        if (!SessionStateStore.isConnectedForPlatform(platform)) {
-            return Result.failure(errorData(("instagram".equalsIgnoreCase(platform) ? "Instagram" : "Facebook") + " session requires reconnect"));
-        }
         if (!AuthenticatedWebCollector.isAllowedSocialUrl(sourceUrl) || !isAllowedBackendUrl(backendBaseUrl)) {
             return Result.failure(errorData("Invalid source/backend URL"));
+        }
+
+        String derivedPlatform = SessionStateStore.platformForUrl(sourceUrl);
+        if (derivedPlatform.isBlank()) {
+            return Result.failure(errorData("Could not determine source platform"));
+        }
+        if (platform != null && !platform.isBlank() && !derivedPlatform.equalsIgnoreCase(platform)) {
+            return Result.failure(errorData("Worker source platform does not match source URL"));
+        }
+        platform = derivedPlatform;
+        if (!SessionStateStore.isConnectedForPlatform(platform)) {
+            return Result.failure(errorData(("instagram".equalsIgnoreCase(platform) ? "Instagram" : "Facebook") + " session requires reconnect"));
         }
 
         CountDownLatch latch = new CountDownLatch(1);
@@ -74,7 +86,7 @@ public class AuthenticatedSourceWorker extends Worker {
         });
 
         try {
-            if (!latch.await(35, TimeUnit.SECONDS)) return Result.retry();
+            if (!latch.await(COLLECTOR_WAIT_SECONDS, TimeUnit.SECONDS)) return Result.retry();
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             return Result.retry();
