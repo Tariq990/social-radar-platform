@@ -1,0 +1,116 @@
+name: Android v157 Modal Diagnostic
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-v157-modal-diagnostic.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 12
+    env:
+      PKG: com.mrscrap.socialradar
+    steps:
+      - name: Diagnose modal eligibility and wrapper failure safely
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1;exit}')"
+          test -n "$serial"
+          version="$($adb -s "$serial" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"
+          echo "INSTALLED_VERSION_CODE=$version"
+          test "$version" = 157
+          marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          printf '%s' "$marker" | grep -q facebook_connected_at
+          echo FACEBOOK_SESSION_PRESENT=1
+          curl -fsS --max-time 30 https://mr-scrap-api-live.onrender.com/api/health >/dev/null || true
+          $adb -s "$serial" shell am force-stop "$PKG" >/dev/null 2>&1 || true
+          $adb -s "$serial" shell am start -W -n "$PKG/.MainActivity" >/dev/null
+          sleep 15
+          pid="$($adb -s "$serial" shell pidof "$PKG" 2>/dev/null | tr -d '\r')"
+          test -n "$pid"
+          socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | grep -E "${pid}$|_${pid}($|_)" | head -n1 || true)"
+          [ -n "$socket" ] || socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | head -n1 || true)"
+          test -n "$socket"
+          $adb -s "$serial" forward --remove tcp:9228 >/dev/null 2>&1 || true
+          $adb -s "$serial" forward tcp:9228 "localabstract:$socket" >/dev/null
+          $adb -s "$serial" logcat -c >/dev/null 2>&1 || true
+          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-v157-modal-diagnostic.ps1"
+          cat > "$ps1" <<'PS'
+          $ErrorActionPreference='Stop'
+          function Target {
+            for($i=0;$i -lt 60;$i++){
+              try{$t=@(Invoke-RestMethod -Uri 'http://127.0.0.1:9228/json/list' -TimeoutSec 2|Where-Object{$_.type -eq 'page' -and [string]$_.url -like 'https://localhost*'}|Select-Object -First 1);if($t.Count){return $t[0]}}catch{}
+              Start-Sleep -Milliseconds 250
+            }
+            throw 'app target missing'
+          }
+          function Eval([string]$raw,[string]$expr,[int]$seconds=420){
+            $u=[Uri]$raw;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($seconds))
+            $ws.ConnectAsync([Uri]('ws://127.0.0.1:9228'+$u.PathAndQuery),$cts.Token).GetAwaiter().GetResult()|Out-Null
+            $payload=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 10
+            $bytes=[Text.Encoding]::UTF8.GetBytes($payload);$ws.SendAsync([ArraySegment[byte]]::new($bytes),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null
+            $buf=New-Object byte[] 262144;$sb=[Text.StringBuilder]::new()
+            while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id -ne 1){continue};if($m.result.exceptionDetails){throw 'runtime eval exception'};$v=$m.result.result.value;try{$ws.Abort()}catch{};return $v}
+          }
+          $app=Target
+          $expr=@'
+          (async()=>{
+            const safe=(v)=>String(v||'').split('|')[0].replace(/[^A-Za-z0-9_.: -]/g,'_').slice(0,120);
+            const out={api:false,total:0,device:0,facebookDevice:0,activeFacebookDevice:0,pausedFacebookDevice:0,connected:false,direct:{ok:false,count:0,media:false},modal:{button:false,error:false,errorCode:'NONE',cards:0,media:0},warn:[]};
+            const cap=globalThis.Capacitor?.Plugins?.AuthenticatedSocialSession;if(!cap)return out;
+            try{const s=await cap.status();out.connected=s?.facebookConnected===true||s?.connected===true;}catch{}
+            let rows=[];for(let i=0;i<8;i++){try{const r=await fetch('https://mr-scrap-api-live.onrender.com/api/sources',{credentials:'include'});if(r.ok){rows=await r.json();out.api=true;if(Array.isArray(rows)&&rows.length)break;}}catch{};await new Promise(r=>setTimeout(r,600));}
+            rows=Array.isArray(rows)?rows:[];out.total=rows.length;
+            const isDevice=x=>(x?.connector_type||x?.connectorType||'device_session')==='device_session';
+            const fb=rows.filter(x=>x?.platform==='facebook'&&isDevice(x));out.device=rows.filter(isDevice).length;out.facebookDevice=fb.length;out.pausedFacebookDevice=fb.filter(x=>x?.isPaused===true||x?.is_paused===true).length;out.activeFacebookDevice=fb.length-out.pausedFacebookDevice;
+            const source=fb[0]||null;
+            if(source){try{const c=await cap.collectSource({sourceId:source.id,url:source.url,platform:'facebook',limit:10});const posts=Array.isArray(c?.posts)?c.posts:[];out.direct={ok:true,count:posts.length,media:posts.some(p=>Array.isArray(p?.media)&&p.media.some(m=>m&&/^https?:\/\//i.test(String(m.url||''))))};}catch(e){out.direct={ok:false,count:0,media:false,error:safe(e?.message||e)}}}
+            const oldWarn=console.warn.bind(console);window.__mrscrapWarnings=[];console.warn=(...args)=>{try{if(String(args[0]||'').startsWith('[ExtractedPosts] Collection failed'))window.__mrscrapWarnings.push(safe(args[1]?.message||args[1]||'unknown'));}catch{};oldWarn(...args)};
+            window.dispatchEvent(new CustomEvent('mrscrap:navigate',{detail:{screen:'radar'}}));for(let i=0;i<100&&!document.getElementById('btn-extracted-posts-home');i++)await new Promise(r=>setTimeout(r,200));const button=document.getElementById('btn-extracted-posts-home');out.modal.button=Boolean(button);button?.click();
+            for(let i=0;i<600;i++){const modal=document.getElementById('modal-extracted-posts');const loading=document.getElementById('extracted-posts-loading');const err=document.getElementById('extracted-posts-error');const cards=document.querySelectorAll('[data-extracted-post="1"]');if(modal&&!loading&&(err||cards.length)){out.modal.error=Boolean(err);out.modal.cards=cards.length;out.modal.media=document.querySelectorAll('[data-extracted-image="1"],[data-extracted-video="1"]').length;const t=String(err?.textContent||'');out.modal.errorCode=/اربط|Connect Facebook|Connect Instagram/i.test(t)?'NO_ELIGIBLE_SOURCE':/لم يتم استخراج|No real posts/i.test(t)?'NO_POSTS':t?'OTHER':'NONE';break;}await new Promise(r=>setTimeout(r,250));}
+            out.warn=(window.__mrscrapWarnings||[]).slice(0,6);console.warn=oldWarn;return out;
+          })()
+          '@
+          $r=Eval ([string]$app.webSocketDebuggerUrl) $expr 420
+          Write-Output ('APP_API_REACHABLE='+$(if($r.api){'1'}else{'0'}))
+          Write-Output ('SOURCE_TOTAL='+[int]$r.total)
+          Write-Output ('DEVICE_SOURCE_COUNT='+[int]$r.device)
+          Write-Output ('FACEBOOK_DEVICE_SOURCE_COUNT='+[int]$r.facebookDevice)
+          Write-Output ('ACTIVE_FACEBOOK_DEVICE_SOURCE_COUNT='+[int]$r.activeFacebookDevice)
+          Write-Output ('PAUSED_FACEBOOK_DEVICE_SOURCE_COUNT='+[int]$r.pausedFacebookDevice)
+          Write-Output ('FACEBOOK_CONNECTED='+$(if($r.connected){'1'}else{'0'}))
+          Write-Output ('DIRECT_COLLECT_10_OK='+$(if($r.direct.ok){'1'}else{'0'}))
+          Write-Output ('DIRECT_COLLECT_10_COUNT='+[int]$r.direct.count)
+          Write-Output ('DIRECT_COLLECT_10_MEDIA='+$(if($r.direct.media){'1'}else{'0'}))
+          if($r.direct.error){Write-Output ('DIRECT_COLLECT_ERROR='+[string]$r.direct.error)}
+          Write-Output ('MODAL_BUTTON='+$(if($r.modal.button){'1'}else{'0'}))
+          Write-Output ('MODAL_ERROR='+$(if($r.modal.error){'1'}else{'0'}))
+          Write-Output ('MODAL_ERROR_CODE='+[string]$r.modal.errorCode)
+          Write-Output ('MODAL_CARD_COUNT='+[int]$r.modal.cards)
+          Write-Output ('MODAL_MEDIA_COUNT='+[int]$r.modal.media)
+          Write-Output ('MODAL_SOURCE_WARNING_COUNT='+@($r.warn).Count)
+          foreach($w in @($r.warn)){Write-Output ('MODAL_SOURCE_WARNING='+[string]$w)}
+          PS
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
+          logs="$($adb -s "$serial" logcat -d -v brief MRSCRAP_FLOW:I MRSCRAP_COLLECTOR:I '*:S' 2>/dev/null | tr -d '\r' || true)"
+          echo "COLLECT_ENTER_COUNT=$(printf '%s\n' "$logs" | grep -c 'event=collect_source_enter' || true)"
+          echo "COLLECT_SUCCESS_COUNT=$(printf '%s\n' "$logs" | grep -c 'event=collect_source_success' || true)"
+          echo "COLLECT_ERROR_COUNT=$(printf '%s\n' "$logs" | grep -c 'event=collect_source_error' || true)"
+          marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          printf '%s' "$marker" | grep -q facebook_connected_at
+          echo FACEBOOK_SESSION_AFTER_DIAGNOSTIC=1
+          rm -f "$ps1" 2>/dev/null || true
+          $adb -s "$serial" forward --remove tcp:9228 >/dev/null 2>&1 || true
+          echo V157_MODAL_DIAGNOSTIC_COMPLETE=1
