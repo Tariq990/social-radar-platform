@@ -155,9 +155,11 @@ export const SmartGrabPanel: React.FC = () => {
         throw new Error(locale === 'ar' ? `اربط ${names} من الإعدادات أولًا.` : `Connect ${names} in Settings first.`);
       }
 
+      // Each collector owns a real Android WebView. Keep concurrency at one so Smart Grab cannot
+      // create multiple simultaneous Meta renderers and race lifecycle/CPU/RAM on the phone.
       const collected = await mapWithConcurrency<Source, { source: Source; posts: Awaited<ReturnType<DeviceSessionConnector['fetchLatest']>>; error?: string }>(
         connected,
-        2,
+        1,
         async source => {
           try {
             const posts = await connector.fetchLatest(source, limit, {
