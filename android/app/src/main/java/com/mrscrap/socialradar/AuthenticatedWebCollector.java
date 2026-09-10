@@ -693,13 +693,41 @@ final class AuthenticatedWebCollector {
                 return Number(a.metadata?.feedIndex || 0) - Number(b.metadata?.feedIndex || 0);
               });
 
+              // Facebook virtualizes feed units while scrolling. Preserve distinct posts observed
+              // across extraction polls so a requested multi-post grab does not collapse to only the
+              // few units still mounted in the final DOM viewport. This state stays inside the local
+              // authenticated WebView and is discarded with the WebView.
+              const accumulatorKey = '__mrscrapCollectedFeedPostsV1';
+              const accumulator = Array.isArray(window[accumulatorKey]) ? window[accumulatorKey] : [];
+              const accumulatedIndex = new Map();
+              accumulator.forEach((post, index) => {
+                const key = canonicalPostKey(post?.originalUrl || '', post?.externalPostId || '');
+                if (key) accumulatedIndex.set(key, index);
+              });
+              for (const post of posts) {
+                const key = canonicalPostKey(post.originalUrl || '', post.externalPostId || '');
+                if (!key) continue;
+                const existingIndex = accumulatedIndex.get(key);
+                if (existingIndex === undefined) {
+                  accumulatedIndex.set(key, accumulator.length);
+                  accumulator.push(post);
+                  continue;
+                }
+                const existing = accumulator[existingIndex];
+                const richerText = String(post.text || '').length > String(existing?.text || '').length;
+                const richerMedia = (post.media?.length || 0) > (existing?.media?.length || 0);
+                if (richerText || richerMedia) accumulator[existingIndex] = { ...existing, ...post };
+              }
+              const accumulatedPosts = accumulator.slice(0, Math.max(LIMIT * 3, 30));
+              window[accumulatorKey] = accumulatedPosts;
+
               const bodyText = (document.body?.innerText || '').trim();
               const emptyPhrases = ['No posts available','No posts yet','No posts to show','لا توجد منشورات','لا توجد أي منشورات','لم يتم نشر أي شيء'];
               const explicitEmptyState = emptyPhrases.some(phrase => bodyText.includes(phrase));
               const postLinks = anchors.reduce((count, anchor) => count + (isPostUrl(normalizeLink(rawLink(anchor))) ? 1 : 0), 0);
               return JSON.stringify({
                 source: { platform, externalId, url: identityUrl, displayName: title, handle, avatarUrl: image || '', bio: description || '', visibilityType: 'authenticated' },
-                posts: posts.slice(0, LIMIT),
+                posts: accumulatedPosts.slice(0, LIMIT),
                 explicitEmptyState,
                 diagnostics: {
                   surface: location.hostname,
@@ -708,6 +736,7 @@ final class AuthenticatedWebCollector {
                   containers: containers.length,
                   anchors: anchors.length,
                   postLinks,
+                  accumulatedPosts: accumulatedPosts.length,
                   bodyTextLength: bodyText.length
                 }
               });
