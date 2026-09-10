@@ -123,10 +123,12 @@ async function evaluateAndPersistRules(
       createdMatch.post = post;
       result.matchesCreated.push(createdMatch);
 
-      try {
-        await notificationService.dispatchMatchNotification(createdMatch);
-      } catch {
-        await db.logConnectorEvent(source.id, 'notification', 'error', 'Match persisted but in-app notification persistence failed.').catch(() => {});
+      if (rule.alert_mode !== 'silent') {
+        try {
+          await notificationService.dispatchMatchNotification(createdMatch);
+        } catch {
+          await db.logConnectorEvent(source.id, 'notification', 'error', 'Match persisted but in-app notification persistence failed.').catch(() => {});
+        }
       }
     } catch (evalError: any) {
       const message = String(evalError?.message || 'AI evaluation failed').slice(0, 500);
