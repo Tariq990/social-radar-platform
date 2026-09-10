@@ -3,7 +3,6 @@ import { NormalizedPost, SourcePlatform, ConnectorType, ConnectorStatus } from '
 export interface SourceInput {
   url: string;
   preferredPlatform?: SourcePlatform;
-  deviceSessionToken?: string;
 }
 
 export interface ValidationResult {
