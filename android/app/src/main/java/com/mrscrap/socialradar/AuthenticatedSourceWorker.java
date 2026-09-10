@@ -51,11 +51,14 @@ public class AuthenticatedSourceWorker extends Worker {
         String sourceId = getInputData().getString(KEY_SOURCE_ID);
         String sourceUrl = getInputData().getString(KEY_SOURCE_URL);
         String platform = getInputData().getString(KEY_PLATFORM);
-        String backendBaseUrl = getInputData().getString(KEY_BACKEND_BASE_URL);
+        // Never trust a backend URL persisted from JavaScript/WorkManager input when attaching the
+        // backend device bearer. The destination is compiled into this APK from the trusted build
+        // configuration, so a compromised WebView cannot redirect normalized ingestion elsewhere.
+        String backendBaseUrl = BuildConfig.MR_SCRAP_BACKEND_ORIGIN;
         String locale = "ar".equalsIgnoreCase(getInputData().getString(KEY_LOCALE)) ? "ar" : "en";
         String authToken = DeviceCredentialStore.token(getApplicationContext());
 
-        if (sourceId == null || sourceUrl == null || backendBaseUrl == null) {
+        if (sourceId == null || sourceUrl == null || backendBaseUrl == null || backendBaseUrl.isBlank()) {
             return Result.failure(errorData("Missing worker configuration"));
         }
         if (authToken == null || authToken.length() < 24 || authToken.length() > 512) {
