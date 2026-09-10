@@ -196,15 +196,17 @@ async function evaluateAndPersistMatches(
       match.post = post;
       result.matchesCreated.push(match);
 
-      try {
-        await notificationService.dispatchMatchNotification(match);
-      } catch {
-        await db.logConnectorEvent(
-          source.id,
-          'notification',
-          'error',
-          'Match persisted but in-app notification persistence failed.'
-        ).catch(() => {});
+      if (rule.alert_mode !== 'silent') {
+        try {
+          await notificationService.dispatchMatchNotification(match);
+        } catch {
+          await db.logConnectorEvent(
+            source.id,
+            'notification',
+            'error',
+            'Match persisted but in-app notification persistence failed.'
+          ).catch(() => {});
+        }
       }
     } catch (error: any) {
       result.evaluationErrors.push({
