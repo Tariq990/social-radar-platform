@@ -6,12 +6,23 @@ import { NormalizedPost, Source } from '../types';
 import { SourceAvatar } from './SourceAvatar';
 import { apiFetchSources } from '../services/api';
 import { mergeCachedSourceIdentity } from '../lib/sourceIdentityCache';
+import { extractSupportedSocialUrl } from '../lib/socialUrl';
 
 interface ExtractedPostsModalProps { onClose: () => void; }
 
 function timeValue(post: NormalizedPost): number {
   const value = Date.parse(post.publishedAt || post.detectedAt || '');
   return Number.isFinite(value) ? value : 0;
+}
+
+function safeHttpsMediaUrl(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim()) return '';
+  try {
+    const parsed = new URL(value.trim());
+    return parsed.protocol === 'https:' ? parsed.toString() : '';
+  } catch {
+    return '';
+  }
 }
 
 export const ExtractedPostsModal: React.FC<ExtractedPostsModalProps> = ({ onClose }) => {
@@ -51,8 +62,9 @@ export const ExtractedPostsModal: React.FC<ExtractedPostsModalProps> = ({ onClos
         try {
           const rows = await connector.fetchLatest(source, 10, { commentsMode: 'none' });
           collected.push(...rows);
-        } catch (sourceError) {
-          console.warn(`[ExtractedPosts] Collection failed for ${source.id}`, sourceError);
+        } catch {
+          // Per-source collector errors are intentionally not echoed because native/provider
+          // diagnostics may contain implementation details. The modal reports aggregate failure.
         }
       }
       const unique = [...new Map(collected.map(post => [`${post.sourceId}:${post.fingerprint || post.originalUrl}`, post])).values()]
@@ -100,13 +112,17 @@ export const ExtractedPostsModal: React.FC<ExtractedPostsModalProps> = ({ onClos
               <div id="extracted-post-count" data-count={visible.length} className="text-xs text-slate-500">{locale === 'ar' ? `${visible.length} منشور` : `${visible.length} post${visible.length === 1 ? '' : 's'}`}</div>
               {visible.map((post, index) => {
                 const source = displaySource(post);
-                const media = (post.media || []).filter(item => item && /^https?:\/\//i.test(item.url)).slice(0, 4);
+                const postUrl = extractSupportedSocialUrl(post.originalUrl) || '';
+                const media = (post.media || []).flatMap(item => {
+                  const url = safeHttpsMediaUrl(item?.url);
+                  return url ? [{ ...item, url }] : [];
+                }).slice(0, 4);
                 return (
                   <article key={`${post.sourceId}:${post.fingerprint || post.id}:${index}`} data-extracted-post="1" data-media-count={media.length} className="rounded-2xl overflow-hidden bg-slate-900 border border-slate-800">
                     <div className="p-4 flex items-start gap-3">
                       <SourceAvatar src={post.authorAvatar || source?.avatarUrl} name={post.authorName || source?.displayName || ''} platform={post.platform} className="w-10 h-10 rounded-xl" />
                       <div className="min-w-0 flex-1"><h3 className="text-sm font-bold text-slate-100 truncate">{post.authorName || source?.displayName || (locale === 'ar' ? 'مصدر' : 'Source')}</h3><p className="text-[11px] text-slate-500 mt-0.5">{post.publishedAt || post.detectedAt || ''}</p></div>
-                      <a href={post.originalUrl} target="_blank" rel="noopener noreferrer" className="p-2 rounded-lg text-slate-400 hover:text-cyan-300 hover:bg-slate-800" aria-label={locale === 'ar' ? 'فتح المنشور' : 'Open post'}><ExternalLink className="w-4 h-4" /></a>
+                      {postUrl && <a href={postUrl} target="_blank" rel="noopener noreferrer" className="p-2 rounded-lg text-slate-400 hover:text-cyan-300 hover:bg-slate-800" aria-label={locale === 'ar' ? 'فتح المنشور' : 'Open post'}><ExternalLink className="w-4 h-4" /></a>}
                     </div>
                     {post.text && <p className="px-4 pb-4 text-sm leading-6 text-slate-200 whitespace-pre-wrap break-words">{post.text}</p>}
                     {media.length > 0 && (
@@ -117,7 +133,7 @@ export const ExtractedPostsModal: React.FC<ExtractedPostsModalProps> = ({ onClos
                             <span className="absolute top-2 start-2 pointer-events-none px-2 py-1 rounded-md bg-black/60 text-[10px] text-white flex items-center gap-1"><Video className="w-3 h-3" />Video</span>
                           </div>
                         ) : (
-                          <img key={`${item.url}:${mediaIndex}`} data-extracted-image="1" src={item.url} alt="" loading="lazy" className="w-full h-full min-h-44 max-h-[420px] object-cover bg-slate-950" onError={event => { event.currentTarget.style.display = 'none'; }} />
+                          <img key={`${item.url}:${mediaIndex}`} data-extracted-image="1" src={item.url} alt="" loading="lazy" referrerPolicy="no-referrer" className="w-full h-full min-h-44 max-h-[420px] object-cover bg-slate-950" onError={event => { event.currentTarget.style.display = 'none'; }} />
                         ))}
                       </div>
                     )}
