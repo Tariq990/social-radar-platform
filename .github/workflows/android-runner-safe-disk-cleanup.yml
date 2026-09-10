@@ -1,0 +1,139 @@
+name: Android Runner Safe Disk Cleanup
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-runner-safe-disk-cleanup.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 15
+    env:
+      PKG: com.mrscrap.socialradar
+    steps:
+      - name: Measure and reclaim rebuildable runner space
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          work='/home/tarik/actions-runnerr/_work/SCRAP-APP/SCRAP-APP'
+          runner='/home/tarik/actions-runnerr'
+          sdk="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk"
+          avd="/mnt/c/Users/${win_user}/.android/avd/test_avd.avd"
+          wtemp="/mnt/c/Users/${win_user}/AppData/Local/Temp"
+          adb="$sdk/platform-tools/adb.exe"
+
+          echo '=== DISK BEFORE ==='
+          df -h / /mnt/c || true
+          free -h || true
+          for p in \
+            "$work/android/app/build" \
+            "$work/android/build" \
+            "$work/dist" \
+            "$work/node_modules" \
+            "$work/.gradle" \
+            "$work/android/.gradle" \
+            "$HOME/.gradle/caches" \
+            "$HOME/.gradle/daemon" \
+            "$HOME/.npm/_cacache" \
+            "$runner/_work/_temp" \
+            "$runner/_diag" \
+            "$sdk" \
+            "$avd"; do
+            if [ -e "$p" ]; then du -sh "$p" 2>/dev/null || true; fi
+          done
+
+          # Hard preservation gates: never touch the AVD, its userdata/session, or the required system image.
+          test -d "$avd"
+          test -d "$sdk/system-images/android-36/google_apis/x86_64"
+          test -x "$adb"
+          avd_before="$(du -sk "$avd" 2>/dev/null | awk '{print $1}')"
+
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1;exit}')"
+          session_before=0
+          if [ -n "$serial" ]; then
+            marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+            if printf '%s' "$marker" | grep -q facebook_connected_at; then session_before=1; fi
+            # Android cache trim is non-destructive; preserve app data and app_webview/Cookies.
+            $adb -s "$serial" shell pm trim-caches 1073741824 >/dev/null 2>&1 || true
+            $adb -s "$serial" shell "run-as $PKG sh -c 'rm -rf cache/* code_cache/* 2>/dev/null || true'" >/dev/null 2>&1 || true
+          fi
+          echo "FACEBOOK_SESSION_BEFORE_CLEANUP=$session_before"
+
+          echo '=== SAFE CLEANUP ==='
+          # Project outputs are reproducible from committed source and are the biggest repeated-build growth source.
+          rm -rf \
+            "$work/android/app/build" \
+            "$work/android/build" \
+            "$work/dist" \
+            "$work/.gradle" \
+            "$work/android/.gradle"
+
+          # Gradle dependency/build caches and daemon logs are fully reproducible. Keep the pinned custom Gradle distribution.
+          rm -rf \
+            "$HOME/.gradle/caches" \
+            "$HOME/.gradle/daemon" \
+            "$HOME/.gradle/native" \
+            "$HOME/.gradle/notifications" \
+            "$HOME/.gradle/workers" \
+            "$HOME/.android/build-cache"
+
+          # Package-manager/tool caches only; dependencies in the working tree remain available unless space is still critically low.
+          rm -rf "$HOME/.npm/_cacache" "$HOME/.cache/node-gyp" "$HOME/.cache/pip" 2>/dev/null || true
+
+          # Remove only old GitHub runner temp entries, never the current job's fresh temp files.
+          if [ -d "$runner/_work/_temp" ]; then
+            find "$runner/_work/_temp" -mindepth 1 -mmin +90 -print0 2>/dev/null | xargs -0r rm -rf -- || true
+          fi
+          if [ -d "$runner/_diag" ]; then
+            find "$runner/_diag" -type f -mtime +3 -delete 2>/dev/null || true
+          fi
+
+          # Our own Windows temp APK/probe leftovers from prior emulator runs.
+          if [ -d "$wtemp" ]; then
+            find "$wtemp" -maxdepth 1 -type f \( -iname 'MR-SCRAP*.apk' -o -iname 'mrscrap*.ps1' -o -iname '*mrscrap*.log' \) -print -delete 2>/dev/null || true
+          fi
+          if [ -d "/mnt/c/Users/${win_user}/.android/cache" ]; then
+            find "/mnt/c/Users/${win_user}/.android/cache" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
+          fi
+          find /tmp -maxdepth 1 -type f \( -name 'mrscrap*' -o -name 'MR-SCRAP*' \) -mmin +60 -delete 2>/dev/null || true
+
+          # If Linux free space is still under 8 GiB, node_modules is safe to recreate and may reclaim hundreds of MiB/GB.
+          linux_free_kb="$(df -Pk / | awk 'NR==2{print $4}')"
+          if [ "$linux_free_kb" -lt $((8*1024*1024)) ] && [ -d "$work/node_modules" ]; then
+            echo NODE_MODULES_REMOVED_FOR_CRITICAL_SPACE=1
+            rm -rf "$work/node_modules"
+          else
+            echo NODE_MODULES_REMOVED_FOR_CRITICAL_SPACE=0
+          fi
+
+          avd_after="$(du -sk "$avd" 2>/dev/null | awk '{print $1}')"
+          test "$avd_after" -gt 0
+          # AVD directory must remain; normal live cache trimming may change its size, but it is never deleted/recreated/wiped here.
+          echo "AVD_KB_BEFORE=$avd_before"
+          echo "AVD_KB_AFTER=$avd_after"
+
+          session_after=0
+          if [ -n "$serial" ]; then
+            marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+            if printf '%s' "$marker" | grep -q facebook_connected_at; then session_after=1; fi
+          fi
+          echo "FACEBOOK_SESSION_AFTER_CLEANUP=$session_after"
+          if [ "$session_before" = 1 ]; then test "$session_after" = 1; fi
+
+          echo '=== DISK AFTER ==='
+          df -h / /mnt/c || true
+          free -h || true
+          for p in "$work/node_modules" "$HOME/.gradle" "$runner/_work/_temp" "$sdk" "$avd"; do
+            if [ -e "$p" ]; then du -sh "$p" 2>/dev/null || true; fi
+          done
+          echo SAFE_ANDROID_RUNNER_DISK_CLEANUP=PASS
