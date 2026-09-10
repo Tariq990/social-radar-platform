@@ -1,0 +1,265 @@
+name: Android Product v156 Runtime Proof
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-product-v156-runtime-proof.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  patch-build-install-prove:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 35
+    env:
+      PKG: com.mrscrap.socialradar
+      PATCH_BASE_SHA: 9e3ed68e9d91c99263b3c1ed8075f7709edaa7d0
+      ANDROID_VERSION_CODE: '156'
+      ANDROID_VERSION_NAME: '0.1.156-emulator-test'
+    steps:
+      - name: Checkout exact test lane preserving emulator data
+        uses: actions/checkout@v4
+        with:
+          ref: test/android-headless-emulator-20260909
+          fetch-depth: 0
+          clean: false
+
+      - name: Apply v156 product fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$PATCH_BASE_SHA" HEAD
+          python3 .github/scripts/v156-product-fix.py
+          python3 .github/scripts/v156-visible-source-enrichment.py
+          git diff --check
+          grep -q 'hasRealDisplayName' android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSourceMetadataResolver.java
+          grep -q 'loadUrl(preferDesktopFacebookUrl(sourceUrl))' android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSourceMetadataResolver.java
+          grep -q 'apiFetchSources' src/components/ExtractedPostsModal.tsx
+          grep -q "fetchLatest(source, 10, { commentsMode: 'none' })" src/components/ExtractedPostsModal.tsx
+          ! grep -q 'includeMedia: true' src/components/ExtractedPostsModal.tsx
+          grep -q 'enrichVisibleSourceMetadata' src/context/RadarContext.tsx
+          echo V156_SOURCE_PATCH_GATE=PASS
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Test and commit v156 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -x node_modules/.bin/tsc ] || [ ! -x node_modules/.bin/tsx ]; then npm install --no-audit --no-fund; fi
+          npm run lint
+          npm test
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSourceMetadataResolver.java \
+            src/components/ExtractedPostsModal.tsx \
+            src/connectors/deviceSessionConnector.ts \
+            src/context/RadarContext.tsx \
+            server/tests/architectureRegression.test.ts
+          git diff --cached --check
+          git diff --cached --quiet && { echo NO_V156_PRODUCT_CHANGES=1; exit 1; }
+          git commit -m 'fix: resolve real source identity and show extracted feed media'
+          source_sha="$(git rev-parse HEAD)"
+          git push origin HEAD:test/android-headless-emulator-20260909
+          echo "V156_SOURCE_SHA=$source_sha" >> "$GITHUB_ENV"
+          echo "V156_SOURCE_COMMIT=$source_sha"
+          echo V156_SOURCE_TEST_GATE=PASS
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Build v156
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -x node_modules/.bin/vite ] || [ ! -x node_modules/.bin/cap ]; then npm install --no-audit --no-fund; fi
+          npm run build
+          npx cap sync android
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/.android/sdk}}"
+          sdk="$(realpath "$sdk")"
+          test -d "$sdk/platforms/android-36"
+          test -d "$sdk/build-tools/36.0.0"
+          echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$sdk" >> "$GITHUB_ENV"
+          printf 'sdk.dir=%s\n' "$sdk" > android/local.properties
+          gradle="$HOME/.local/share/mrscrap-gradle/gradle-8.13/bin/gradle"
+          test -x "$gradle"
+          "$gradle" -p android :app:assembleDebug --stacktrace
+          apk="$GITHUB_WORKSPACE/android/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$apk"
+          echo "APK_SIZE=$(stat -c '%s' "$apk")"
+          echo V156_BUILD_GATE=PASS
+
+      - name: Install v156 preserving Facebook session
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"
+          test -s "$adb"
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1;exit}')"
+          test -n "$serial"
+          test "$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1)" = 1
+          marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          printf '%s' "$marker" | grep -q facebook_connected_at
+          echo FACEBOOK_SESSION_BEFORE_V156_INSTALL=1
+          apk="$GITHUB_WORKSPACE/android/app/build/outputs/apk/debug/app-debug.apk"
+          tmp="/mnt/c/Users/${win_user}/AppData/Local/Temp/MR-SCRAP-emulator-test-156.apk"
+          cp "$apk" "$tmp"
+          out="$($adb -s "$serial" install -r "$(wslpath -w "$tmp")" 2>&1 | tr -d '\r')"
+          printf '%s\n' "$out"
+          printf '%s' "$out" | grep -q Success
+          version="$($adb -s "$serial" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"
+          echo "INSTALLED_VERSION_CODE=$version"
+          test "$version" = 156
+          marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          printf '%s' "$marker" | grep -q facebook_connected_at
+          echo FACEBOOK_SESSION_AFTER_V156_INSTALL=1
+          curl -fsS --max-time 30 https://mr-scrap-api-live.onrender.com/api/health >/dev/null || true
+          $adb -s "$serial" shell am force-stop "$PKG" >/dev/null 2>&1 || true
+          $adb -s "$serial" shell am start -W -n "$PKG/.MainActivity" >/dev/null
+          sleep 10
+          pid="$($adb -s "$serial" shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"
+          test -n "$pid"
+          echo "ADB=$adb" >> "$GITHUB_ENV"
+          echo "SERIAL=$serial" >> "$GITHUB_ENV"
+          echo "WIN_USER=$win_user" >> "$GITHUB_ENV"
+          echo "APP_PID=$pid" >> "$GITHUB_ENV"
+          echo V156_INSTALL_SESSION_GATE=PASS
+
+      - name: Prove real identity and extracted media UI
+        shell: bash
+        run: |
+          set -euo pipefail
+          socket="$($ADB -s "$SERIAL" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | grep -E "${APP_PID}$|_${APP_PID}($|_)" | head -n1 || true)"
+          [ -n "$socket" ] || socket="$($ADB -s "$SERIAL" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | head -n1 || true)"
+          test -n "$socket"
+          $ADB -s "$SERIAL" forward --remove tcp:9225 >/dev/null 2>&1 || true
+          $ADB -s "$SERIAL" forward tcp:9225 "localabstract:$socket" >/dev/null
+          $ADB -s "$SERIAL" logcat -c >/dev/null 2>&1 || true
+          ps1="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-v156-runtime-proof.ps1"
+          cat > "$ps1" <<'PS'
+          $ErrorActionPreference='Stop'
+          function Targets {
+            for($i=0;$i -lt 50;$i++){
+              try{$t=@(Invoke-RestMethod -Uri 'http://127.0.0.1:9225/json/list' -TimeoutSec 2);if($t.Count -gt 0){return $t}}catch{}
+              Start-Sleep -Milliseconds 250
+            }
+            throw 'targets unavailable'
+          }
+          function AppTarget {
+            $a=@(Targets|Where-Object{$_.type -eq 'page' -and [string]$_.url -like 'https://localhost*'}|Select-Object -First 1)
+            if($a.Count -eq 0){throw 'app target missing'}
+            return $a[0]
+          }
+          function Eval([string]$raw,[string]$expr,[int]$seconds=480){
+            $u=[Uri]$raw;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($seconds))
+            $ws.ConnectAsync([Uri]('ws://127.0.0.1:9225'+$u.PathAndQuery),$cts.Token).GetAwaiter().GetResult()|Out-Null
+            $payload=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 8
+            $bytes=[Text.Encoding]::UTF8.GetBytes($payload);$ws.SendAsync([ArraySegment[byte]]::new($bytes),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null
+            $buf=New-Object byte[] 262144;$sb=[Text.StringBuilder]::new()
+            while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id -ne 1){continue};if($m.result.exceptionDetails){throw 'runtime eval exception'};$v=$m.result.result.value;try{$ws.Abort()}catch{};return $v}
+          }
+          $app=AppTarget
+          $expr=@'
+          (async()=>{
+            const cap=globalThis.Capacitor?.Plugins?.AuthenticatedSocialSession;
+            if(!cap)return{plugin:false};
+            let rows=[];
+            for(let i=0;i<3;i++){
+              try{const sr=await fetch('https://mr-scrap-api-live.onrender.com/api/sources',{credentials:'include'});if(sr.ok){rows=await sr.json();if(Array.isArray(rows)&&rows.length)break;}}catch{}
+              await new Promise(r=>setTimeout(r,700));
+            }
+            const source=(Array.isArray(rows)?rows:[]).find(x=>x&&x.platform==='facebook'&&(x.connector_type||x.connectorType||'device_session')==='device_session');
+            if(!source)return{plugin:true,sources:false};
+            let meta;
+            try{meta=await cap.resolveSource({url:source.url});}catch(e){return{plugin:true,sources:true,meta:false};}
+            const handle=String(meta?.handle||meta?.externalId||'').trim().replace(/^@/,'').toLowerCase();
+            const name=String(meta?.displayName||'').trim();
+            const normalized=name.replace(/^@/,'').toLowerCase();
+            const realName=Boolean(name)&&!['facebook','instagram','page','profile'].includes(normalized)&&Boolean(!handle||normalized!==handle);
+            const avatar=/^https?:\/\//i.test(String(meta?.avatarUrl||''));
+            let direct={ok:false,count:0,media:false};
+            try{const c=await cap.collectSource({sourceId:source.id,url:source.url,platform:'facebook',limit:3});const p=Array.isArray(c?.posts)?c.posts:[];direct={ok:true,count:p.length,media:p.some(x=>Array.isArray(x?.media)&&x.media.some(m=>m&&/^https?:\/\//i.test(String(m.url||''))))};}catch{}
+            window.dispatchEvent(new CustomEvent('mrscrap:navigate',{detail:{screen:'radar'}}));
+            for(let i=0;i<80&&!document.getElementById('btn-extracted-posts-home');i++)await new Promise(r=>setTimeout(r,200));
+            const button=document.getElementById('btn-extracted-posts-home');
+            if(!button)return{plugin:true,sources:true,meta:true,realName,avatar,direct,button:false};
+            button.click();
+            let modalResult={modal:false,error:false,timeout:true,cards:0,mediaGrids:0,images:0,videos:0};
+            for(let i=0;i<700;i++){
+              const modal=document.getElementById('modal-extracted-posts');
+              const loading=document.getElementById('extracted-posts-loading');
+              const error=document.getElementById('extracted-posts-error');
+              const cards=document.querySelectorAll('[data-extracted-post="1"]');
+              if(modal&&!loading&&(error||cards.length>0)){
+                modalResult={modal:true,error:Boolean(error),timeout:false,cards:cards.length,mediaGrids:document.querySelectorAll('[data-extracted-media-grid="1"]').length,images:document.querySelectorAll('[data-extracted-image="1"]').length,videos:document.querySelectorAll('[data-extracted-video="1"]').length};break;
+              }
+              await new Promise(r=>setTimeout(r,250));
+            }
+            document.querySelector('#modal-extracted-posts button[aria-label="إغلاق"],#modal-extracted-posts button[aria-label="Close"]')?.click();
+            window.dispatchEvent(new CustomEvent('mrscrap:navigate',{detail:{screen:'watchlist'}}));
+            let card={found:false,realName:false,avatar:false};
+            for(let i=0;i<100;i++){
+              const cards=[...document.querySelectorAll('article[id^="source-card-"]')];
+              const target=cards.find(c=>String(c.id||'').endsWith(String(source.id||'')))||cards[0];
+              if(target){const title=String(target.querySelector('h3')?.textContent||'').trim();const tn=title.replace(/^@/,'').toLowerCase();const img=target.querySelector('img');card={found:true,realName:Boolean(title)&&Boolean(!handle||tn!==handle)&&!['facebook','instagram','page','profile'].includes(tn),avatar:Boolean(img&&/^https?:\/\//i.test(String(img.getAttribute('src')||'')))};if(card.realName&&card.avatar)break;}
+              await new Promise(r=>setTimeout(r,250));
+            }
+            return{plugin:true,sources:true,meta:true,realName,avatar,direct,button:true,...modalResult,card};
+          })()
+          '@
+          $r=Eval ([string]$app.webSocketDebuggerUrl) $expr 480
+          Write-Output ('NATIVE_PLUGIN='+$(if($r.plugin){'1'}else{'0'}))
+          Write-Output ('SOURCE_API_OK='+$(if($r.sources){'1'}else{'0'}))
+          Write-Output ('SOURCE_METADATA_RESOLVED='+$(if($r.meta){'1'}else{'0'}))
+          Write-Output ('SOURCE_REAL_NAME='+$(if($r.realName){'1'}else{'0'}))
+          Write-Output ('SOURCE_REAL_AVATAR='+$(if($r.avatar){'1'}else{'0'}))
+          Write-Output ('DIRECT_COLLECT_OK='+$(if($r.direct.ok){'1'}else{'0'}))
+          Write-Output ('DIRECT_COLLECT_COUNT='+[int]$r.direct.count)
+          Write-Output ('DIRECT_COLLECT_MEDIA='+$(if($r.direct.media){'1'}else{'0'}))
+          Write-Output ('EXTRACTED_POSTS_BUTTON='+$(if($r.button){'1'}else{'0'}))
+          Write-Output ('EXTRACTED_POSTS_MODAL='+$(if($r.modal){'1'}else{'0'}))
+          Write-Output ('EXTRACTED_POSTS_ERROR='+$(if($r.error){'1'}else{'0'}))
+          Write-Output ('EXTRACTED_POSTS_TIMEOUT='+$(if($r.timeout){'1'}else{'0'}))
+          Write-Output ('EXTRACTED_POST_CARDS='+[int]$r.cards)
+          Write-Output ('EXTRACTED_MEDIA_GRIDS='+[int]$r.mediaGrids)
+          Write-Output ('EXTRACTED_IMAGES='+[int]$r.images)
+          Write-Output ('EXTRACTED_VIDEOS='+[int]$r.videos)
+          Write-Output ('WATCHLIST_SOURCE_CARD='+$(if($r.card.found){'1'}else{'0'}))
+          Write-Output ('WATCHLIST_REAL_NAME='+$(if($r.card.realName){'1'}else{'0'}))
+          Write-Output ('WATCHLIST_REAL_AVATAR='+$(if($r.card.avatar){'1'}else{'0'}))
+          $mediaTotal=[int]$r.images+[int]$r.videos
+          if(!$r.plugin -or !$r.sources -or !$r.meta -or !$r.realName -or !$r.avatar -or !$r.direct.ok -or [int]$r.direct.count -lt 1 -or !$r.direct.media -or !$r.button -or !$r.modal -or $r.error -or $r.timeout -or [int]$r.cards -lt 1 -or [int]$r.mediaGrids -lt 1 -or $mediaTotal -lt 1 -or !$r.card.found -or !$r.card.realName -or !$r.card.avatar){exit 226}
+          Write-Output PRODUCT_V156_REAL_IDENTITY_EXTRACTED_MEDIA_GATE=PASS
+          PS
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
+          echo '--- SAFE FLOW TRACE ---'
+          $ADB -s "$SERIAL" logcat -d -v brief MRSCRAP_FLOW:I MRSCRAP_COLLECTOR:I '*:S' 2>/dev/null | tr -d '\r' | grep -E 'event=' | tail -n 100 || true
+
+      - name: Reconfirm Facebook session and cleanup
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${ADB:-}" ] && [ -n "${SERIAL:-}" ]; then
+            marker="$($ADB -s "$SERIAL" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+            printf '%s' "$marker" | grep -q facebook_connected_at
+            echo FACEBOOK_SESSION_AFTER_V156_PROOF=1
+            $ADB -s "$SERIAL" forward --remove tcp:9225 >/dev/null 2>&1 || true
+            rm -f "/mnt/c/Users/${WIN_USER:-}/AppData/Local/Temp/mrscrap-v156-runtime-proof.ps1" 2>/dev/null || true
+          fi
+          echo V156_SESSION_CLEANUP_GATE=PASS
