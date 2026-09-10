@@ -68,3 +68,12 @@ test('malformed Smart Grab records never dump raw exceptions in production', () 
   assert.match(explore, /catch \{\s*if \(import\.meta\.env\.DEV\) console\.warn\('\[apiExploreDevicePosts\] Ignoring malformed item'\);\s*\}/s);
   assert.doesNotMatch(explore, /Ignoring malformed item',\s*error/);
 });
+
+test('repository ignores production signing and provider configuration artifacts', () => {
+  const gitignore = read('.gitignore');
+  assert.match(gitignore, /^\.data\/$/m);
+  assert.match(gitignore, /^\*\.jks$/m);
+  assert.match(gitignore, /^\*\.keystore$/m);
+  assert.match(gitignore, /^google-services\.json$/m);
+  assert.match(gitignore, /^key\.properties$/m);
+});
