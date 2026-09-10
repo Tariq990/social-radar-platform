@@ -11,6 +11,10 @@ function matchesHost(hostname: string, roots: Set<string>): boolean {
   return false;
 }
 
+function isSupportedSocialHost(hostname: string): boolean {
+  return matchesHost(hostname, FACEBOOK_HOSTS) || matchesHost(hostname, INSTAGRAM_HOSTS);
+}
+
 function cleanCandidate(value: string): string {
   return value
     .replace(BIDI_MARKS, '')
@@ -19,11 +23,23 @@ function cleanCandidate(value: string): string {
     .trim();
 }
 
+function normalizeToHttps(value: string): string {
+  try {
+    const parsed = new URL(value.trim());
+    if (!isSupportedSocialHost(parsed.hostname)) return value.trim();
+    if (parsed.protocol === 'http:') parsed.protocol = 'https:';
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return value.trim();
+  }
+}
+
 export function isSupportedSocialUrl(value: string): boolean {
   try {
     const parsed = new URL(value.trim());
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
-    return matchesHost(parsed.hostname, FACEBOOK_HOSTS) || matchesHost(parsed.hostname, INSTAGRAM_HOSTS);
+    if (parsed.protocol !== 'https:') return false;
+    return isSupportedSocialHost(parsed.hostname);
   } catch {
     return false;
   }
@@ -42,14 +58,9 @@ export function extractSupportedSocialUrl(value: string): string | null {
   for (const raw of candidates) {
     let cleaned = cleanCandidate(raw);
     if (!/^https?:\/\//i.test(cleaned) && SOCIAL_HOST_FRAGMENT.test(cleaned)) cleaned = `https://${cleaned}`;
+    cleaned = normalizeToHttps(cleaned);
     if (!isSupportedSocialUrl(cleaned)) continue;
-    try {
-      const parsed = new URL(cleaned);
-      parsed.hash = '';
-      return parsed.toString();
-    } catch {
-      // Validation already parsed the candidate; keep scanning if it changed unexpectedly.
-    }
+    return cleaned;
   }
   return null;
 }
