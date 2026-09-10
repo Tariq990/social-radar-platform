@@ -25,8 +25,15 @@ function normalizeSocialHostname(hostname: string): string {
   return host;
 }
 
+function parseHttpUrl(rawUrl: string): URL {
+  const parsed = new URL(/^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`);
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('Unsupported URL protocol');
+  if (parsed.protocol === 'http:') parsed.protocol = 'https:';
+  return parsed;
+}
+
 function normalizeUrlForIdentity(rawUrl: string): string {
-  const parsed = new URL(rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`);
+  const parsed = parseHttpUrl(rawUrl);
 
   parsed.hostname = normalizeSocialHostname(parsed.hostname);
   parsed.hash = '';
@@ -89,12 +96,13 @@ export function computePostFingerprint(
 
 /**
  * Normalizes a social URL without deleting query parameters that identify the actual post
- * (for example Facebook story_fbid/id). Only known tracking/noise parameters are removed.
+ * (for example Facebook story_fbid/id). Cleartext HTTP is upgraded to HTTPS and only known
+ * tracking/noise parameters are removed.
  */
 export function canonicalizeSocialUrl(rawUrl: string): string {
   if (!rawUrl) return '';
   try {
-    const parsed = new URL(rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`);
+    const parsed = parseHttpUrl(rawUrl);
 
     parsed.hostname = normalizeSocialHostname(parsed.hostname);
     parsed.hash = '';
