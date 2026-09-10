@@ -1,6 +1,6 @@
 name: Android Physical ADB Final Gate
 
-# Fresh continuation run after the previous GitHub rerun attempt budget was exhausted.
+# Diagnose the physical-device boundary without exposing device serials or names.
 on:
   push:
     branches: [test/android-headless-emulator-20260909]
@@ -16,7 +16,7 @@ concurrency:
 jobs:
   gate:
     runs-on: [self-hosted, Linux]
-    timeout-minutes: 3
+    timeout-minutes: 4
     steps:
       - name: Classify physical Android visibility without exposing serials
         shell: bash
@@ -35,9 +35,9 @@ jobs:
           }
 
           authorized=0; unauthorized=0; offline=0; emulator=0
-          for i in $(seq 1 10); do
+          for i in $(seq 1 6); do
             classify
-            if [ "$authorized" -gt 0 ]; then break; fi
+            [ "$authorized" -gt 0 ] && break
             sleep 1
           done
 
@@ -46,9 +46,6 @@ jobs:
             mdns_raw="$($adb mdns services 2>/dev/null | tr -d '\r' || true)"
             mdns_connect="$(printf '%s\n' "$mdns_raw" | awk '/_adb-tls-connect\._tcp/ {c++} END{print c+0}')"
             mdns_pairing="$(printf '%s\n' "$mdns_raw" | awk '/_adb-tls-pairing\._tcp/ {c++} END{print c+0}')"
-
-            # A previously paired phone can advertise a connect service without USB. If exactly one
-            # endpoint is discoverable, try it without printing the address or device name.
             if [ "$mdns_connect" -eq 1 ]; then
               endpoint="$(printf '%s\n' "$mdns_raw" | awk '/_adb-tls-connect\._tcp/ {print $NF; exit}')"
               if printf '%s' "$endpoint" | grep -Eq ':[0-9]+$'; then
@@ -60,6 +57,36 @@ jobs:
             fi
           fi
 
+          pnp_android=0; pnp_wpd=0; pnp_problem=0; adb_restart_attempted=0
+          if [ "$authorized" -lt 1 ]; then
+            ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-pnp-android-counts.ps1"
+            cat > "$ps1" <<'PS'
+          $ErrorActionPreference='SilentlyContinue'
+          $all = @(Get-PnpDevice -PresentOnly)
+          $android = @($all | Where-Object { $_.Class -eq 'AndroidUsbDeviceClass' })
+          $wpd = @($all | Where-Object { $_.Class -eq 'WPD' })
+          $problem = @($android | Where-Object { $_.Status -ne 'OK' })
+          Write-Output ('PNP_ANDROID_USB_COUNT=' + $android.Count)
+          Write-Output ('PNP_WPD_COUNT=' + $wpd.Count)
+          Write-Output ('PNP_ANDROID_PROBLEM_COUNT=' + $problem.Count)
+          PS
+            pnp_out="$(/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" 2>/dev/null | tr -d '\r' || true)"
+            rm -f "$ps1" >/dev/null 2>&1 || true
+            pnp_android="$(printf '%s\n' "$pnp_out" | sed -n 's/^PNP_ANDROID_USB_COUNT=//p' | tail -n1)"; pnp_android="${pnp_android:-0}"
+            pnp_wpd="$(printf '%s\n' "$pnp_out" | sed -n 's/^PNP_WPD_COUNT=//p' | tail -n1)"; pnp_wpd="${pnp_wpd:-0}"
+            pnp_problem="$(printf '%s\n' "$pnp_out" | sed -n 's/^PNP_ANDROID_PROBLEM_COUNT=//p' | tail -n1)"; pnp_problem="${pnp_problem:-0}"
+
+            # If Windows already exposes an Android USB interface, refresh only the ADB daemon once.
+            if [ "$pnp_android" -gt 0 ]; then
+              adb_restart_attempted=1
+              $adb kill-server >/dev/null 2>&1 || true
+              sleep 1
+              $adb start-server >/dev/null 2>&1 || true
+              sleep 2
+              classify
+            fi
+          fi
+
           echo "EMULATOR_AUTHORIZED_COUNT=$emulator"
           echo "PHYSICAL_AUTHORIZED_COUNT=$authorized"
           echo "PHYSICAL_UNAUTHORIZED_COUNT=$unauthorized"
@@ -67,5 +94,25 @@ jobs:
           echo "WIRELESS_ADB_CONNECT_SERVICE_COUNT=$mdns_connect"
           echo "WIRELESS_ADB_PAIRING_SERVICE_COUNT=$mdns_pairing"
           echo "WIRELESS_ADB_CONNECT_ATTEMPTED=$wireless_attempted"
-          if [ "$authorized" -lt 1 ]; then echo PHYSICAL_ANDROID_ACCEPTANCE_BLOCKED=1; exit 253; fi
-          echo PHYSICAL_ANDROID_ACCEPTANCE_READY=1
+          echo "PNP_ANDROID_USB_COUNT=$pnp_android"
+          echo "PNP_WPD_COUNT=$pnp_wpd"
+          echo "PNP_ANDROID_PROBLEM_COUNT=$pnp_problem"
+          echo "ADB_DAEMON_REFRESH_ATTEMPTED=$adb_restart_attempted"
+
+          if [ "$authorized" -gt 0 ]; then
+            echo PHYSICAL_ANDROID_ACCEPTANCE_READY=1
+            exit 0
+          fi
+          if [ "$unauthorized" -gt 0 ]; then
+            echo PHYSICAL_ANDROID_BLOCKER=USB_DEBUG_AUTHORIZATION
+          elif [ "$offline" -gt 0 ]; then
+            echo PHYSICAL_ANDROID_BLOCKER=ADB_OFFLINE
+          elif [ "$pnp_android" -gt 0 ]; then
+            echo PHYSICAL_ANDROID_BLOCKER=WINDOWS_ANDROID_INTERFACE_NOT_ENUMERATED_BY_ADB
+          elif [ "$pnp_wpd" -gt 0 ]; then
+            echo PHYSICAL_ANDROID_BLOCKER=PHONE_VISIBLE_AS_WPD_BUT_NO_ANDROID_ADB_INTERFACE
+          else
+            echo PHYSICAL_ANDROID_BLOCKER=NO_PHYSICAL_USB_ENUMERATION
+          fi
+          echo PHYSICAL_ANDROID_ACCEPTANCE_BLOCKED=1
+          exit 253
