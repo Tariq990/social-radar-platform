@@ -428,7 +428,7 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           await DeviceSessionConnector.cancelBackgroundSource(sourceId);
         } else {
           const backendBaseUrl = getApiBaseUrl();
-          if (backendBaseUrl) await DeviceSessionConnector.scheduleBackgroundSource({ ...source, isPaused: false }, backendBaseUrl, locale);
+          if (backendBaseUrl) await DeviceSessionConnector.scheduleBackgroundSource(source, backendBaseUrl, locale);
         }
       } catch (error) {
         // The server state is authoritative. A local WorkManager failure must not roll the UI back
