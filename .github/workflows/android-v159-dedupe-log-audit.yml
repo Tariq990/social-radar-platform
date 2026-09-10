@@ -17,7 +17,7 @@ jobs:
     runs-on: [self-hosted, Linux]
     timeout-minutes: 3
     steps:
-      - name: Audit privacy-safe collector batch counts
+      - name: Audit privacy-safe final counts for the last two collector cycles
         shell: bash
         run: |
           set -euo pipefail
@@ -26,11 +26,23 @@ jobs:
           serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1;exit}')"; test -n "$serial"
           raw="$RUNNER_TEMP/mrscrap-collector-counts.txt"
           "$adb" -s "$serial" logcat -d -v brief MRSCRAP_COLLECTOR:I '*:S' 2>/dev/null | tr -d '\r' > "$raw" || true
-          loads="$(grep -c 'event=load_start' "$raw" || true)"
-          tens="$(grep -c 'event=eval_result .*posts=10 ' "$raw" || true)"
-          positive="$(grep -Ec 'event=eval_result .*posts=[1-9][0-9]* ' "$raw" || true)"
-          echo "COLLECTOR_LOAD_START_COUNT=$loads"
-          echo "COLLECTOR_POSTS10_RESULT_COUNT=$tens"
-          echo "COLLECTOR_POSITIVE_RESULT_COUNT=$positive"
-          if [ "$loads" -lt 2 ] || [ "$tens" -lt 2 ]; then exit 253; fi
-          echo V159_RECENT_COLLECTOR_BATCH_COUNT_AUDIT=PASS
+          RAW="$raw" python3 - <<'PY'
+          import os,re,sys
+          lines=open(os.environ['RAW'],encoding='utf-8',errors='ignore').read().splitlines()
+          segments=[]; current=None
+          for line in lines:
+              if 'event=load_start' in line:
+                  if current is not None: segments.append(current)
+                  current=[]
+              elif current is not None and 'event=eval_result' in line:
+                  m=re.search(r'posts=(\d+)',line)
+                  if m: current.append(int(m.group(1)))
+          if current is not None: segments.append(current)
+          finals=[s[-1] for s in segments if s]
+          a,b=(finals[-2:] if len(finals)>=2 else [-1,-1])
+          print(f'COLLECTOR_SEGMENTS_WITH_RESULTS={len(finals)}')
+          print(f'LAST_TWO_FINAL_POST_COUNTS={a},{b}')
+          print(f'LAST_TWO_BOTH_TEN={1 if a==10 and b==10 else 0}')
+          if a!=10 or b!=10: sys.exit(253)
+          print('V159_LAST_TWO_COLLECTOR_BATCHES_10=PASS')
+          PY
