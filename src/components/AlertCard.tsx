@@ -3,6 +3,7 @@ import { ExternalLink, Bookmark, ThumbsDown, Sparkles, CheckCircle2, Clock } fro
 import { AlertMatch } from '../types';
 import { useRadar } from '../context/RadarContext';
 import { translations } from '../lib/i18n';
+import { extractSupportedSocialUrl } from '../lib/socialUrl';
 import { SourceAvatar } from './SourceAvatar';
 
 interface AlertCardProps {
@@ -10,17 +11,29 @@ interface AlertCardProps {
   onOpenDetail: (alert: AlertMatch) => void;
 }
 
+function safeHttpsMediaUrl(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim()) return '';
+  try {
+    const parsed = new URL(value.trim());
+    return parsed.protocol === 'https:' ? parsed.toString() : '';
+  } catch {
+    return '';
+  }
+}
+
 export const AlertCard: React.FC<AlertCardProps> = ({ alert, onOpenDetail }) => {
   const { toggleSaveMatch, rateMatchFeedback, markMatchRead, locale } = useRadar();
   const t = translations[locale];
   const postText = alert.post?.text || (alert as any).postSnippet || (alert as any).text || '';
-  const postUrl = alert.post?.originalUrl || (alert as any).postUrl || (alert as any).url || '';
+  const rawPostUrl = alert.post?.originalUrl || (alert as any).postUrl || (alert as any).url || '';
+  const postUrl = extractSupportedSocialUrl(rawPostUrl) || '';
   const sourceName = alert.sourceName || (alert as any).displayName || (locale === 'ar' ? 'مصدر مراقب' : 'Monitored source');
   const sourceAvatar = alert.sourceAvatar || alert.post?.authorAvatar || (alert as any).authorAvatar || '';
   const sourcePlatform = alert.sourcePlatform || (alert as any).platform || 'other';
   const ruleName = alert.ruleName || (alert as any).ruleNaturalLanguage || '';
   const reason = alert.reason || (alert as any).whyMatched || '';
   const mediaItems = Array.isArray(alert.post?.media) ? alert.post.media : [];
+  const firstMediaUrl = safeHttpsMediaUrl(mediaItems[0]?.url);
 
   const openDetail = () => {
     void markMatchRead(alert.id).catch(() => {});
@@ -52,8 +65,8 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, onOpenDetail }) => 
 
       <div className="flex flex-col sm:flex-row gap-3 my-2.5">
         <p className="flex-1 min-w-0 text-xs sm:text-sm text-slate-200 line-clamp-3 leading-relaxed">{postText || (locale === 'ar' ? 'منشور مطابق للقاعدة.' : 'A post matched this rule.')}</p>
-        {mediaItems.length > 0 && /^https?:\/\//i.test(mediaItems[0].url) && (
-          <div className="w-full sm:w-24 h-20 rounded-xl overflow-hidden bg-slate-950 flex-none border border-slate-800"><img src={mediaItems[0].url} alt="" loading="lazy" referrerPolicy="no-referrer" className="w-full h-full object-cover" /></div>
+        {firstMediaUrl && (
+          <div className="w-full sm:w-24 h-20 rounded-xl overflow-hidden bg-slate-950 flex-none border border-slate-800"><img src={firstMediaUrl} alt="" loading="lazy" referrerPolicy="no-referrer" className="w-full h-full object-cover" /></div>
         )}
       </div>
 
