@@ -1,6 +1,6 @@
 name: Android Physical ADB Final Gate
 
-# Diagnose the physical-device boundary without exposing device serials or names.
+# Current-head physical acceptance. Preserve the installed app, app data, and Meta session.
 on:
   push:
     branches: [test/android-headless-emulator-20260909]
@@ -16,103 +16,277 @@ concurrency:
 jobs:
   gate:
     runs-on: [self-hosted, Linux]
-    timeout-minutes: 4
+    timeout-minutes: 20
+    env:
+      PKG: com.mrscrap.socialradar
+      BACKEND: https://mr-scrap-api-live.onrender.com
+      VITE_API_BASE_URL: https://mr-scrap-api-live.onrender.com
+      APP_MODE: production
+
     steps:
-      - name: Classify physical Android visibility without exposing serials
+      - name: Require one authorized physical target and existing Facebook session
         shell: bash
         run: |
           set -euo pipefail
           win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
-          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"; test -x "$adb"
+          test -n "$win_user"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"
+          test -x "$adb"
+          "$adb" start-server >/dev/null 2>&1 || true
 
-          classify() {
-            local raw
-            raw="$($adb devices 2>/dev/null | tr -d '\r' || true)"
-            emulator="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 ~ /^emulator-/ && $2=="device" {c++} END{print c+0}')"
-            authorized="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 !~ /^emulator-/ && $2=="device" {c++} END{print c+0}')"
-            unauthorized="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 !~ /^emulator-/ && $2=="unauthorized" {c++} END{print c+0}')"
-            offline="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 !~ /^emulator-/ && $2=="offline" {c++} END{print c+0}')"
-          }
-
-          authorized=0; unauthorized=0; offline=0; emulator=0
-          for i in $(seq 1 6); do
-            classify
-            [ "$authorized" -gt 0 ] && break
-            sleep 1
-          done
-
-          mdns_connect=0; mdns_pairing=0; wireless_attempted=0
-          if [ "$authorized" -lt 1 ]; then
-            mdns_raw="$($adb mdns services 2>/dev/null | tr -d '\r' || true)"
-            mdns_connect="$(printf '%s\n' "$mdns_raw" | awk '/_adb-tls-connect\._tcp/ {c++} END{print c+0}')"
-            mdns_pairing="$(printf '%s\n' "$mdns_raw" | awk '/_adb-tls-pairing\._tcp/ {c++} END{print c+0}')"
-            if [ "$mdns_connect" -eq 1 ]; then
-              endpoint="$(printf '%s\n' "$mdns_raw" | awk '/_adb-tls-connect\._tcp/ {print $NF; exit}')"
-              if printf '%s' "$endpoint" | grep -Eq ':[0-9]+$'; then
-                wireless_attempted=1
-                $adb connect "$endpoint" >/dev/null 2>&1 || true
-                sleep 2
-                classify
-              fi
-            fi
-          fi
-
-          pnp_android=0; pnp_wpd=0; pnp_problem=0; adb_restart_attempted=0
-          if [ "$authorized" -lt 1 ]; then
-            ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-pnp-android-counts.ps1"
-            cat > "$ps1" <<'PS'
-          $ErrorActionPreference='SilentlyContinue'
-          $all = @(Get-PnpDevice -PresentOnly)
-          $android = @($all | Where-Object { $_.Class -eq 'AndroidUsbDeviceClass' })
-          $wpd = @($all | Where-Object { $_.Class -eq 'WPD' })
-          $problem = @($android | Where-Object { $_.Status -ne 'OK' })
-          Write-Output ('PNP_ANDROID_USB_COUNT=' + $android.Count)
-          Write-Output ('PNP_WPD_COUNT=' + $wpd.Count)
-          Write-Output ('PNP_ANDROID_PROBLEM_COUNT=' + $problem.Count)
-          PS
-            pnp_out="$(/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" 2>/dev/null | tr -d '\r' || true)"
-            rm -f "$ps1" >/dev/null 2>&1 || true
-            pnp_android="$(printf '%s\n' "$pnp_out" | sed -n 's/^PNP_ANDROID_USB_COUNT=//p' | tail -n1)"; pnp_android="${pnp_android:-0}"
-            pnp_wpd="$(printf '%s\n' "$pnp_out" | sed -n 's/^PNP_WPD_COUNT=//p' | tail -n1)"; pnp_wpd="${pnp_wpd:-0}"
-            pnp_problem="$(printf '%s\n' "$pnp_out" | sed -n 's/^PNP_ANDROID_PROBLEM_COUNT=//p' | tail -n1)"; pnp_problem="${pnp_problem:-0}"
-
-            # If Windows already exposes an Android USB interface, refresh only the ADB daemon once.
-            if [ "$pnp_android" -gt 0 ]; then
-              adb_restart_attempted=1
-              $adb kill-server >/dev/null 2>&1 || true
-              sleep 1
-              $adb start-server >/dev/null 2>&1 || true
-              sleep 2
-              classify
-            fi
-          fi
-
-          echo "EMULATOR_AUTHORIZED_COUNT=$emulator"
+          raw="$($adb devices 2>/dev/null | tr -d '\r' || true)"
+          authorized="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 !~ /^emulator-/ && $2=="device" {c++} END{print c+0}')"
+          unauthorized="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 !~ /^emulator-/ && $2=="unauthorized" {c++} END{print c+0}')"
+          offline="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 !~ /^emulator-/ && $2=="offline" {c++} END{print c+0}')"
+          other="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 !~ /^emulator-/ && NF>=2 && $2!="device" && $2!="unauthorized" && $2!="offline" {c++} END{print c+0}')"
+          emulator="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 ~ /^emulator-/ && $2=="device" {c++} END{print c+0}')"
           echo "PHYSICAL_AUTHORIZED_COUNT=$authorized"
           echo "PHYSICAL_UNAUTHORIZED_COUNT=$unauthorized"
           echo "PHYSICAL_OFFLINE_COUNT=$offline"
-          echo "WIRELESS_ADB_CONNECT_SERVICE_COUNT=$mdns_connect"
-          echo "WIRELESS_ADB_PAIRING_SERVICE_COUNT=$mdns_pairing"
-          echo "WIRELESS_ADB_CONNECT_ATTEMPTED=$wireless_attempted"
-          echo "PNP_ANDROID_USB_COUNT=$pnp_android"
-          echo "PNP_WPD_COUNT=$pnp_wpd"
-          echo "PNP_ANDROID_PROBLEM_COUNT=$pnp_problem"
-          echo "ADB_DAEMON_REFRESH_ATTEMPTED=$adb_restart_attempted"
+          echo "PHYSICAL_OTHER_COUNT=$other"
+          echo "EMULATOR_AUTHORIZED_COUNT=$emulator"
+          test "$authorized" -eq 1
+          test "$unauthorized" -eq 0
+          test "$offline" -eq 0
+          test "$other" -eq 0
 
-          if [ "$authorized" -gt 0 ]; then
-            echo PHYSICAL_ANDROID_ACCEPTANCE_READY=1
-            exit 0
-          fi
-          if [ "$unauthorized" -gt 0 ]; then
-            echo PHYSICAL_ANDROID_BLOCKER=USB_DEBUG_AUTHORIZATION
-          elif [ "$offline" -gt 0 ]; then
-            echo PHYSICAL_ANDROID_BLOCKER=ADB_OFFLINE
-          elif [ "$pnp_android" -gt 0 ]; then
-            echo PHYSICAL_ANDROID_BLOCKER=WINDOWS_ANDROID_INTERFACE_NOT_ENUMERATED_BY_ADB
-          elif [ "$pnp_wpd" -gt 0 ]; then
-            echo PHYSICAL_ANDROID_BLOCKER=PHONE_VISIBLE_AS_WPD_BUT_NO_ANDROID_ADB_INTERFACE
+          serial="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 !~ /^emulator-/ && $2=="device" {print $1; exit}')"
+          test -n "$serial"
+          echo "::add-mask::$serial"
+
+          installed="$($adb -s "$serial" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"
+          test -n "$installed"
+          next=$((installed + 1))
+          echo "INSTALLED_VERSION_CODE=$installed"
+          echo "NEXT_ACCEPTANCE_VERSION_CODE=$next"
+
+          marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          if printf '%s' "$marker" | grep -q facebook_connected_at; then
+            echo FACEBOOK_SESSION_MARKER_BEFORE=1
           else
-            echo PHYSICAL_ANDROID_BLOCKER=NO_PHYSICAL_USB_ENUMERATION
+            echo FACEBOOK_SESSION_MARKER_BEFORE=0
+            exit 241
           fi
-          echo PHYSICAL_ANDROID_ACCEPTANCE_BLOCKED=1
-          exit 253
+
+          echo "ADB=$adb" >> "$GITHUB_ENV"
+          echo "SERIAL=$serial" >> "$GITHUB_ENV"
+          echo "WIN_USER=$win_user" >> "$GITHUB_ENV"
+          echo "ANDROID_VERSION_CODE=$next" >> "$GITHUB_ENV"
+          echo "ANDROID_VERSION_NAME=0.1.${next}-pr7-physical" >> "$GITHUB_ENV"
+          echo PHYSICAL_PREFLIGHT=PASS
+
+      - name: Checkout exact candidate head
+        uses: actions/checkout@v4
+        with:
+          ref: test/android-headless-emulator-20260909
+          fetch-depth: 1
+          clean: true
+
+      - name: Prove candidate source revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git branch --show-current)" = "test/android-headless-emulator-20260909"
+          git diff --exit-code
+          echo "CANDIDATE_SHA=$GITHUB_SHA"
+          echo SOURCE_REVISION_GATE=PASS
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Build current-head Android APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --no-audit --no-fund
+          npx vite build
+          npx cap sync android
+
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/.android/sdk}}"
+          sdk="$(realpath "$sdk")"
+          test -d "$sdk/platforms/android-36"
+          test -d "$sdk/build-tools/36.0.0"
+          printf 'sdk.dir=%s\n' "$sdk" > android/local.properties
+
+          gradle="$HOME/.local/share/mrscrap-gradle/gradle-8.13/bin/gradle"
+          test -x "$gradle"
+          "$gradle" -p android :app:assembleDebug --stacktrace
+
+          apk="$GITHUB_WORKSPACE/android/app/build/outputs/apk/debug/app-debug.apk"
+          meta="$GITHUB_WORKSPACE/android/app/build/outputs/apk/debug/output-metadata.json"
+          test -s "$apk"
+          test -s "$meta"
+          python3 - "$meta" "$ANDROID_VERSION_CODE" "$ANDROID_VERSION_NAME" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1], encoding='utf-8'))
+          assert data.get('applicationId') == 'com.mrscrap.socialradar'
+          item = (data.get('elements') or [None])[0]
+          assert item
+          assert int(item.get('versionCode')) == int(sys.argv[2])
+          assert item.get('versionName') == sys.argv[3]
+          print('APK_IDENTITY_GATE=PASS')
+          PY
+          echo "SDK=$sdk" >> "$GITHUB_ENV"
+          echo "APK=$apk" >> "$GITHUB_ENV"
+          echo APK_BUILD_GATE=PASS
+
+      - name: Verify signing compatibility before replacement install
+        shell: bash
+        run: |
+          set -euo pipefail
+          apksigner="$SDK/build-tools/36.0.0/apksigner"
+          test -x "$apksigner"
+          remote="$($ADB -s "$SERIAL" shell pm path "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/^package://p' | head -n1)"
+          test -n "$remote"
+          installed_copy="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-pr7-installed-base.apk"
+          rm -f "$installed_copy"
+          "$ADB" -s "$SERIAL" pull "$remote" "$(wslpath -w "$installed_copy")" >/dev/null 2>&1
+          test -s "$installed_copy"
+
+          old_sig="$($apksigner verify --print-certs "$installed_copy" 2>/dev/null | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n1)"
+          new_sig="$($apksigner verify --print-certs "$APK" 2>/dev/null | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n1)"
+          test -n "$old_sig"
+          test -n "$new_sig"
+          test "$old_sig" = "$new_sig"
+          rm -f "$installed_copy"
+          echo SIGNATURE_COMPATIBLE=1
+
+      - name: Replace APK with app data preserved
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_apk="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-pr7-physical.apk"
+          cp "$APK" "$win_apk"
+          out="$($ADB -s "$SERIAL" install -r "$(wslpath -w "$win_apk")" 2>&1 | tr -d '\r')"
+          rm -f "$win_apk"
+          printf '%s\n' "$out" | grep -q '^Success$'
+
+          installed="$($ADB -s "$SERIAL" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"
+          test "$installed" = "$ANDROID_VERSION_CODE"
+          echo "INSTALLED_ACCEPTANCE_VERSION_CODE=$installed"
+
+          marker="$($ADB -s "$SERIAL" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          if printf '%s' "$marker" | grep -q facebook_connected_at; then
+            echo FACEBOOK_SESSION_MARKER_AFTER_INSTALL=1
+          else
+            echo FACEBOOK_SESSION_MARKER_AFTER_INSTALL=0
+            exit 242
+          fi
+          echo REPLACEMENT_INSTALL_PRESERVED_DATA=PASS
+
+      - name: Launch current candidate and expose only its local WebView debugger
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$ADB" -s "$SERIAL" shell am force-stop "$PKG" >/dev/null 2>&1 || true
+          "$ADB" -s "$SERIAL" shell am start -W -n "$PKG/.MainActivity" >/dev/null
+          sleep 6
+          pid="$($ADB -s "$SERIAL" shell pidof "$PKG" 2>/dev/null | tr -d '\r' | awk '{print $1}')"
+          test -n "$pid"
+          socket="$($ADB -s "$SERIAL" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | grep -E "${pid}$|_${pid}($|_)" | head -n1 || true)"
+          [ -n "$socket" ] || socket="$($ADB -s "$SERIAL" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | head -n1 || true)"
+          test -n "$socket"
+          "$ADB" -s "$SERIAL" forward --remove tcp:9261 >/dev/null 2>&1 || true
+          "$ADB" -s "$SERIAL" forward tcp:9261 "localabstract:$socket" >/dev/null
+          echo APP_LAUNCH_GATE=PASS
+
+      - name: Prove real Facebook session and collector boundary without logging source data
+        shell: bash
+        run: |
+          set -euo pipefail
+          ps1="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-pr7-physical-collector.ps1"
+          cat > "$ps1" <<'PS'
+          $ErrorActionPreference='Stop'
+          $targets=@(Invoke-RestMethod -Uri 'http://127.0.0.1:9261/json/list' -TimeoutSec 5)
+          $app=@($targets | Where-Object { $_.type -eq 'page' -and [string]$_.url -like 'https://localhost*' } | Select-Object -First 1)
+          if($app.Count -eq 0){throw 'APP_TARGET_MISSING'}
+          $u=[Uri][string]$app[0].webSocketDebuggerUrl
+          $wsUrl='ws://127.0.0.1:9261'+$u.PathAndQuery
+          $ws=[System.Net.WebSockets.ClientWebSocket]::new()
+          $cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds(150))
+          $ws.ConnectAsync([Uri]$wsUrl,$cts.Token).GetAwaiter().GetResult()|Out-Null
+          $expr=@'
+          (async()=>{
+            const backend='https://mr-scrap-api-live.onrender.com';
+            const safe={stage:'start',appAuth:false,facebookSession:false,eligibleSource:false,collected:-1};
+            try{
+              const status=await window.Capacitor.nativePromise('AuthenticatedSocialSession','status',{});
+              safe.facebookSession=status?.facebookConnected===true;
+              if(!safe.facebookSession){safe.stage='facebook_session';return safe;}
+
+              const auth=await fetch(backend+'/api/auth/me',{credentials:'include'});
+              const authJson=await auth.json().catch(()=>null);
+              safe.appAuth=auth.ok&&authJson?.authenticated===true;
+              if(!safe.appAuth){safe.stage='app_auth';return safe;}
+
+              const response=await fetch(backend+'/api/sources',{credentials:'include'});
+              if(!response.ok){safe.stage='sources_http';return safe;}
+              const sources=await response.json().catch(()=>[]);
+              const source=Array.isArray(sources)?sources.find(s=>s&&s.platform==='facebook'&&(s.connector_type==='device_session'||s.connectorType==='device_session')&&typeof s.url==='string'&&s.url.length>0):null;
+              safe.eligibleSource=Boolean(source);
+              if(!source){safe.stage='eligible_source';return safe;}
+
+              const result=await window.Capacitor.nativePromise('AuthenticatedSocialSession','collectSource',{
+                sourceId:'pr7-physical-acceptance',
+                url:source.url,
+                platform:'facebook',
+                limit:1
+              });
+              safe.collected=Array.isArray(result?.posts)?result.posts.length:0;
+              safe.stage=safe.collected>0?'pass':'empty_collection';
+              return safe;
+            }catch(_){safe.stage='collector_error';return safe;}
+          })()
+          '@
+          $payload=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 10
+          $bytes=[Text.Encoding]::UTF8.GetBytes($payload)
+          $ws.SendAsync([ArraySegment[byte]]::new($bytes),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null
+          $buf=New-Object byte[] 131072
+          $sb=[Text.StringBuilder]::new()
+          $value=$null
+          while($true){
+            $r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult()
+            [void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count))
+            if(!$r.EndOfMessage){continue}
+            $m=$sb.ToString()|ConvertFrom-Json
+            $sb.Clear()|Out-Null
+            if($m.id -ne 1){continue}
+            if($m.result.exceptionDetails){throw 'COLLECTOR_EVAL_FAILED'}
+            $value=$m.result.result.value
+            break
+          }
+          try{$ws.Abort()}catch{}
+          Write-Output ('APP_AUTHENTICATED='+$(if($value.appAuth){'1'}else{'0'}))
+          Write-Output ('FACEBOOK_NATIVE_SESSION='+$(if($value.facebookSession){'1'}else{'0'}))
+          Write-Output ('ELIGIBLE_FACEBOOK_SOURCE='+$(if($value.eligibleSource){'1'}else{'0'}))
+          Write-Output ('FACEBOOK_COLLECTED_POST_COUNT='+[int]$value.collected)
+          Write-Output ('COLLECTOR_STAGE='+[string]$value.stage)
+          if(-not $value.appAuth -or -not $value.facebookSession -or -not $value.eligibleSource -or [int]$value.collected -lt 1){exit 243}
+          Write-Output 'REAL_FACEBOOK_COLLECTOR_BOUNDARY=PASS'
+          PS
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
+          echo PHYSICAL_ANDROID_ACCEPTANCE=PASS
+
+      - name: Cleanup probe transport only
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if [ -n "${ADB:-}" ] && [ -n "${SERIAL:-}" ]; then
+            "$ADB" -s "$SERIAL" forward --remove tcp:9261 >/dev/null 2>&1 || true
+          fi
+          if [ -n "${WIN_USER:-}" ]; then
+            rm -f "/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-pr7-physical-collector.ps1" >/dev/null 2>&1 || true
+            rm -f "/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-pr7-installed-base.apk" >/dev/null 2>&1 || true
+            rm -f "/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-pr7-physical.apk" >/dev/null 2>&1 || true
+          fi
+          echo PROBE_TRANSPORT_CLEANUP=PASS
