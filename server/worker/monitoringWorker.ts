@@ -130,9 +130,8 @@ async function evaluateAndPersistRules(
           await db.logConnectorEvent(source.id, 'notification', 'error', 'Match persisted but in-app notification persistence failed.').catch(() => {});
         }
       }
-    } catch (evalError: any) {
-      const message = String(evalError?.message || 'AI evaluation failed').slice(0, 500);
-      await db.logConnectorEvent(source.id, 'ai_evaluation', 'error', `Rule ${rule.id}: ${message}`);
+    } catch {
+      await db.logConnectorEvent(source.id, 'ai_evaluation', 'error', `Rule ${rule.id}: EVALUATION_FAILED`);
     }
   }
 }
@@ -271,12 +270,12 @@ export class MonitoringWorker {
             'success',
             `Fetched ${rawPosts.length} posts from server-side provider${isInitialBaseline ? '; initial snapshot stored as baseline' : ''}`
           );
-        } catch (sourceError: any) {
-          const message = String(sourceError?.message || 'Unknown source fetch error').slice(0, 500);
-          result.errors.push({ sourceId: source.id, error: message });
+        } catch {
+          const errorCode = 'SOURCE_FETCH_FAILED';
+          result.errors.push({ sourceId: source.id, error: errorCode });
           const status = (source.consecutive_failures || 0) >= 2 ? 'needs_attention' : 'error';
-          await db.updateSourceHealth(source.id, status, false, message);
-          await db.logConnectorEvent(source.id, 'fetch', 'error', message);
+          await db.updateSourceHealth(source.id, status, false, errorCode);
+          await db.logConnectorEvent(source.id, 'fetch', 'error', errorCode);
         }
       }
     } finally {
