@@ -65,6 +65,18 @@ test('Android updater validates bounded metadata and pins APK downloads to the b
   assert.ok(update.includes("url.origin !== backendOrigin.origin || url.protocol !== 'https:'"));
 });
 
+test('Android background ingestion attaches device authorization only to the build-trusted backend', () => {
+  const gradle = read('android/app/build.gradle');
+  const worker = read('android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSourceWorker.java');
+  assert.match(gradle, /buildConfigField 'String', 'MR_SCRAP_BACKEND_ORIGIN'/);
+  assert.match(gradle, /buildConfig = true/);
+  assert.match(worker, /String backendBaseUrl = BuildConfig\.MR_SCRAP_BACKEND_ORIGIN;/);
+  assert.doesNotMatch(worker, /String backendBaseUrl = getInputData\(\)\.getString\(KEY_BACKEND_BASE_URL\)/);
+  const trustedOrigin = worker.indexOf('BuildConfig.MR_SCRAP_BACKEND_ORIGIN');
+  const bearerWrite = worker.indexOf('"Authorization", "Bearer " + authToken');
+  assert.ok(trustedOrigin >= 0 && bearerWrite > trustedOrigin, 'the bearer destination must originate from the compiled build configuration');
+});
+
 test('Android login WebViews reject non-HTTPS navigation and disable local content access', () => {
   for (const file of [
     'android/app/src/main/java/com/mrscrap/socialradar/FacebookSessionActivity.java',
