@@ -116,5 +116,6 @@ test('manual device scans are serialized and source pause UI follows persisted s
   assert.match(radar, /isPaused: serverPaused/);
   assert.match(radar, /for \(const source of deviceSources\)/);
   assert.doesNotMatch(radar, /Promise\.all\(deviceSources\.map/);
-  assert.match(radar, /Source pause state persisted but background scheduling did not reconcile/);
+  assert.match(radar, /Source pause persisted; background scheduling did not reconcile/);
+  assert.doesNotMatch(radar, /Source pause persisted; background scheduling did not reconcile', error/);
 });
