@@ -1,0 +1,107 @@
+name: Android Windows Safe Cache Cleanup
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-windows-safe-cache-cleanup.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 15
+    env:
+      PKG: com.mrscrap.socialradar
+    steps:
+      - name: Reclaim only disposable Windows caches
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          u="/mnt/c/Users/${win_user}"
+          sdk="$u/AppData/Local/MRSCRAP/AndroidSdk"
+          avd="$u/.android/avd/test_avd.avd"
+          adb="$sdk/platform-tools/adb.exe"
+          backup="$sdk/emulator-37.1.11-backup"
+
+          test -d "$avd"
+          test -d "$sdk/system-images/android-36/google_apis/x86_64"
+          test -x "$sdk/emulator/emulator.exe"
+          test -x "$adb"
+          avd_before="$(du -sk "$avd" | awk '{print $1}')"
+          free_before="$(df -Pk /mnt/c | awk 'NR==2{print $4}')"
+          echo "C_FREE_GIB_BEFORE=$(awk -v k="$free_before" 'BEGIN{printf "%.2f", k/1048576}')"
+          echo "AVD_GIB_PROTECTED=$(awk -v k="$avd_before" 'BEGIN{printf "%.2f", k/1048576}')"
+
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1;exit}')"
+          session_before=0
+          if [ -n "$serial" ]; then
+            marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+            if printf '%s' "$marker" | grep -q facebook_connected_at; then session_before=1; fi
+          fi
+          echo "FACEBOOK_SESSION_BEFORE_WINDOWS_CLEANUP=$session_before"
+
+          if [ -d "$backup" ]; then
+            echo "OBSOLETE_EMULATOR_BACKUP_GIB=$(du -sk "$backup" | awk '{printf "%.2f", $1/1048576}')"
+            rm -rf "$backup"
+            echo OBSOLETE_EMULATOR_BACKUP_REMOVED=1
+          else
+            echo OBSOLETE_EMULATOR_BACKUP_REMOVED=0
+          fi
+
+          # User-level cache roots: disposable, no profile/database/session directories.
+          rm -rf "$u/.cache" 2>/dev/null || true
+          rm -rf "$u/AppData/Local/npm-cache" "$u/AppData/Roaming/npm-cache" 2>/dev/null || true
+
+          # Old temp content only; leave anything currently in use or less than one day old.
+          if [ -d "$u/AppData/Local/Temp" ]; then
+            find "$u/AppData/Local/Temp" -mindepth 1 -mtime +1 -exec rm -rf -- {} + 2>/dev/null || true
+          fi
+
+          # Browser rendering caches only. Never delete browser profiles, Cookies, Local Storage, extensions or history.
+          for root in \
+            "$u/AppData/Local/BraveSoftware/Brave-Browser/User Data" \
+            "$u/AppData/Local/Google/Chrome/User Data" \
+            "$u/AppData/Local/Microsoft/Edge/User Data"; do
+            [ -d "$root" ] || continue
+            find "$root" -type d \( -name 'Cache' -o -name 'Code Cache' -o -name 'GPUCache' -o -name 'DawnCache' -o -name 'GrShaderCache' -o -name 'GraphiteDawnCache' -o -name 'ShaderCache' \) -prune -print0 2>/dev/null | while IFS= read -r -d '' d; do
+              find "$d" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
+            done
+          done
+
+          # Windows graphics/crash caches, if present.
+          rm -rf "$u/AppData/Local/D3DSCache"/* 2>/dev/null || true
+          rm -rf "$u/AppData/Local/NVIDIA/DXCache"/* "$u/AppData/Local/NVIDIA/GLCache"/* 2>/dev/null || true
+          if [ -d "$u/AppData/Local/CrashDumps" ]; then
+            find "$u/AppData/Local/CrashDumps" -type f -mtime +1 -delete 2>/dev/null || true
+          fi
+
+          # Preservation gates.
+          test -d "$avd"
+          test -d "$sdk/system-images/android-36/google_apis/x86_64"
+          test -x "$sdk/emulator/emulator.exe"
+          avd_after="$(du -sk "$avd" | awk '{print $1}')"
+          test "$avd_after" -gt 0
+          echo "AVD_GIB_AFTER=$(awk -v k="$avd_after" 'BEGIN{printf "%.2f", k/1048576}')"
+
+          session_after=0
+          if [ -n "$serial" ]; then
+            marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+            if printf '%s' "$marker" | grep -q facebook_connected_at; then session_after=1; fi
+          fi
+          echo "FACEBOOK_SESSION_AFTER_WINDOWS_CLEANUP=$session_after"
+          if [ "$session_before" = 1 ]; then test "$session_after" = 1; fi
+
+          free_after="$(df -Pk /mnt/c | awk 'NR==2{print $4}')"
+          echo "C_FREE_GIB_AFTER=$(awk -v k="$free_after" 'BEGIN{printf "%.2f", k/1048576}')"
+          reclaimed=$((free_after-free_before))
+          echo "C_RECLAIMED_GIB=$(awk -v k="$reclaimed" 'BEGIN{printf "%.2f", k/1048576}')"
+          df -h /mnt/c
+          echo SAFE_WINDOWS_CACHE_CLEANUP=PASS
