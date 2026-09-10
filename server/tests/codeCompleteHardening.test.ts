@@ -55,7 +55,7 @@ test('API and Smart Grab responses are bounded, metadata healing propagates safe
   assert.match(api, /function normalizeIngestSourceMetadata/);
   assert.match(api, /displayName\.trim\(\)\.slice\(0, 255\)/);
   assert.match(api, /safeHttpsUrl\(raw\.avatarUrl\)/);
-  assert.match(api, /raw\.handle\.trim\(\)\.replace\(\/\^@\//, ''\)\.slice\(0, 255\)/);
+  assert.ok(api.includes("raw.handle.trim().replace(/^@/, '').slice(0, 255)"));
   assert.match(api, /sourceMetadata: normalizeIngestSourceMetadata\(data\?\.sourceMetadata\)/);
 
   assert.match(explore, /MAX_EXPLORE_RESPONSE_BYTES = 4 \* 1024 \* 1024/);
