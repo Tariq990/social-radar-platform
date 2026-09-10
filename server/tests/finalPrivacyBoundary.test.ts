@@ -18,6 +18,14 @@ test('transport metadata drops secret-shaped and nested values before network us
   assert.deepEqual(safe, { feedIndex: 3, pinned: false, collector: 'dom' });
 });
 
+test('transport metadata enforces entry and string bounds', () => {
+  const input: Record<string, unknown> = { longText: 'x'.repeat(5000) };
+  for (let index = 0; index < 100; index++) input[`field${index}`] = index;
+  const safe = sanitizeTransportMetadata(input);
+  assert.equal(Object.keys(safe).length, 64);
+  assert.equal(String(safe.longText).length, 2000);
+});
+
 test('device ingestion sanitizes metadata before serializing the request', () => {
   const api = fs.readFileSync('src/services/api.ts', 'utf8');
   const connector = fs.readFileSync('src/connectors/deviceSessionConnector.ts', 'utf8');
