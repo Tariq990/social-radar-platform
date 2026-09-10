@@ -1,4 +1,4 @@
-name: Android v159 Runtime Media Recheck
+name: Android v159 Persisted Identity Recheck
 
 on:
   push:
@@ -15,11 +15,11 @@ concurrency:
 jobs:
   probe:
     runs-on: [self-hosted, Linux]
-    timeout-minutes: 15
+    timeout-minutes: 8
     env:
       PKG: com.mrscrap.socialradar
     steps:
-      - name: Probe installed v159 without rebuild or reinstall
+      - name: Verify persisted identity on installed v159
         shell: bash
         run: |
           set -euo pipefail
@@ -30,58 +30,22 @@ jobs:
           version="$($adb -s "$serial" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"; echo "INSTALLED_VERSION_CODE=$version"; test "$version" = 159
           marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"; printf '%s' "$marker" | grep -q facebook_connected_at
           echo FACEBOOK_SESSION_PRESENT=1
-          $adb -s "$serial" shell am force-stop "$PKG" >/dev/null 2>&1 || true
-          $adb -s "$serial" shell am start -W -n "$PKG/.MainActivity" >/dev/null
-          sleep 10
+          $adb -s "$serial" shell am force-stop "$PKG" >/dev/null 2>&1 || true; $adb -s "$serial" shell am start -W -n "$PKG/.MainActivity" >/dev/null; sleep 10
           pid="$($adb -s "$serial" shell pidof "$PKG" 2>/dev/null | tr -d '\r' | awk '{print $1}')"; test -n "$pid"
-          socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | grep -E "${pid}$|_${pid}($|_)" | head -n1 || true)"
-          [ -n "$socket" ] || socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | head -n1 || true)"; test -n "$socket"
-          port=9241
-          $adb -s "$serial" forward --remove tcp:$port >/dev/null 2>&1 || true
-          $adb -s "$serial" forward tcp:$port "localabstract:$socket" >/dev/null
-          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-v159-media-recheck.ps1"
+          socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | grep -E "${pid}$|_${pid}($|_)" | head -n1 || true)"; [ -n "$socket" ] || socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | head -n1 || true)"; test -n "$socket"
+          port=9241; $adb -s "$serial" forward --remove tcp:$port >/dev/null 2>&1 || true; $adb -s "$serial" forward tcp:$port "localabstract:$socket" >/dev/null
+          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-v159-identity-recheck.ps1"
           cat > "$ps1" <<'PS'
           $ErrorActionPreference='Stop';$port=9241
           function Target { for($i=0;$i -lt 120;$i++){try{$rows=@(Invoke-RestMethod -Uri "http://127.0.0.1:$port/json/list" -TimeoutSec 2);$t=$rows|Where-Object{$_.type -eq 'page' -and [string]$_.url -like 'https://localhost*'}|Select-Object -First 1;if($t){return $t}}catch{};Start-Sleep -Milliseconds 250};throw 'app target missing' }
-          function Eval([string]$expr,[int]$seconds=420){$t=Target;$u=[Uri]$t.webSocketDebuggerUrl;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($seconds));$ws.ConnectAsync([Uri]("ws://127.0.0.1:$port"+$u.PathAndQuery),$cts.Token).GetAwaiter().GetResult()|Out-Null;$payload=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 12;$bytes=[Text.Encoding]::UTF8.GetBytes($payload);$ws.SendAsync([ArraySegment[byte]]::new($bytes),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null;$buf=New-Object byte[] 262144;$sb=[Text.StringBuilder]::new();while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id -ne 1){continue};if($m.result.exceptionDetails){throw 'runtime eval exception'};$v=$m.result.result.value;try{$ws.Abort()}catch{};return $v}}
+          function Eval([string]$expr,[int]$seconds=150){$t=Target;$u=[Uri]$t.webSocketDebuggerUrl;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($seconds));$ws.ConnectAsync([Uri]("ws://127.0.0.1:$port"+$u.PathAndQuery),$cts.Token).GetAwaiter().GetResult()|Out-Null;$payload=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 10;$bytes=[Text.Encoding]::UTF8.GetBytes($payload);$ws.SendAsync([ArraySegment[byte]]::new($bytes),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null;$buf=New-Object byte[] 131072;$sb=[Text.StringBuilder]::new();while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id-ne 1){continue};if($m.result.exceptionDetails){throw 'runtime eval exception'};$v=$m.result.result.value;try{$ws.Abort()}catch{};return $v}}
           $expr=@'
-          (async()=>{
-            const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-            const norm=v=>String(v||'').normalize('NFKC').trim().replace(/^@/,'').toLowerCase();
-            const generic=(name,s)=>{const n=norm(name);return !n||['facebook','instagram','page','profile','home',norm(s?.handle),norm(s?.externalId)].filter(Boolean).includes(n)};
-            const out={rawName:false,rawAvatar:false,uiName:false,uiAvatar:false,uiAvatarLoaded:false,cache:false,button:false,modal:false,error:false,cards:0,mediaCards:0,images:0,videos:0,loaded:0,failed:0,pending:0,abDefault:-1,abNoRef:-1};
-            let rows=[];for(let i=0;i<30;i++){try{const r=await fetch('https://mr-scrap-api-live.onrender.com/api/sources',{credentials:'include'});if(r.ok){rows=await r.json();if(Array.isArray(rows)&&rows.length)break}}catch{}await sleep(500)}
-            const src=(Array.isArray(rows)?rows:[]).find(x=>x?.platform==='facebook');if(!src)return out;
-            out.rawName=!generic(src.displayName||src.name,src);out.rawAvatar=/^https?:\/\//i.test(String(src.avatarUrl||''));
-            window.dispatchEvent(new CustomEvent('mrscrap:navigate',{detail:{screen:'watchlist'}}));
-            for(let i=0;i<180;i++){const card=document.getElementById('source-card-'+src.id);if(card){const n=String(card.querySelector('h3')?.textContent||'').trim();const img=card.querySelector('img');out.uiName=!generic(n,src);out.uiAvatar=Boolean(img&&/^https?:\/\//i.test(String(img.getAttribute('src')||'')));out.uiAvatarLoaded=Boolean(img&&img.complete&&img.naturalWidth>0);if(out.uiName&&out.uiAvatarLoaded)break}await sleep(500)}
-            try{const c=JSON.parse(localStorage.getItem('mrscrap_source_identity_cache_v1')||'{}');out.cache=Boolean(c&&typeof c==='object'&&Object.keys(c).length>0)}catch{}
-            window.dispatchEvent(new CustomEvent('mrscrap:navigate',{detail:{screen:'radar'}}));
-            for(let i=0;i<80;i++){const b=document.getElementById('btn-extracted-posts-home');if(b){out.button=true;b.click();break}await sleep(250)}
-            for(let i=0;i<80;i++){if(document.getElementById('modal-extracted-posts')){out.modal=true;break}await sleep(250)}
-            if(!out.modal)return out;
-            for(let i=0;i<330;i++){if(!document.getElementById('extracted-posts-loading'))break;await sleep(1000)}
-            out.error=Boolean(document.getElementById('extracted-posts-error'));
-            const cards=[...document.querySelectorAll('[data-extracted-post="1"]')];out.cards=cards.length;out.mediaCards=cards.filter(c=>Number(c.getAttribute('data-media-count')||'0')>0).length;
-            const imgs=[...document.querySelectorAll('[data-extracted-image="1"]')];const vids=[...document.querySelectorAll('[data-extracted-video="1"]')];out.images=imgs.length;out.videos=vids.length;
-            for(const img of imgs){img.loading='eager';img.scrollIntoView({block:'center'});await sleep(350)}
-            for(const vid of vids){vid.scrollIntoView({block:'center'});try{vid.load()}catch{}await sleep(350)}
-            await sleep(12000);
-            out.loaded=imgs.filter(x=>x.complete&&x.naturalWidth>0).length+vids.filter(x=>x.readyState>=1).length;
-            out.failed=imgs.filter(x=>x.complete&&x.naturalWidth===0).length;
-            out.pending=imgs.filter(x=>!x.complete).length+vids.filter(x=>x.readyState<1).length;
-            const sample=imgs.find(x=>/^https?:\/\//i.test(String(x.src||'')));
-            if(sample){const test=rp=>new Promise(resolve=>{const im=new Image();if(rp)im.referrerPolicy='no-referrer';const timer=setTimeout(()=>resolve(-1),15000);im.onload=()=>{clearTimeout(timer);resolve(1)};im.onerror=()=>{clearTimeout(timer);resolve(0)};im.src=sample.src});out.abDefault=await test(false);out.abNoRef=await test(true)}
-            return out;
-          })()
+          (async()=>{const sleep=ms=>new Promise(r=>setTimeout(r,ms));const norm=v=>String(v||'').normalize('NFKC').trim().replace(/^@/,'').toLowerCase();const generic=(name,s)=>{const n=norm(name);return !n||['facebook','instagram','page','profile','home',norm(s?.handle),norm(s?.external_id),norm(s?.externalId)].filter(Boolean).includes(n)};let rows=[];for(let i=0;i<30;i++){try{const r=await fetch('https://mr-scrap-api-live.onrender.com/api/sources',{credentials:'include'});if(r.ok){rows=await r.json();if(Array.isArray(rows)&&rows.length)break}}catch{}await sleep(500)}const s=(Array.isArray(rows)?rows:[]).find(x=>x?.platform==='facebook');if(!s)return{source:false};const rawName=String(s.name||s.displayName||'');const rawAvatar=String(s.avatar_url||s.avatarUrl||'');window.dispatchEvent(new CustomEvent('mrscrap:navigate',{detail:{screen:'watchlist'}}));let uiName=false,uiAvatar=false;for(let i=0;i<180;i++){const card=document.getElementById('source-card-'+s.id);if(card){const n=String(card.querySelector('h3')?.textContent||'');const img=card.querySelector('img');uiName=!generic(n,s);uiAvatar=Boolean(img&&img.complete&&img.naturalWidth>0);if(uiName&&uiAvatar)break}await sleep(500)}return{source:true,rawName:!generic(rawName,s),rawAvatar:/^https?:\/\//i.test(rawAvatar),uiName,uiAvatar}})()
           '@
-          $r=Eval $expr 420
-          Write-Output ('BACKEND_RAW_REAL_NAME='+$(if($r.rawName){'1'}else{'0'}));Write-Output ('BACKEND_RAW_AVATAR='+$(if($r.rawAvatar){'1'}else{'0'}))
-          Write-Output ('SOURCE_UI_REAL_NAME='+$(if($r.uiName){'1'}else{'0'}));Write-Output ('SOURCE_UI_AVATAR='+$(if($r.uiAvatar){'1'}else{'0'}));Write-Output ('SOURCE_UI_AVATAR_LOADED='+$(if($r.uiAvatarLoaded){'1'}else{'0'}));Write-Output ('SOURCE_IDENTITY_CACHE_PRESENT='+$(if($r.cache){'1'}else{'0'}))
-          Write-Output ('EXTRACTED_POSTS_BUTTON='+$(if($r.button){'1'}else{'0'}));Write-Output ('EXTRACTED_POSTS_MODAL='+$(if($r.modal){'1'}else{'0'}));Write-Output ('EXTRACTED_POSTS_ERROR='+$(if($r.error){'1'}else{'0'}));Write-Output ('EXTRACTED_POST_CARDS='+[int]$r.cards);Write-Output ('EXTRACTED_MEDIA_CARDS='+[int]$r.mediaCards);Write-Output ('EXTRACTED_IMAGES='+[int]$r.images);Write-Output ('EXTRACTED_VIDEOS='+[int]$r.videos);Write-Output ('MEDIA_LOADED_AFTER_SCROLL='+[int]$r.loaded);Write-Output ('MEDIA_FAILED_AFTER_SCROLL='+[int]$r.failed);Write-Output ('MEDIA_PENDING_AFTER_SCROLL='+[int]$r.pending);Write-Output ('IMAGE_AB_DEFAULT='+[int]$r.abDefault);Write-Output ('IMAGE_AB_NO_REFERRER='+[int]$r.abNoRef)
-          if(!$r.uiName -or !$r.uiAvatarLoaded -or !$r.button -or !$r.modal -or $r.error -or [int]$r.cards -lt 1 -or [int]$r.mediaCards -lt 1){exit 251}
-          Write-Output V159_RUNTIME_UI_STRUCTURE_GATE=PASS
+          $r=Eval $expr 150
+          Write-Output ('SOURCE_FOUND='+$(if($r.source){'1'}else{'0'}));Write-Output ('BACKEND_PERSISTED_REAL_NAME='+$(if($r.rawName){'1'}else{'0'}));Write-Output ('BACKEND_PERSISTED_AVATAR='+$(if($r.rawAvatar){'1'}else{'0'}));Write-Output ('SOURCE_UI_REAL_NAME_AFTER_RESTART='+$(if($r.uiName){'1'}else{'0'}));Write-Output ('SOURCE_UI_AVATAR_AFTER_RESTART='+$(if($r.uiAvatar){'1'}else{'0'}))
+          if(!$r.source -or !$r.rawName -or !$r.rawAvatar -or !$r.uiName -or !$r.uiAvatar){exit 252}
+          Write-Output V159_PERSISTED_SOURCE_IDENTITY_GATE=PASS
           PS
           /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
-          $adb -s "$serial" forward --remove tcp:$port >/dev/null 2>&1 || true
-          rm -f "$ps1" 2>/dev/null || true
+          $adb -s "$serial" forward --remove tcp:$port >/dev/null 2>&1 || true; rm -f "$ps1" 2>/dev/null || true
