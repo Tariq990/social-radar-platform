@@ -4,11 +4,22 @@ import { AlertMatch } from '../types';
 import { useRadar } from '../context/RadarContext';
 import { translations } from '../lib/i18n';
 import { BRAND } from '../config/brand';
+import { extractSupportedSocialUrl } from '../lib/socialUrl';
 import { SourceAvatar } from './SourceAvatar';
 
 interface AlertDetailModalProps {
   alert: AlertMatch;
   onClose: () => void;
+}
+
+function safeHttpsMediaUrl(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim()) return '';
+  try {
+    const parsed = new URL(value.trim());
+    return parsed.protocol === 'https:' ? parsed.toString() : '';
+  } catch {
+    return '';
+  }
 }
 
 export const AlertDetailModal: React.FC<AlertDetailModalProps> = ({ alert, onClose }) => {
@@ -17,13 +28,15 @@ export const AlertDetailModal: React.FC<AlertDetailModalProps> = ({ alert, onClo
   const [copiedShare, setCopiedShare] = useState(false);
   const [showShareCard, setShowShareCard] = useState(false);
   const postText = alert.post?.text || (alert as any).postSnippet || (alert as any).text || '';
-  const postUrl = alert.post?.originalUrl || (alert as any).postUrl || (alert as any).url || '';
+  const rawPostUrl = alert.post?.originalUrl || (alert as any).postUrl || (alert as any).url || '';
+  const postUrl = extractSupportedSocialUrl(rawPostUrl) || '';
   const sourceName = alert.sourceName || (alert as any).displayName || (locale === 'ar' ? 'مصدر مراقب' : 'Monitored source');
   const sourceAvatar = alert.sourceAvatar || alert.post?.authorAvatar || (alert as any).authorAvatar || '';
   const sourcePlatform = alert.sourcePlatform || (alert as any).platform || 'other';
   const ruleName = alert.ruleName || (alert as any).ruleNaturalLanguage || '';
   const reason = alert.reason || (alert as any).whyMatched || '';
   const mediaItems = Array.isArray(alert.post?.media) ? alert.post.media : [];
+  const firstMediaUrl = safeHttpsMediaUrl(mediaItems[0]?.url);
 
   const copyLink = async () => {
     if (!postUrl) return;
@@ -59,7 +72,7 @@ export const AlertDetailModal: React.FC<AlertDetailModalProps> = ({ alert, onClo
           <div className="space-y-2">
             <span className="text-xs font-semibold text-slate-400">{t.originalExcerpt}</span>
             <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-sm text-slate-200 leading-relaxed whitespace-pre-wrap">{postText || (locale === 'ar' ? 'لا يتوفر نص للمنشور.' : 'No post text is available.')}</div>
-            {mediaItems.length > 0 && /^https?:\/\//i.test(mediaItems[0].url) && <div className="rounded-xl overflow-hidden border border-slate-800 max-h-72 bg-slate-950"><img src={mediaItems[0].url} alt="" loading="lazy" referrerPolicy="no-referrer" className="w-full h-full object-cover" /></div>}
+            {firstMediaUrl && <div className="rounded-xl overflow-hidden border border-slate-800 max-h-72 bg-slate-950"><img src={firstMediaUrl} alt="" loading="lazy" referrerPolicy="no-referrer" className="w-full h-full object-cover" /></div>}
           </div>
 
           {postUrl && (
