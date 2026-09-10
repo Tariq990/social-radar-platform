@@ -23,19 +23,48 @@ jobs:
           set -euo pipefail
           win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
           adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"; test -x "$adb"
-          authorized=0; unauthorized=0; offline=0; emulator=0
-          for i in $(seq 1 15); do
+
+          classify() {
+            local raw
             raw="$($adb devices 2>/dev/null | tr -d '\r' || true)"
             emulator="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 ~ /^emulator-/ && $2=="device" {c++} END{print c+0}')"
             authorized="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 !~ /^emulator-/ && $2=="device" {c++} END{print c+0}')"
             unauthorized="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 !~ /^emulator-/ && $2=="unauthorized" {c++} END{print c+0}')"
             offline="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 !~ /^emulator-/ && $2=="offline" {c++} END{print c+0}')"
+          }
+
+          authorized=0; unauthorized=0; offline=0; emulator=0
+          for i in $(seq 1 10); do
+            classify
             if [ "$authorized" -gt 0 ]; then break; fi
             sleep 1
           done
+
+          mdns_connect=0; mdns_pairing=0; wireless_attempted=0
+          if [ "$authorized" -lt 1 ]; then
+            mdns_raw="$($adb mdns services 2>/dev/null | tr -d '\r' || true)"
+            mdns_connect="$(printf '%s\n' "$mdns_raw" | awk '/_adb-tls-connect\._tcp/ {c++} END{print c+0}')"
+            mdns_pairing="$(printf '%s\n' "$mdns_raw" | awk '/_adb-tls-pairing\._tcp/ {c++} END{print c+0}')"
+
+            # A previously paired phone can advertise a connect service without USB. If exactly one
+            # endpoint is discoverable, try it without printing the address or device name.
+            if [ "$mdns_connect" -eq 1 ]; then
+              endpoint="$(printf '%s\n' "$mdns_raw" | awk '/_adb-tls-connect\._tcp/ {print $NF; exit}')"
+              if printf '%s' "$endpoint" | grep -Eq ':[0-9]+$'; then
+                wireless_attempted=1
+                $adb connect "$endpoint" >/dev/null 2>&1 || true
+                sleep 2
+                classify
+              fi
+            fi
+          fi
+
           echo "EMULATOR_AUTHORIZED_COUNT=$emulator"
           echo "PHYSICAL_AUTHORIZED_COUNT=$authorized"
           echo "PHYSICAL_UNAUTHORIZED_COUNT=$unauthorized"
           echo "PHYSICAL_OFFLINE_COUNT=$offline"
+          echo "WIRELESS_ADB_CONNECT_SERVICE_COUNT=$mdns_connect"
+          echo "WIRELESS_ADB_PAIRING_SERVICE_COUNT=$mdns_pairing"
+          echo "WIRELESS_ADB_CONNECT_ATTEMPTED=$wireless_attempted"
           if [ "$authorized" -lt 1 ]; then echo PHYSICAL_ANDROID_ACCEPTANCE_BLOCKED=1; exit 253; fi
           echo PHYSICAL_ANDROID_ACCEPTANCE_READY=1
