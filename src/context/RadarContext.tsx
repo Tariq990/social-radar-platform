@@ -204,7 +204,7 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const refreshDeviceSession = async (): Promise<boolean> => applyDeviceStatus(await DeviceSessionConnector.getLocalSession());
 
-  const loadDatabaseState = async () => {
+  const loadDatabaseState = async (attempt: number = 0) => {
     try {
       const [health, config, auth] = await Promise.all([
         apiCheckHealth(), apiGetConfig(), apiGetAuthSession()
@@ -260,6 +260,10 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }));
     } catch (error) {
       console.warn('[RadarProvider] Backend state load failed', error);
+      if (attempt < 1) {
+        await new Promise(resolve => globalThis.setTimeout(resolve, 1_200));
+        return loadDatabaseState(attempt + 1);
+      }
       setBackendStatus('offline');
       setSources([]); setRules([]); setMatches([]);
     }
