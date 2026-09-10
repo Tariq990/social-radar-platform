@@ -1,8 +1,9 @@
 import { db, DbMatch } from '../db/database';
 import { sourceConnectorManager } from '../connectors/sourceConnector';
 import { computePostFingerprint, canonicalizeSocialUrl } from './deduplication';
-import { evaluatePostAgainstRule } from '../ai/ruleEvaluator';
+import { evaluatePostAgainstRule, isLatestPostIntent } from '../ai/ruleEvaluator';
 import { notificationService } from '../notifications';
+import type { RawProviderPost } from '../connectors/types';
 
 export interface MonitoringJobResult {
   sourcesScanned: number;
@@ -20,12 +21,76 @@ function sanitizePublishedAt(value: unknown): string | undefined {
   return new Date(millis).toISOString();
 }
 
+function safeHttpsUrl(value: unknown, maxLength: number = 4096): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  try {
+    const parsed = new URL(value.trim());
+    if (!['http:', 'https:'].includes(parsed.protocol)) return undefined;
+    if (parsed.protocol === 'http:') parsed.protocol = 'https:';
+    return parsed.toString().slice(0, maxLength);
+  } catch {
+    return undefined;
+  }
+}
+
+function allowedSocialUrl(value: unknown, platform: 'facebook' | 'instagram'): string | undefined {
+  const normalized = safeHttpsUrl(value);
+  if (!normalized) return undefined;
+  const host = new URL(normalized).hostname.toLowerCase();
+  const allowed = platform === 'instagram'
+    ? host === 'instagram.com' || host.endsWith('.instagram.com') || host === 'instagr.am' || host.endsWith('.instagr.am')
+    : host === 'facebook.com' || host.endsWith('.facebook.com') || host === 'fb.com' || host.endsWith('.fb.com') || host === 'fb.watch';
+  return allowed ? canonicalizeSocialUrl(normalized) : undefined;
+}
+
+function sanitizeMedia(value: unknown): { type: 'image' | 'video'; url: string }[] {
+  if (!Array.isArray(value)) return [];
+  const output: { type: 'image' | 'video'; url: string }[] = [];
+  const seen = new Set<string>();
+  for (const item of value.slice(0, 20)) {
+    if (!item || (item.type !== 'image' && item.type !== 'video')) continue;
+    const url = safeHttpsUrl(item.url);
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    output.push({ type: item.type, url });
+  }
+  return output;
+}
+
+function sanitizeProviderMetadata(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const blocked = ['cookie', 'cookies', 'password', 'passwd', 'session', 'sessionid', 'token', 'access_token', 'authorization'];
+  const output: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (blocked.some(blockedKey => key.toLowerCase().includes(blockedKey))) continue;
+    if (typeof entry === 'string') output[key] = entry.slice(0, 1000);
+    else if (typeof entry === 'number' || typeof entry === 'boolean' || entry === null) output[key] = entry;
+  }
+  return output;
+}
+
+function latestProviderCandidateIndex(posts: RawProviderPost[], platform: 'facebook' | 'instagram'): number {
+  let fallback = -1;
+  let newest = -1;
+  let newestTime = Number.NEGATIVE_INFINITY;
+  for (let index = 0; index < posts.length; index++) {
+    const post = posts[index];
+    if (!allowedSocialUrl(post?.url, platform)) continue;
+    if (fallback < 0) fallback = index;
+    const published = typeof post?.publishedAt === 'string' ? Date.parse(post.publishedAt) : NaN;
+    if (Number.isFinite(published) && published > newestTime) {
+      newest = index;
+      newestTime = published;
+    }
+  }
+  return newest >= 0 ? newest : fallback;
+}
+
 /**
  * Server-side monitoring worker.
- *
- * Server-side providers are optional. Authenticated device_session sources are intentionally
- * NOT fetched by this worker because their Facebook/Instagram session must remain on-device.
- * Those posts enter the same persistence/AI pipeline through /api/device/ingest.
+ * Authenticated device_session sources remain on-device and enter through /api/device/ingest.
+ * The first server-managed snapshot is stored as a baseline so historical provider content cannot
+ * manufacture alerts; only an explicit latest/new-post rule may match the single newest candidate.
  */
 export class MonitoringWorker {
   private readonly runningUsers = new Set<string>();
@@ -72,13 +137,13 @@ export class MonitoringWorker {
           continue;
         }
 
-        // Count a server-side source as scanned only when this worker actually attempts its fetch.
-        // Device-managed sources are reported separately and are not double-counted by the client.
         result.sourcesScanned++;
         try {
           const sourceRules = activeRules.filter(rule =>
             !rule.source_ids || rule.source_ids.length === 0 || rule.source_ids.includes(source.id)
           );
+          const latestPostRules = sourceRules.filter(rule => isLatestPostIntent(rule.natural_language || ''));
+          const isInitialBaseline = !source.last_checked_at;
 
           const rawPosts = await sourceConnectorManager.fetchLatest({
             id: source.id,
@@ -87,18 +152,19 @@ export class MonitoringWorker {
             externalId: source.external_id,
             connectorType: source.connector_type
           }, isDemoMode);
+          const latestCandidateIndex = latestProviderCandidateIndex(rawPosts, source.platform);
 
-          await db.updateSourceHealth(source.id, 'connected', true);
-          await db.logConnectorEvent(source.id, 'fetch', 'success', `Fetched ${rawPosts.length} posts from server-side provider`);
-
-          for (const raw of rawPosts) {
-            const canonicalUrl = canonicalizeSocialUrl(raw.url || source.url);
-            const contentFingerprint = computePostFingerprint(
-              source.platform,
-              raw.externalId,
-              canonicalUrl,
-              raw.text
-            );
+          for (const [rawIndex, raw] of rawPosts.entries()) {
+            const canonicalUrl = allowedSocialUrl(raw.url || source.url, source.platform);
+            if (!canonicalUrl) {
+              result.errors.push({ sourceId: source.id, error: 'Provider returned an invalid post URL' });
+              continue;
+            }
+            const text = typeof raw.text === 'string' ? raw.text.slice(0, 100_000) : '';
+            const externalId = typeof raw.externalId === 'string' && raw.externalId.trim()
+              ? raw.externalId.trim().slice(0, 512)
+              : undefined;
+            const contentFingerprint = computePostFingerprint(source.platform, externalId, canonicalUrl, text);
             const fingerprint = `${source.id}:${contentFingerprint}`.slice(0, 255);
 
             if (await db.hasPostFingerprint(fingerprint)) continue;
@@ -108,22 +174,27 @@ export class MonitoringWorker {
               id: candidatePostId,
               source_id: source.id,
               platform: source.platform,
-              external_id: raw.externalId,
+              external_id: externalId,
               canonical_url: canonicalUrl,
-              author_name: raw.authorName || source.name,
-              author_avatar: raw.authorAvatar || source.avatar_url,
-              text: raw.text || '',
-              media: raw.media || [],
+              author_name: typeof raw.authorName === 'string' && raw.authorName.trim() ? raw.authorName.trim().slice(0, 255) : source.name,
+              author_avatar: safeHttpsUrl(raw.authorAvatar) || safeHttpsUrl(source.avatar_url),
+              text,
+              media: sanitizeMedia(raw.media),
               published_at: sanitizePublishedAt(raw.publishedAt),
               fingerprint,
-              metadata: raw.metadata || {}
+              metadata: {
+                ...sanitizeProviderMetadata(raw.metadata),
+                feedIndex: rawIndex,
+                latestCandidate: rawIndex === latestCandidateIndex,
+                ingestion: 'server_public_provider'
+              }
             });
 
             if (savedPost.id !== candidatePostId) continue;
-
             result.newPostsFound++;
 
-            for (const rule of sourceRules) {
+            const rulesToEvaluate = isInitialBaseline ? latestPostRules : sourceRules;
+            for (const rule of rulesToEvaluate) {
               try {
                 const evalResult = await evaluatePostAgainstRule(savedPost, rule, 'en');
                 if (!evalResult.matched) continue;
@@ -147,19 +218,31 @@ export class MonitoringWorker {
                 if (createdMatch.id !== candidateMatchId) continue;
 
                 createdMatch.source_name = source.name;
-                createdMatch.source_avatar = source.avatar_url;
+                createdMatch.source_avatar = safeHttpsUrl(source.avatar_url);
                 createdMatch.source_platform = source.platform;
                 createdMatch.rule_name = rule.name;
                 createdMatch.post = savedPost;
                 result.matchesCreated.push(createdMatch);
 
-                await notificationService.dispatchMatchNotification(createdMatch);
+                try {
+                  await notificationService.dispatchMatchNotification(createdMatch);
+                } catch {
+                  await db.logConnectorEvent(source.id, 'notification', 'error', 'Match persisted but in-app notification persistence failed.').catch(() => {});
+                }
               } catch (evalError: any) {
                 const message = evalError?.message || 'AI evaluation failed';
                 await db.logConnectorEvent(source.id, 'ai_evaluation', 'error', `Rule ${rule.id}: ${message}`);
               }
             }
           }
+
+          await db.updateSourceHealth(source.id, 'connected', true);
+          await db.logConnectorEvent(
+            source.id,
+            'fetch',
+            'success',
+            `Fetched ${rawPosts.length} posts from server-side provider${isInitialBaseline ? '; initial snapshot stored as baseline' : ''}`
+          );
         } catch (sourceError: any) {
           const message = sourceError?.message || 'Unknown source fetch error';
           result.errors.push({ sourceId: source.id, error: message });
