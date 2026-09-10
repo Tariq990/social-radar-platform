@@ -1,0 +1,133 @@
+name: Android Emulator Host GPU Tune
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-emulator-host-gpu-tune.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  tune:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 15
+    env:
+      PKG: com.mrscrap.socialradar
+      AVD: test_avd
+    steps:
+      - name: Checkout lane without cleaning persistent workspace
+        uses: actions/checkout@v4
+        with:
+          ref: test/android-headless-emulator-20260909
+          fetch-depth: 1
+          clean: false
+
+      - name: Tune emulator with automatic rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          sdk_win="C:\\Users\\${win_user}\\AppData\\Local\\MRSCRAP\\AndroidSdk"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"
+          emu="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/emulator/emulator.exe"
+          cfg="/mnt/c/Users/${win_user}/.android/avd/${AVD}.avd/config.ini"
+          test -x "$adb"; test -x "$emu"; test -f "$cfg"
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1;exit}')"
+          test -n "$serial"
+          test "$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1)" = 1
+          marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          printf '%s' "$marker" | grep -q facebook_connected_at
+          version="$($adb -s "$serial" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"
+          echo "INSTALLED_VERSION_BEFORE=${version:-unknown}"
+          echo FACEBOOK_SESSION_BEFORE_TUNE=1
+
+          backup="${cfg}.pre-host-gpu-tune"
+          cp -f "$cfg" "$backup"
+          echo '=== BEFORE ==='
+          grep -E '^(hw\.ramSize|hw\.cpu\.ncore|hw\.gpu\.mode|hw\.gpu\.enabled|disk\.dataPartition\.size)=' "$cfg" || true
+
+          rollback() {
+            echo 'ROLLBACK_REQUESTED=1'
+            cp -f "$backup" "$cfg"
+            /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -like '*-avd ${AVD}*' -and (\$_.Name -like 'emulator*' -or \$_.Name -like 'qemu*') } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }" >/dev/null 2>&1 || true
+            sleep 3
+            /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -Command "Start-Process -FilePath '${sdk_win}\\emulator\\emulator.exe' -ArgumentList @('-avd','${AVD}','-no-snapshot-load')" >/dev/null
+            exit 1
+          }
+          trap rollback ERR
+
+          $adb -s "$serial" emu kill >/dev/null 2>&1 || true
+          for i in $(seq 1 60); do
+            if ! $adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {found=1} END{exit found?0:1}'; then break; fi
+            sleep 1
+          done
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -like '*-avd ${AVD}*' -and (\$_.Name -like 'emulator*' -or \$_.Name -like 'qemu*') } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }" >/dev/null 2>&1 || true
+          sleep 3
+
+          CFG="$cfg" python3 - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path(os.environ['CFG'])
+          lines=p.read_text(errors='strict').splitlines()
+          desired={
+              'hw.gpu.enabled':'yes',
+              'hw.gpu.mode':'host',
+              'hw.cpu.ncore':'4',
+              'hw.ramSize':'2048',
+          }
+          seen=set(); out=[]
+          for line in lines:
+              if '=' in line:
+                  k=line.split('=',1)[0].strip()
+                  if k in desired:
+                      out.append(f'{k}={desired[k]}'); seen.add(k); continue
+              out.append(line)
+          for k,v in desired.items():
+              if k not in seen: out.append(f'{k}={v}')
+          p.write_text('\n'.join(out)+'\n')
+          PY
+          echo '=== AFTER CONFIG ==='
+          grep -E '^(hw\.ramSize|hw\.cpu\.ncore|hw\.gpu\.mode|hw\.gpu\.enabled|disk\.dataPartition\.size)=' "$cfg" || true
+          grep -qx 'hw.gpu.enabled=yes' "$cfg"
+          grep -qx 'hw.gpu.mode=host' "$cfg"
+          grep -qx 'hw.cpu.ncore=4' "$cfg"
+          grep -qx 'hw.ramSize=2048' "$cfg"
+          echo DATA_PARTITION_LEFT_UNCHANGED=1
+
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -Command "Start-Process -FilePath '${sdk_win}\\emulator\\emulator.exe' -ArgumentList @('-avd','${AVD}','-no-snapshot-load')" >/dev/null
+          serial=''
+          for i in $(seq 1 240); do
+            serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1;exit}')"
+            if [ -n "$serial" ] && [ "$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1)" = 1 ]; then break; fi
+            sleep 1
+          done
+          test -n "$serial"
+          test "$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1)" = 1
+          echo EMULATOR_BOOT_AFTER_TUNE=PASS
+
+          marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
+          printf '%s' "$marker" | grep -q facebook_connected_at
+          echo FACEBOOK_SESSION_AFTER_TUNE=1
+          version_after="$($adb -s "$serial" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"
+          echo "INSTALLED_VERSION_AFTER=${version_after:-unknown}"
+          test "${version_after:-}" = "${version:-}"
+
+          $adb -s "$serial" shell am force-stop "$PKG" >/dev/null 2>&1 || true
+          $adb -s "$serial" shell am start -W -n "$PKG/.MainActivity" >/dev/null
+          sleep 30
+          pid="$($adb -s "$serial" shell pidof "$PKG" 2>/dev/null | tr -d '\r' | awk '{print $1}')"
+          test -n "$pid"
+          fatal="$($adb -s "$serial" logcat -d -v brief 2>/dev/null | tr -d '\r' | grep -E 'FATAL EXCEPTION|GoldfishMapper::readFromHost|RegionSamplingThread' | tail -n 20 || true)"
+          test -z "$fatal"
+          echo APP_STABILITY_AFTER_TUNE=PASS
+
+          echo '=== VERIFIED CONFIG ==='
+          grep -E '^(hw\.ramSize|hw\.cpu\.ncore|hw\.gpu\.mode|hw\.gpu\.enabled|disk\.dataPartition\.size)=' "$cfg" || true
+          trap - ERR
+          echo EMULATOR_HOST_GPU_TUNE_GATE=PASS
