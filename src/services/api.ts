@@ -339,6 +339,11 @@ export interface DeviceIngestResponse {
   rejected: number;
   matchesCreated: AlertMatch[];
   evaluationErrors: { postId: string; ruleId: string; error: string }[];
+  sourceMetadata?: {
+    displayName?: string;
+    avatarUrl?: string;
+    handle?: string;
+  };
 }
 
 function normalizeConnectorStatus(value: unknown): ConnectorStatus {
@@ -391,6 +396,20 @@ function normalizeMedia(value: unknown): NormalizedPost['media'] {
     const previewUrl = safeHttpsUrl(item.previewUrl);
     return [{ type: item.type, url, ...(previewUrl ? { previewUrl } : {}) }];
   }).slice(0, 20);
+}
+
+function normalizeIngestSourceMetadata(value: unknown): DeviceIngestResponse['sourceMetadata'] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const displayName = typeof raw.displayName === 'string' ? raw.displayName.trim().slice(0, 255) : '';
+  const avatarUrl = safeHttpsUrl(raw.avatarUrl);
+  const handle = typeof raw.handle === 'string' ? raw.handle.trim().replace(/^@/, '').slice(0, 255) : '';
+  if (!displayName && !avatarUrl && !handle) return undefined;
+  return {
+    ...(displayName ? { displayName } : {}),
+    ...(avatarUrl ? { avatarUrl } : {}),
+    ...(handle ? { handle } : {})
+  };
 }
 
 export async function apiCheckHealth(): Promise<HealthResponse> {
@@ -646,7 +665,8 @@ export async function apiIngestDevicePosts(sourceId: string, posts: NormalizedPo
     duplicates: Math.max(0, Number(data?.duplicates || 0) || 0),
     rejected: Math.max(0, Number(data?.rejected || 0) || 0),
     matchesCreated: matches,
-    evaluationErrors: Array.isArray(data?.evaluationErrors) ? data.evaluationErrors : []
+    evaluationErrors: Array.isArray(data?.evaluationErrors) ? data.evaluationErrors : [],
+    sourceMetadata: normalizeIngestSourceMetadata(data?.sourceMetadata)
   };
 }
 
