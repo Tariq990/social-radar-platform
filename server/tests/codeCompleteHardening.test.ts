@@ -13,6 +13,19 @@ test('production UI does not expose raw render exception details', () => {
   assert.ok(devGate >= 0 && rawMessage > devGate, 'raw render diagnostics must stay behind the DEV gate');
 });
 
+test('production API redacts unexpected internal errors while preserving explicit validation errors', () => {
+  const server = read('server.ts');
+  assert.match(server, /function errorMessage\(error: any\): string/);
+  assert.match(server, /if \(APP_MODE !== 'production' \|\| allowed\.has\(message\)\) return message \|\| fallback;/);
+  assert.doesNotMatch(server, /function safeError\(error: any\): string \{\s*return error\?\.message/s);
+  assert.match(server, /REGISTER_PUBLIC_ERRORS\.has\(errorMessage\(error\)\)/);
+  assert.match(server, /res\.status\(expected \? 400 : 503\)/);
+  assert.match(server, /LOGIN_PUBLIC_ERRORS\.has\(errorMessage\(error\)\)/);
+  assert.match(server, /res\.status\(expected \? 401 : 503\)/);
+  assert.match(server, /safeError\(error, 'Device ingestion failed', INGEST_PUBLIC_ERRORS\)/);
+  assert.match(server, /safeError\(error, 'Explore analysis unavailable', EXPLORE_PUBLIC_ERRORS\)/);
+});
+
 test('production radar state never boots with demo collections and trusts persisted server toggles', () => {
   const radar = read('src/context/RadarContext.tsx');
   assert.match(radar, /const \[collections, setCollections\] = useState<Collection\[]>\(\[\]\)/);
