@@ -285,7 +285,7 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         activeRulesCount: dbRules.filter(rule => rule.enabled).length
       }));
     } catch (error) {
-      console.warn('[RadarProvider] Backend state load failed', error);
+      if (import.meta.env.DEV) console.warn('[RadarProvider] Backend state load failed');
       if (attempt < 1) {
         await new Promise(resolve => globalThis.setTimeout(resolve, 1_200));
         return loadDatabaseState(attempt + 1);
@@ -395,7 +395,7 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   lastCheckedAt: locale === 'ar' ? 'الآن' : 'Just now'
                 }
               : source));
-          } catch (error) { console.warn('[addSourceWithRule] Initial authenticated collection did not complete', error); }
+          } catch { if (import.meta.env.DEV) console.warn('[addSourceWithRule] Initial authenticated collection did not complete'); }
         })();
       } else {
         void apiScanSources(isDemoMode).then(scan => { if (scan.matches.length > 0) setMatches(previous => [...scan.matches, ...previous]); }).catch(() => {});
@@ -418,7 +418,7 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setSources(previous => previous.map(item => item.id === sourceId ? { ...item, isPaused: serverPaused } : item));
     } catch (error) {
       setSources(previous => previous.map(item => item.id === sourceId ? { ...item, isPaused: source.isPaused } : item));
-      console.warn('Failed to toggle source pause', error);
+      if (import.meta.env.DEV) console.warn('[Radar] Source pause update failed');
       return;
     }
 
@@ -433,7 +433,7 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       } catch (error) {
         // The server state is authoritative. A local WorkManager failure must not roll the UI back
         // to a state that no longer matches the persisted source; the next reconciliation can retry.
-        console.warn('Source pause state persisted but background scheduling did not reconcile', error);
+        if (import.meta.env.DEV) console.warn('[Radar] Source pause persisted; background scheduling did not reconcile');
       }
     }
   };
@@ -450,7 +450,7 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       await apiDeleteSource(sourceId);
       if (DeviceSessionConnector.isNativeAvailable()) {
         try { await DeviceSessionConnector.cancelBackgroundSource(sourceId); }
-        catch (error) { console.warn('Source deleted but local background cleanup did not complete', error); }
+        catch { if (import.meta.env.DEV) console.warn('[Radar] Source deleted; local background cleanup did not complete'); }
       }
       setRules(previous => previous.flatMap(rule => {
         if (!rule.sourceIds.includes(sourceId)) return [rule];
@@ -465,7 +465,7 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }));
     } catch (error) {
       setSources(sourceSnapshot); setRules(ruleSnapshot); setMatches(matchSnapshot);
-      console.warn('Failed to delete source', error);
+      if (import.meta.env.DEV) console.warn('[Radar] Source deletion failed');
     }
   };
 
@@ -555,8 +555,8 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               : item));
             scanned += 1;
             matched += ingest.matchesCreated.length;
-          } catch (error) {
-            console.warn(`[Radar] Authenticated scan failed for ${source.id}`, error);
+          } catch {
+            if (import.meta.env.DEV) console.warn('[Radar] Authenticated source scan failed');
           }
         }
       }
@@ -570,9 +570,9 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
       setBackendStatus('online');
       setDigest(previous => ({ ...previous, scannedCount: previous.scannedCount + scanned, matchedCount: previous.matchedCount + matched, sourcesMonitored: sources.length, generatedAt: locale === 'ar' ? 'الآن' : 'Just now' }));
-    } catch (error) {
+    } catch {
       setBackendStatus('offline');
-      console.warn('[Radar] Scan failed', error);
+      if (import.meta.env.DEV) console.warn('[Radar] Scan failed');
     } finally { setIsScanning(false); }
     return { scanned, matched };
   };

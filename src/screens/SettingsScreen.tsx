@@ -47,13 +47,16 @@ export const SettingsScreen: React.FC = () => {
     setError(null);
     try {
       const connected = platform === 'instagram' ? await DeviceSessionConnector.connectInstagram() : await DeviceSessionConnector.connectFacebook();
-      if (!connected) throw new Error(locale === 'ar' ? 'لم يكتمل تسجيل الدخول.' : 'Login was not completed.');
+      if (!connected) {
+        setError(locale === 'ar' ? 'لم يكتمل تسجيل الدخول.' : 'Login was not completed.');
+        return;
+      }
       await refresh();
       // A deliberate disconnect cancels periodic jobs. Reconnecting recreates them for every
       // active source on this platform, with the currently selected app language.
       await schedulePlatformSources(platform);
-    } catch (err: any) {
-      setError(err?.message || (locale === 'ar' ? 'تعذر ربط الحساب.' : 'Could not connect the account.'));
+    } catch {
+      setError(locale === 'ar' ? 'تعذر ربط الحساب.' : 'Could not connect the account.');
     } finally { setBusy(null); }
   };
 
@@ -67,8 +70,8 @@ export const SettingsScreen: React.FC = () => {
       if (platform === 'instagram') await DeviceSessionConnector.disconnectInstagram();
       else await DeviceSessionConnector.disconnectFacebook();
       await refresh();
-    } catch (err: any) {
-      setError(err?.message || (locale === 'ar' ? 'تعذر قطع الاتصال.' : 'Could not disconnect.'));
+    } catch {
+      setError(locale === 'ar' ? 'تعذر قطع الاتصال.' : 'Could not disconnect.');
     } finally { setBusy(null); }
   };
 
