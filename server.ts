@@ -110,11 +110,12 @@ function validateSocialUrl(input: unknown): SocialUrlValidation {
   if (typeof input !== 'string' || !input.trim()) return { ok: false, url: '', platform: 'other', error: 'URL is required' };
   try {
     const parsed = new URL(input.trim());
-    if (!['http:', 'https:'].includes(parsed.protocol)) return { ok: false, url: '', platform: 'other', error: 'Only http/https URLs are allowed' };
+    if (!['http:', 'https:'].includes(parsed.protocol)) return { ok: false, url: '', platform: 'other', error: 'Only HTTP(S) URLs are allowed' };
     const host = parsed.hostname.toLowerCase();
     const facebook = host === 'facebook.com' || host.endsWith('.facebook.com') || host === 'fb.com' || host.endsWith('.fb.com') || host === 'fb.watch';
     const instagram = host === 'instagram.com' || host.endsWith('.instagram.com') || host === 'instagr.am' || host.endsWith('.instagr.am');
     if (!facebook && !instagram) return { ok: false, url: '', platform: 'other', error: 'Only Facebook and Instagram URLs are supported' };
+    if (parsed.protocol === 'http:') parsed.protocol = 'https:';
     parsed.hash = '';
     return { ok: true, url: parsed.toString(), platform: instagram ? 'instagram' : 'facebook', error: '' };
   } catch {
@@ -127,10 +128,28 @@ function sanitizeOptionalUrl(input: unknown): string | undefined {
   try {
     const parsed = new URL(input.trim());
     if (!['http:', 'https:'].includes(parsed.protocol)) return undefined;
+    if (parsed.protocol === 'http:') parsed.protocol = 'https:';
     return parsed.toString().slice(0, 4096);
   } catch {
     return undefined;
   }
+}
+
+function sanitizeTerms(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  const seen = new Set<string>();
+  const output: string[] = [];
+  for (const value of input) {
+    if (typeof value !== 'string') continue;
+    const cleaned = value.trim().slice(0, 200);
+    if (!cleaned) continue;
+    const key = cleaned.toLocaleLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    output.push(cleaned);
+    if (output.length >= 50) break;
+  }
+  return output;
 }
 
 async function deleteOwnedSourceSafely(userId: string, sourceId: string): Promise<boolean> {
@@ -236,11 +255,17 @@ app.post('/api/sources', rateLimiter(30, 60_000), requireAppAuth, async (req, re
     const checkedUrl = validateSocialUrl(url);
     if (!checkedUrl.ok) return res.status(400).json({ error: checkedUrl.error });
     if (typeof name !== 'string' || !name.trim()) return res.status(400).json({ error: 'name is required' });
-    const normalizedConnector = connectorType === 'public_cloud' || connectorType === 'official_meta' ? connectorType : 'device_session';
+
+    // A client cannot self-declare an unavailable server provider as connected. Public-cloud
+    // sources are accepted only in demo mode or when the optional provider is actually configured.
+    const normalizedConnector = connectorType === 'public_cloud' && (isDemoMode() || sourceConnectorManager.isApifyConfigured())
+      ? 'public_cloud'
+      : 'device_session';
     const resolvedExternalId = typeof externalId === 'string' && externalId.trim()
       ? externalId.trim().slice(0, 255)
       : typeof handle === 'string' && handle.trim() ? handle.replace(/^@/, '').trim().slice(0, 255) : '';
     if (!resolvedExternalId && !isDemoMode()) return res.status(400).json({ error: 'A real resolved source externalId or handle is required in production' });
+
     const source = await db.createSource({
       id: `src_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       user_id: userId,
@@ -248,10 +273,10 @@ app.post('/api/sources', rateLimiter(30, 60_000), requireAppAuth, async (req, re
       external_id: resolvedExternalId || `demo_source_${Date.now()}`,
       url: checkedUrl.url,
       name: name.trim().slice(0, 255),
-      handle: typeof handle === 'string' ? handle.slice(0, 255) : undefined,
+      handle: typeof handle === 'string' ? handle.trim().replace(/^@/, '').slice(0, 255) : undefined,
       avatar_url: sanitizeOptionalUrl(avatarUrl),
-      bio: typeof bio === 'string' ? bio.slice(0, 5000) : undefined,
-      visibility_type: visibilityType === 'public' ? 'public' : 'authenticated',
+      bio: typeof bio === 'string' ? bio.trim().slice(0, 5000) : undefined,
+      visibility_type: visibilityType === 'public' && normalizedConnector === 'public_cloud' ? 'public' : 'authenticated',
       connector_type: normalizedConnector,
       connector_status: normalizedConnector === 'device_session' ? 'needs_relogin' : 'connected',
       is_paused: false,
@@ -259,7 +284,10 @@ app.post('/api/sources', rateLimiter(30, 60_000), requireAppAuth, async (req, re
       metadata: {}
     });
     res.status(201).json(source);
-  } catch (error) { res.status(500).json({ error: safeError(error) }); }
+  } catch (error) {
+    const message = safeError(error);
+    res.status(message === 'SOURCE_ALREADY_EXISTS' ? 409 : 500).json({ error: message });
+  }
 });
 
 app.delete('/api/sources/:id', requireAppAuth, async (req, res) => {
@@ -309,7 +337,11 @@ app.post('/api/rules', rateLimiter(40, 60_000), requireAppAuth, async (req, res)
     const userId = currentUserId(res);
     const { name, naturalLanguage, includeTerms, excludeTerms, minConfidence, alertMode, collectionId, sourceIds } = req.body || {};
     if (typeof naturalLanguage !== 'string' || !naturalLanguage.trim()) return res.status(400).json({ error: 'naturalLanguage is required' });
-    const normalizedSourceIds = Array.isArray(sourceIds) ? sourceIds.filter((v: any) => typeof v === 'string').slice(0, 250) : [];
+    const normalizedSourceIds = [...new Set(
+      (Array.isArray(sourceIds) ? sourceIds : [])
+        .filter((value: unknown): value is string => typeof value === 'string' && value.trim().length > 0)
+        .map((value: string) => value.trim())
+    )].slice(0, 250);
     if (normalizedSourceIds.length > 0) {
       const ownedIds = new Set((await db.getSources(userId)).map(source => source.id));
       if (normalizedSourceIds.some(sourceId => !ownedIds.has(sourceId))) return res.status(400).json({ error: 'One or more rule sources are invalid' });
@@ -319,12 +351,12 @@ app.post('/api/rules', rateLimiter(40, 60_000), requireAppAuth, async (req, res)
       user_id: userId,
       name: typeof name === 'string' && name.trim() ? name.trim().slice(0, 255) : 'Watch Rule',
       natural_language: naturalLanguage.trim().slice(0, 10_000),
-      include_terms: Array.isArray(includeTerms) ? includeTerms.filter((v: any) => typeof v === 'string').slice(0, 50) : [],
-      exclude_terms: Array.isArray(excludeTerms) ? excludeTerms.filter((v: any) => typeof v === 'string').slice(0, 50) : [],
-      min_confidence: typeof minConfidence === 'number' ? Math.max(0, Math.min(1, minConfidence)) : 0.8,
+      include_terms: sanitizeTerms(includeTerms),
+      exclude_terms: sanitizeTerms(excludeTerms),
+      min_confidence: typeof minConfidence === 'number' && Number.isFinite(minConfidence) ? Math.max(0, Math.min(1, minConfidence)) : 0.8,
       alert_mode: ['instant', 'digest', 'silent'].includes(alertMode) ? alertMode : 'instant',
       enabled: true,
-      collection_id: typeof collectionId === 'string' ? collectionId.slice(0, 255) : undefined
+      collection_id: typeof collectionId === 'string' ? collectionId.trim().slice(0, 255) || undefined : undefined
     }, normalizedSourceIds);
     res.status(201).json(rule);
   } catch (error) { res.status(500).json({ error: safeError(error) }); }
@@ -437,9 +469,18 @@ app.post('/api/ai/rule-suggestions', rateLimiter(20, 60_000), requireAppAuth, as
 
 app.post('/api/ai/generate-digest', rateLimiter(20, 60_000), requireAppAuth, async (req, res) => {
   try {
-    const matches = Array.isArray(req.body?.matches) ? req.body.matches.slice(0, 20) : [];
+    const userId = currentUserId(res);
     const locale = req.body?.locale === 'ar' ? 'ar' : 'en';
-    if (matches.length === 0) return res.json({ summary: locale === 'ar' ? 'لا توجد إشارات مطابقة جديدة لتلخيصها.' : 'There are no new matched signals to summarize.', highlights: [], topAction: locale === 'ar' ? 'لا يلزم أي إجراء الآن.' : 'No action is required right now.' });
+    // Digest input is server-owned persisted data. Never accept client-supplied match objects that
+    // could fabricate activity or reference another tenant's content.
+    const matches = (await db.getMatches(userId)).slice(0, 20);
+    if (matches.length === 0) {
+      return res.json({
+        summary: locale === 'ar' ? 'لا توجد إشارات مطابقة جديدة لتلخيصها.' : 'There are no new matched signals to summarize.',
+        highlights: [],
+        topAction: locale === 'ar' ? 'لا يلزم أي إجراء الآن.' : 'No action is required right now.'
+      });
+    }
     res.json(await aiService.generateDigest(matches, locale));
   } catch (error) { res.status(503).json({ error: safeError(error) }); }
 });
