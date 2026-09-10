@@ -118,6 +118,17 @@ function withHealedSourceMetadata(source: Source, ingest: unknown): Source {
   };
 }
 
+function isGenericVisibleSourceName(value: string | undefined, source: Pick<Source, 'externalId' | 'handle'>): boolean {
+  const normalize = (input?: string) => (input || '').trim().replace(/^@/, '').toLowerCase();
+  const name = normalize(value);
+  const generic = new Set(['facebook', 'instagram', 'page', 'profile', normalize(source.externalId), normalize(source.handle)].filter(Boolean));
+  return !name || generic.has(name);
+}
+
+function sourceNeedsVisibleMetadata(source: Source): boolean {
+  return source.connectorType === 'device_session' && (isGenericVisibleSourceName(source.displayName, source) || !source.avatarUrl?.trim());
+}
+
 export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [locale, setLocaleState] = useState<Locale>(() => (localStorage.getItem(STORAGE_KEYS.LOCALE) as Locale) || 'en');
   const [theme, setThemeState] = useState<'dark' | 'light'>(() => (localStorage.getItem(STORAGE_KEYS.THEME) as 'dark' | 'light') || 'dark');
@@ -146,6 +157,28 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   });
   const [sharedIncomingUrl, setSharedIncomingUrl] = useState<string | null>(null);
   const deviceConnector = useMemo(() => new DeviceSessionConnector(), []);
+
+  const enrichVisibleSourceMetadata = async (candidates: Source[]) => {
+    if (!DeviceSessionConnector.isNativeAvailable()) return;
+    let status: NativeSessionStatus;
+    try { status = await DeviceSessionConnector.getLocalSession(); } catch { return; }
+    for (const source of candidates.filter(sourceNeedsVisibleMetadata)) {
+      if (!DeviceSessionConnector.isPlatformConnected(status, source.platform)) continue;
+      try {
+        const resolved = await deviceConnector.resolveSource({ url: source.url });
+        const realName = !isGenericVisibleSourceName(resolved.displayName, source) ? resolved.displayName.trim() : '';
+        const avatarUrl = resolved.avatarUrl?.trim() || '';
+        if (!realName && !avatarUrl) continue;
+        setSources(previous => previous.map(item => item.id === source.id ? {
+          ...item,
+          displayName: realName || item.displayName,
+          avatarUrl: avatarUrl || item.avatarUrl,
+          handle: resolved.handle?.trim() || item.handle,
+          connectorStatus: 'authenticated_monitoring'
+        } : item));
+      } catch { /* keep persisted metadata when the live profile cannot be resolved */ }
+    }
+  };
 
   const applyDeviceStatus = (status: NativeSessionStatus) => {
     setDeviceSessionAvailable(status.available);
@@ -212,6 +245,7 @@ export const RadarProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         recentPostsCount: Math.max(Number(source.recentPostsCount || 0), uniqueMatchedPosts.get(source.id)?.size || 0)
       }));
       setSources(hydratedSources);
+      void enrichVisibleSourceMetadata(hydratedSources);
       setRules(dbRules);
       setMatches(dbAlerts);
       setDigest(previous => ({ ...previous, matchedCount: dbAlerts.length, sourcesMonitored: hydratedSources.length }));

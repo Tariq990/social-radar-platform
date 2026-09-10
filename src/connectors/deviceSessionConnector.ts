@@ -384,7 +384,7 @@ export class DeviceSessionConnector implements SourceConnector {
       }
     }
 
-    if (successfulDetails === 0) {
+    if (successfulDetails === 0 && commentsMode !== 'none') {
       throw new Error('Posts were found, but authenticated comment/media details could not be collected right now.');
     }
     return posts;

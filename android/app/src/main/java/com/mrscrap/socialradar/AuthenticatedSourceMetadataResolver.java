@@ -23,7 +23,6 @@ final class AuthenticatedSourceMetadataResolver {
     private static final long FIRST_EXTRACTION_DELAY_MS = 450;
     private static final long RETRY_DELAY_MS = 500;
     private static final int MAX_EXTRACTION_ATTEMPTS = 20;
-    private static final int AVATAR_GRACE_ATTEMPTS = 12;
 
     private AuthenticatedSourceMetadataResolver() {}
 
@@ -89,9 +88,16 @@ final class AuthenticatedSourceMetadataResolver {
                         String displayName = source == null ? "" : source.optString("displayName", "");
                         String externalId = source == null ? "" : source.optString("externalId", "");
                         String avatarUrl = source == null ? "" : source.optString("avatarUrl", "");
+                        boolean realDisplayName = hasRealDisplayName(displayName, externalId);
                         boolean reliable = !result.has("error") && source != null &&
-                            AuthenticatedWebCollector.isAllowedSocialUrl(sourceUrl) && !isBlank(displayName) && !isBlank(externalId);
-                        if (reliable && (!isBlank(avatarUrl) || attempts[0] >= AVATAR_GRACE_ATTEMPTS)) {
+                            AuthenticatedWebCollector.isAllowedSocialUrl(sourceUrl) && realDisplayName && !isBlank(externalId);
+                        if (!realDisplayName && source != null && AuthenticatedWebCollector.isAllowedSocialUrl(sourceUrl) &&
+                            !sameSocialLocation(currentUrl, sourceUrl) && attempts[0] < MAX_EXTRACTION_ATTEMPTS) {
+                            webView.loadUrl(preferDesktopFacebookUrl(sourceUrl));
+                            main.postDelayed(runner[0], 1_600);
+                            return;
+                        }
+                        if (reliable && !isBlank(avatarUrl)) {
                             if (!finished.compareAndSet(false, true)) return;
                             main.removeCallbacks(timeout);
                             destroy(webView);
@@ -157,6 +163,37 @@ final class AuthenticatedSourceMetadataResolver {
         return normalized.isEmpty() || normalized.equals("blank") || normalized.equals("about:blank") || normalized.equals("null") || normalized.equals("undefined");
     }
 
+    private static boolean hasRealDisplayName(String value, String externalId) {
+        if (isBlank(value)) return false;
+        String normalized = value.trim().replaceFirst("^@", "").toLowerCase();
+        String id = externalId == null ? "" : externalId.trim().replaceFirst("^@", "").toLowerCase();
+        return !normalized.equals(id) && !normalized.equals("facebook") && !normalized.equals("instagram") &&
+            !normalized.equals("page") && !normalized.equals("profile") &&
+            !normalized.equals("log into facebook") && !normalized.equals("log in to facebook");
+    }
+
+    private static boolean sameSocialLocation(String left, String right) {
+        try {
+            Uri a = Uri.parse(left == null ? "" : left);
+            Uri b = Uri.parse(right == null ? "" : right);
+            String ah = normalizeHost(a.getHost());
+            String bh = normalizeHost(b.getHost());
+            String ap = normalizePath(a.getPath());
+            String bp = normalizePath(b.getPath());
+            return !ah.isBlank() && ah.equals(bh) && ap.equals(bp);
+        } catch (Exception ignored) { return false; }
+    }
+
+    private static String normalizeHost(String value) {
+        if (value == null) return "";
+        return value.toLowerCase().replaceFirst("^(www\\.|m\\.|mobile\\.|web\\.)", "");
+    }
+
+    private static String normalizePath(String value) {
+        if (value == null || value.isBlank() || value.equals("/")) return "";
+        return value.replaceAll("/+$", "").toLowerCase();
+    }
+
     private static void destroy(WebView webView) {
         new Handler(Looper.getMainLooper()).post(() -> ForegroundWebViewHost.destroy(webView));
     }
@@ -183,14 +220,18 @@ final class AuthenticatedSourceMetadataResolver {
             "if(!handle){const m=rawMetaTitle.match(/@([A-Za-z0-9._]{2,64})/);if(m)handle=m[1]}" +
             "if(!handle)return JSON.stringify({error:'SOURCE_METADATA_PENDING'});" +
             "if(!authorHref){const target=[...document.querySelectorAll('a[href]')].find(a=>{try{const h=abs(a.getAttribute('href')||'');if(!allowed(h)||blocked(h))return false;const y=new URL(h);const ps=y.pathname.split('/').filter(Boolean);return ps.length===1&&(ps[0]||'').replace(/^@/,'').toLowerCase()===handle.toLowerCase()}catch(e){return false}});if(target)authorHref=abs(target.getAttribute('href')||'')}" +
+            "const profileAnchor=authorHref?[...document.querySelectorAll('a[href]')].find(a=>abs(a.getAttribute('href')||'')===authorHref):null;" +
+            "const anchorName=clean(profileAnchor?.innerText||profileAnchor?.getAttribute('aria-label')||'');" +
+            "const avatarAlt=clean(profileAnchor?.querySelector?.('img')?.getAttribute('alt')||'');" +
+            "const altName=avatarAlt.replace(/^profile picture of /i,'').replace(/^profile photo of /i,'').replace(/'s profile picture$/i,'').replace(/'s profile photo$/i,'').replace(/^صورة الملف الشخصي لـ ?/,'').trim();" +
             "const profileUrl=authorHref||(platform==='instagram'?('https://www.instagram.com/'+encodeURIComponent(handle)+'/'):('https://www.facebook.com/'+encodeURIComponent(handle)));" +
             "const sourceUrl=allowed(profileUrl)&&!blocked(profileUrl)?profileUrl:pageUrl;" +
             "const headings=[document.querySelector('main h1'),document.querySelector('[role=\\\"main\\\"] h1'),document.querySelector('header h1'),document.querySelector('h1')].filter(Boolean);" +
-            "const candidates=[rawMetaTitle,...headings.map(x=>x.innerText),document.querySelector('main strong[dir=\\\"auto\\\"]')?.innerText,document.title].map(clean).filter(Boolean);" +
+            "const candidates=[rawMetaTitle,anchorName,altName,...headings.map(x=>x.innerText),document.querySelector('main strong[dir=\\\"auto\\\"]')?.innerText,document.title].map(clean).filter(Boolean);" +
             "const bad=(v)=>{const n=v.toLowerCase();return !n||n==='facebook'||n==='instagram'||n==='blank'||n==='log into facebook'||n==='log in to facebook'||n==='error facebook'||n==='instagram • login'||n===handle.toLowerCase()||n===('@'+handle).toLowerCase()};" +
             "let title=candidates.find(v=>!bad(v))||'';if(!title)title='@'+handle;" +
             "const imgSrc=(img)=>{if(!img)return '';const src=img.currentSrc||img.getAttribute('src')||img.getAttribute('data-src')||'';if(src)return abs(src);const set=img.getAttribute('srcset')||'';return set?abs(set.split(',')[0].trim().split(/\\s+/)[0]):''};" +
-            "const profileAnchor=authorHref?[...document.querySelectorAll('a[href]')].find(a=>abs(a.getAttribute('href')||'')===authorHref):null;const profileImage=imgSrc(profileAnchor?.querySelector?.('img'));" +
+            "const profileImage=imgSrc(profileAnchor?.querySelector?.('img'));" +
             "const score=(img)=>{const src=imgSrc(img);if(!/^https?:/i.test(src))return -999;const alt=((img.getAttribute('alt')||'')+' '+(img.getAttribute('aria-label')||'')).toLowerCase();let s=0;if(alt.includes(title.toLowerCase()))s+=10;if(handle&&alt.includes(handle.toLowerCase()))s+=7;if(/profile|avatar|profile picture|صورة الملف|الصورة الشخصية/i.test(alt))s+=7;if(/cover|غلاف/i.test(alt))s-=8;if(/fbcdn|scontent|cdninstagram/.test(src))s+=2;const r=img.getBoundingClientRect?.();const w=Number(img.naturalWidth||img.width||r?.width||0),h=Number(img.naturalHeight||img.height||r?.height||0);if(w&&h&&Math.abs(w-h)<Math.max(w,h)*0.18)s+=4;if(w>=40&&w<=500&&h>=40&&h<=500)s+=2;if(w>800||h>800)s-=4;return s};" +
             "const main=document.querySelector('main')||document.querySelector('[role=\\\"main\\\"]')||document.body;const imgs=[...(main?.querySelectorAll?.('img')||[])].slice(0,100).filter(i=>imgSrc(i));imgs.sort((a,b)=>score(b)-score(a));" +
             "const metaImage=abs(document.querySelector('meta[property=\\\"og:image:secure_url\\\"]')?.content||document.querySelector('meta[property=\\\"og:image\\\"]')?.content||document.querySelector('meta[name=\\\"twitter:image\\\"]')?.content||document.querySelector('link[rel=\\\"image_src\\\"]')?.href||'');" +
