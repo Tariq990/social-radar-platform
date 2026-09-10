@@ -539,8 +539,9 @@ export async function apiToggleSourcePause(id: string): Promise<boolean> {
 function normalizeRuleRecord(r: any, fallbackSourceIds: string[] = []): WatchRule | null {
   if (!r || typeof r !== 'object' || typeof r.id !== 'string' || !r.id) return null;
   const rawConfidence = Number(r.min_confidence ?? r.minConfidence ?? 0.8);
-  const sourceIds = Array.isArray(r.source_ids || r.sourceIds)
-    ? [...new Set((r.source_ids || r.sourceIds).filter((value: unknown): value is string => typeof value === 'string' && value.length > 0))]
+  const sourceIdInput: unknown = r.source_ids || r.sourceIds;
+  const sourceIds: string[] = Array.isArray(sourceIdInput)
+    ? [...new Set<string>((sourceIdInput as unknown[]).filter((value: unknown): value is string => typeof value === 'string' && value.length > 0))]
     : fallbackSourceIds;
   return {
     id: r.id,
