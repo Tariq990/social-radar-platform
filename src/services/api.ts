@@ -550,7 +550,7 @@ function normalizeRuleRecord(r: any, fallbackSourceIds: string[] = []): WatchRul
     includeTerms: Array.isArray(r.include_terms || r.includeTerms) ? (r.include_terms || r.includeTerms).filter((v: unknown): v is string => typeof v === 'string') : [],
     excludeTerms: Array.isArray(r.exclude_terms || r.excludeTerms) ? (r.exclude_terms || r.excludeTerms).filter((v: unknown): v is string => typeof v === 'string') : [],
     minConfidence: Number.isFinite(rawConfidence) ? Math.max(0, Math.min(1, rawConfidence)) : 0.8,
-    alertMode: r.alert_mode === 'digest' ? 'digest' : 'instant',
+    alertMode: r.alert_mode === 'silent' ? 'silent' : r.alert_mode === 'digest' ? 'digest' : 'instant',
     enabled: Boolean(r.enabled),
     collectionId: typeof (r.collection_id || r.collectionId) === 'string' ? (r.collection_id || r.collectionId) : undefined,
     sourceIds,
@@ -588,7 +588,7 @@ export async function apiFetchAlerts(): Promise<AlertMatch[]> {
   const normalized: AlertMatch[] = [];
   for (const record of Array.isArray(data) ? data : []) {
     try { normalized.push(normalizeAlertMatch(record)); }
-    catch (error) { console.warn('[apiFetchAlerts] Ignoring malformed persisted alert record', error); }
+    catch { if (import.meta.env.DEV) console.warn('[apiFetchAlerts] Ignoring malformed persisted alert record'); }
   }
   return normalized;
 }
