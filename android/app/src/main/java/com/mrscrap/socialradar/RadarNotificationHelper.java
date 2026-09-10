@@ -1,6 +1,7 @@
 package com.mrscrap.socialradar;
 
 import android.Manifest;
+import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
@@ -32,6 +33,7 @@ final class RadarNotificationHelper {
             NotificationManager.IMPORTANCE_DEFAULT
         );
         channel.setDescription("Alerts for posts that match your MR SCRAP watch rules");
+        channel.setLockscreenVisibility(Notification.VISIBILITY_PRIVATE);
         manager.createNotificationChannel(channel);
     }
 
@@ -75,6 +77,7 @@ final class RadarNotificationHelper {
             .setContentText(body)
             .setStyle(new NotificationCompat.BigTextStyle().bigText(body))
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setAutoCancel(true)
             .setContentIntent(pending)
             .setCategory(NotificationCompat.CATEGORY_STATUS)
