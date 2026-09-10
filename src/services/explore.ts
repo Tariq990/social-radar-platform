@@ -26,6 +26,9 @@ export interface ExploreResponse {
   items: ExploreResultItem[];
 }
 
+const MAX_EXPLORE_RESPONSE_BYTES = 4 * 1024 * 1024;
+const EXPLORE_TIMEOUT_MS = 180_000;
+
 function apiUrl(path: string): string {
   const base = getApiBaseUrl().replace(/\/+$/, '');
   if (!base) throw new Error('Android build is missing the backend origin.');
@@ -36,52 +39,82 @@ function normalizePlatform(value: unknown): SourcePlatform {
   return value === 'instagram' ? 'instagram' : value === 'facebook' ? 'facebook' : 'other';
 }
 
+function safeHttpsUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  try {
+    const parsed = new URL(value.trim());
+    if (!['http:', 'https:'].includes(parsed.protocol)) return undefined;
+    if (parsed.protocol === 'http:') parsed.protocol = 'https:';
+    return parsed.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function safeSocialUrl(value: unknown, platform: SourcePlatform): string | undefined {
+  const normalized = safeHttpsUrl(value);
+  if (!normalized || (platform !== 'facebook' && platform !== 'instagram')) return undefined;
+  const host = new URL(normalized).hostname.toLowerCase();
+  const facebook = host === 'facebook.com' || host.endsWith('.facebook.com') || host === 'fb.com' || host.endsWith('.fb.com') || host === 'fb.watch';
+  const instagram = host === 'instagram.com' || host.endsWith('.instagram.com') || host === 'instagr.am' || host.endsWith('.instagr.am');
+  return (platform === 'facebook' ? facebook : instagram) ? normalized : undefined;
+}
+
+function normalizeMedia(value: unknown): NormalizedPost['media'] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item: any) => {
+    if (!item || (item.type !== 'image' && item.type !== 'video')) return [];
+    const url = safeHttpsUrl(item.url);
+    if (!url) return [];
+    return [{ type: item.type, url }];
+  }).slice(0, 20);
+}
+
 function normalizePost(raw: any): NormalizedPost {
-  if (!raw || typeof raw !== 'object' || typeof raw.id !== 'string' || typeof raw.canonical_url !== 'string') {
+  if (!raw || typeof raw !== 'object' || typeof raw.id !== 'string' || !raw.id) {
     throw new Error('Explore response contained a malformed post');
   }
   const platform = normalizePlatform(raw.platform);
-  const metadata = raw.metadata && typeof raw.metadata === 'object' ? raw.metadata : {};
+  if (platform === 'other') throw new Error('Explore response contained an unsupported post platform');
+  const originalUrl = safeSocialUrl(raw.canonical_url, platform);
+  if (!originalUrl) throw new Error('Explore response contained an invalid post URL');
+  const metadata = raw.metadata && typeof raw.metadata === 'object' && !Array.isArray(raw.metadata) ? raw.metadata : {};
   const comments = Array.isArray(metadata.exploreComments)
     ? metadata.exploreComments.flatMap((entry: any) => {
         if (!entry || typeof entry.authorName !== 'string' || typeof entry.text !== 'string') return [];
+        const authorName = entry.authorName.trim().slice(0, 160);
+        const text = entry.text.trim().slice(0, 700);
+        if (!authorName || !text) return [];
         return [{
-          authorName: entry.authorName,
-          text: entry.text,
+          authorName,
+          text,
           isPublisher: entry.isPublisher === true,
           depth: Math.max(0, Math.min(4, Number(entry.depth) || 0)),
-          publishedLabel: typeof entry.publishedLabel === 'string' ? entry.publishedLabel : undefined,
+          publishedLabel: typeof entry.publishedLabel === 'string' ? entry.publishedLabel.slice(0, 120) : undefined,
           media: []
         }];
       }).slice(0, 200)
     : [];
   return {
-    id: raw.id,
-    sourceId: raw.source_id || '',
+    id: raw.id.slice(0, 1024),
+    sourceId: typeof raw.source_id === 'string' ? raw.source_id.slice(0, 255) : '',
     platform,
-    externalPostId: raw.external_id || undefined,
-    originalUrl: raw.canonical_url,
-    authorName: raw.author_name || '',
-    authorAvatar: raw.author_avatar || undefined,
-    text: typeof raw.text === 'string' ? raw.text : '',
-    media: Array.isArray(raw.media)
-      ? raw.media.filter((item: any) => item && (item.type === 'image' || item.type === 'video') && typeof item.url === 'string')
-      : [],
+    externalPostId: typeof raw.external_id === 'string' ? raw.external_id.slice(0, 1024) : undefined,
+    originalUrl,
+    authorName: typeof raw.author_name === 'string' ? raw.author_name.trim().slice(0, 255) : '',
+    authorAvatar: safeHttpsUrl(raw.author_avatar),
+    text: typeof raw.text === 'string' ? raw.text.slice(0, 20_000) : '',
+    media: normalizeMedia(raw.media),
     comments,
     commentsTruncated: metadata.commentsTruncated === true,
     videoPresent: metadata.videoPresent === true,
-    publishedAt: raw.published_at || '',
-    detectedAt: raw.created_at || '',
-    fingerprint: raw.fingerprint || raw.external_id || raw.canonical_url,
+    publishedAt: typeof raw.published_at === 'string' ? raw.published_at.slice(0, 100) : '',
+    detectedAt: typeof raw.created_at === 'string' ? raw.created_at.slice(0, 100) : '',
+    fingerprint: typeof raw.fingerprint === 'string' && raw.fingerprint ? raw.fingerprint.slice(0, 1024) : (typeof raw.external_id === 'string' && raw.external_id ? raw.external_id : originalUrl),
     metadata
   };
 }
 
-/**
- * One Smart Grab can contain 100 posts and Express intentionally keeps a 1 MB JSON limit.
- * Preserve both ends of long posts (offers/CTAs are often near the end) while keeping even
- * Arabic-heavy UTF-8 payloads comfortably below that ceiling.
- */
 function compactText(value: string): string {
   const text = value || '';
   if (text.length <= 1700) return text;
@@ -92,9 +125,9 @@ function compactMedia(media: NormalizedPost['media']): NormalizedPost['media'] {
   if (!Array.isArray(media)) return [];
   for (const item of media) {
     if (!item || (item.type !== 'image' && item.type !== 'video') || typeof item.url !== 'string') continue;
-    // Extremely long signed CDN URLs are not useful enough to risk overflowing the request.
-    if (!/^https?:\/\//i.test(item.url) || item.url.length > 1000) continue;
-    return [{ type: item.type, url: item.url }];
+    const url = safeHttpsUrl(item.url);
+    if (!url || url.length > 1000) continue;
+    return [{ type: item.type, url }];
   }
   return [];
 }
@@ -124,7 +157,6 @@ function payloadPost(post: NormalizedPost) {
     externalPostId: post.externalPostId,
     originalUrl: post.originalUrl,
     authorName: post.authorName,
-    // Backend already knows the source avatar, so do not repeat the same long CDN URL 100 times.
     text: compactText(post.text || ''),
     media: compactMedia(post.media || []),
     comments: compactComments(post.comments),
@@ -139,6 +171,32 @@ function payloadPost(post: NormalizedPost) {
   };
 }
 
+async function readBoundedResponse(response: Response): Promise<string> {
+  const declared = Number(response.headers.get('content-length') || 0);
+  if (Number.isFinite(declared) && declared > MAX_EXPLORE_RESPONSE_BYTES) throw new Error('Explore response exceeded the 4 MB safety limit');
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let raw = '';
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_EXPLORE_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw new Error('Explore response exceeded the 4 MB safety limit');
+      }
+      raw += decoder.decode(value, { stream: true });
+    }
+    raw += decoder.decode();
+    return raw;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 async function sendExplore(
   authToken: string,
   batches: ExploreSourceBatch[],
@@ -147,31 +205,41 @@ async function sendExplore(
   categories: string[],
   locale: 'ar' | 'en'
 ): Promise<any> {
-  const response = await fetch(apiUrl('/api/device/explore'), {
-    method: 'POST',
-    credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-MR-SCRAP-CLIENT': 'android-device-session',
-      'Authorization': `Bearer ${authToken}`
-    },
-    body: JSON.stringify({
-      sources: batches.map(batch => ({ sourceId: batch.sourceId, posts: batch.posts.map(payloadPost) })),
-      mode,
-      prompt,
-      categories,
-      locale
-    })
-  });
-  const raw = await response.text();
-  let body: any = null;
-  try { body = raw ? JSON.parse(raw) : null; } catch { body = null; }
-  if (!response.ok) {
-    const error: any = new Error(body?.error || `Explore request failed with HTTP ${response.status}`);
-    error.status = response.status;
+  const controller = new AbortController();
+  const timeout = globalThis.setTimeout(() => controller.abort(), EXPLORE_TIMEOUT_MS);
+  try {
+    const response = await fetch(apiUrl('/api/device/explore'), {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-MR-SCRAP-CLIENT': 'android-device-session',
+        'Authorization': `Bearer ${authToken}`
+      },
+      body: JSON.stringify({
+        sources: batches.slice(0, 10).map(batch => ({ sourceId: batch.sourceId, posts: batch.posts.slice(0, 100).map(payloadPost) })),
+        mode,
+        prompt: prompt.slice(0, 5000),
+        categories: categories.filter(value => typeof value === 'string' && value.trim()).map(value => value.trim().slice(0, 80)).slice(0, 12),
+        locale
+      }),
+      signal: controller.signal
+    });
+    const raw = await readBoundedResponse(response);
+    let body: any = null;
+    try { body = raw ? JSON.parse(raw) : null; } catch { body = null; }
+    if (!response.ok) {
+      const error: any = new Error(body?.error || `Explore request failed with HTTP ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
+    return body;
+  } catch (error: any) {
+    if (error?.name === 'AbortError') throw new Error('Explore request timed out');
     throw error;
+  } finally {
+    globalThis.clearTimeout(timeout);
   }
-  return body;
 }
 
 export async function apiExploreDevicePosts(
@@ -194,24 +262,26 @@ export async function apiExploreDevicePosts(
   const items: ExploreResultItem[] = [];
   for (const raw of Array.isArray(data?.items) ? data.items : []) {
     try {
+      const post = normalizePost(raw.post);
+      const sourceAvatar = safeHttpsUrl(raw.sourceAvatar);
       items.push({
-        post: normalizePost(raw.post),
-        sourceName: typeof raw.sourceName === 'string' ? raw.sourceName : '',
-        sourceAvatar: typeof raw.sourceAvatar === 'string' ? raw.sourceAvatar : undefined,
-        relevant: Boolean(raw.relevant),
-        category: typeof raw.category === 'string' ? raw.category : '',
+        post,
+        sourceName: typeof raw.sourceName === 'string' ? raw.sourceName.trim().slice(0, 255) : '',
+        sourceAvatar,
+        relevant: raw.relevant === true,
+        category: typeof raw.category === 'string' ? raw.category.trim().slice(0, 100) : '',
         confidence: Math.max(0, Math.min(1, Number(raw.confidence) || 0)),
-        reason: typeof raw.reason === 'string' ? raw.reason : ''
+        reason: typeof raw.reason === 'string' ? raw.reason.trim().slice(0, 1000) : ''
       });
     } catch (error) {
       console.warn('[apiExploreDevicePosts] Ignoring malformed item', error);
     }
   }
   return {
-    accepted: Number(data?.accepted || 0),
-    duplicates: Number(data?.duplicates || 0),
-    rejected: Number(data?.rejected || 0),
-    postsAnalyzed: Number(data?.postsAnalyzed || 0),
+    accepted: Math.max(0, Number(data?.accepted || 0) || 0),
+    duplicates: Math.max(0, Number(data?.duplicates || 0) || 0),
+    rejected: Math.max(0, Number(data?.rejected || 0) || 0),
+    postsAnalyzed: Math.max(0, Number(data?.postsAnalyzed || 0) || 0),
     items
   };
 }
