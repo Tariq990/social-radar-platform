@@ -63,13 +63,9 @@ export async function postJson(
     }
 
     if (!response.ok) {
-      const message =
-        parsed?.error?.message ||
-        parsed?.message ||
-        raw?.slice(0, 500) ||
-        `AI provider returned HTTP ${response.status}`;
-
-      throw new AIProviderError(message, {
+      // Provider bodies are untrusted and may echo prompts, account details, URLs, or other
+      // sensitive context. Preserve only the HTTP status and retryability classification.
+      throw new AIProviderError(`AI provider returned HTTP ${response.status}`, {
         status: response.status,
         retryable: response.status === 408 || response.status === 409 || response.status === 429 || response.status >= 500
       });
@@ -81,7 +77,7 @@ export async function postJson(
       throw new AIProviderError('AI provider request timed out', { retryable: true });
     }
     if (error instanceof AIProviderError) throw error;
-    throw new AIProviderError(error?.message || 'AI provider request failed', { retryable: true });
+    throw new AIProviderError('AI provider request failed', { retryable: true });
   } finally {
     clearTimeout(timer);
   }
