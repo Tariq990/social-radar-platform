@@ -1,0 +1,77 @@
+name: Supply chain audit once
+
+on:
+  push:
+    branches:
+      - test/android-headless-emulator-20260909
+    paths:
+      - '.github/workflows/supply-chain-audit-once.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 8
+    steps:
+      - name: Checkout validation branch
+        uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Audit workflow supply-chain controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          root = Path('.github/workflows')
+          files = sorted([*root.glob('*.yml'), *root.glob('*.yaml')])
+          mutable = []
+          writes = []
+          pr_target = []
+          shell_fetch = []
+
+          use_re = re.compile(r'^\s*uses:\s*([^\s#]+)')
+          sha_re = re.compile(r'^[0-9a-fA-F]{40}$')
+          write_re = re.compile(r'^\s*(contents|actions|checks|deployments|issues|packages|pages|pull-requests|repository-projects|security-events|statuses|id-token):\s*write\s*(?:#.*)?$')
+
+          for path in files:
+              if path.name == 'supply-chain-audit-once.yml':
+                  continue
+              lines = path.read_text(encoding='utf-8').splitlines()
+              for no, line in enumerate(lines, 1):
+                  m = use_re.match(line)
+                  if m:
+                      action = m.group(1)
+                      if '@' not in action:
+                          mutable.append((str(path), no, action))
+                      else:
+                          ref = action.rsplit('@', 1)[1]
+                          if not sha_re.fullmatch(ref):
+                              mutable.append((str(path), no, action))
+                  m = write_re.match(line)
+                  if m:
+                      writes.append((str(path), no, m.group(1)))
+                  if re.search(r'\bpull_request_target\s*:', line):
+                      pr_target.append((str(path), no))
+                  if re.search(r'\b(curl|wget)\b.*\|\s*(?:sudo\s+)?(?:bash|sh)\b', line):
+                      shell_fetch.append((str(path), no))
+
+          print(f'WORKFLOW_COUNT={len(files)-1}')
+          print(f'MUTABLE_ACTION_REF_COUNT={len(mutable)}')
+          for path, no, action in mutable:
+              print(f'MUTABLE_ACTION_REF|{path}:{no}|{action}')
+          print(f'WRITE_PERMISSION_COUNT={len(writes)}')
+          for path, no, scope in writes:
+              print(f'WRITE_PERMISSION|{path}:{no}|{scope}')
+          print(f'PULL_REQUEST_TARGET_COUNT={len(pr_target)}')
+          for path, no in pr_target:
+              print(f'PULL_REQUEST_TARGET|{path}:{no}')
+          print(f'SHELL_FETCH_PIPE_COUNT={len(shell_fetch)}')
+          for path, no in shell_fetch:
+              print(f'SHELL_FETCH_PIPE|{path}:{no}')
+          PY
