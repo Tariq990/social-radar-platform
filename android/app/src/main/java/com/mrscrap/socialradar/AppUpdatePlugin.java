@@ -27,6 +27,7 @@ import java.util.concurrent.Executors;
 @CapacitorPlugin(name = "AppUpdate")
 public class AppUpdatePlugin extends Plugin {
     private static final String APK_MIME = "application/vnd.android.package-archive";
+    private static final String UPDATE_APK_PATH = "/api/app/update/apk";
     private static final long MAX_APK_BYTES = 30L * 1024L * 1024L;
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
 
@@ -65,8 +66,8 @@ public class AppUpdatePlugin extends Plugin {
 
         try {
             URL parsed = new URL(rawUrl);
-            if (!"https".equalsIgnoreCase(parsed.getProtocol())) {
-                call.reject("Update download must use HTTPS");
+            if (!isTrustedUpdateUrl(parsed)) {
+                call.reject("Update download must use the MR SCRAP backend HTTPS update endpoint");
                 return;
             }
         } catch (Exception error) {
@@ -114,6 +115,10 @@ public class AppUpdatePlugin extends Plugin {
         File target = null;
         try {
             URL requestedUrl = new URL(downloadUrl);
+            if (!isTrustedUpdateUrl(requestedUrl)) {
+                throw new SecurityException("Untrusted update URL");
+            }
+
             connection = (HttpURLConnection) requestedUrl.openConnection();
             connection.setConnectTimeout(15_000);
             connection.setReadTimeout(60_000);
@@ -126,11 +131,8 @@ public class AppUpdatePlugin extends Plugin {
                 throw new IllegalStateException("Update download failed with HTTP " + status);
             }
             URL finalUrl = connection.getURL();
-            if (finalUrl == null || !"https".equalsIgnoreCase(finalUrl.getProtocol())) {
-                throw new IllegalStateException("Update download redirected to a non-HTTPS URL");
-            }
-            if (!sameHttpsOrigin(requestedUrl, finalUrl)) {
-                throw new SecurityException("Update download redirected away from the MR SCRAP backend origin");
+            if (finalUrl == null || !isTrustedUpdateUrl(finalUrl) || !sameHttpsOrigin(requestedUrl, finalUrl)) {
+                throw new SecurityException("Update download left the trusted backend endpoint");
             }
 
             String contentType = connection.getContentType();
@@ -207,10 +209,22 @@ public class AppUpdatePlugin extends Plugin {
         } catch (Exception error) {
             if (partial != null && partial.exists()) partial.delete();
             if (target != null && target.exists()) target.delete();
-            String message = error.getMessage() == null ? "Update installation failed" : error.getMessage();
+            String message = safeInstallFailureMessage(error);
             getActivity().runOnUiThread(() -> call.reject(message));
         } finally {
             if (connection != null) connection.disconnect();
+        }
+    }
+
+    private static boolean isTrustedUpdateUrl(URL requested) {
+        try {
+            URL trustedOrigin = new URL(BuildConfig.MR_SCRAP_BACKEND_ORIGIN);
+            return sameHttpsOrigin(trustedOrigin, requested)
+                && UPDATE_APK_PATH.equals(requested.getPath())
+                && requested.getUserInfo() == null
+                && requested.getRef() == null;
+        } catch (Exception ignored) {
+            return false;
         }
     }
 
@@ -219,6 +233,18 @@ public class AppUpdatePlugin extends Plugin {
         int expectedPort = expected.getPort() == -1 ? expected.getDefaultPort() : expected.getPort();
         int actualPort = actual.getPort() == -1 ? actual.getDefaultPort() : actual.getPort();
         return expected.getHost().equalsIgnoreCase(actual.getHost()) && expectedPort == actualPort;
+    }
+
+    private static String safeInstallFailureMessage(Exception error) {
+        if (error instanceof SecurityException) return "Update verification failed";
+        String message = error.getMessage();
+        if (message != null && message.matches("^Update download failed with HTTP \\d{3}$")) return message;
+        if ("Update APK is too large".equals(message) ||
+            "Update APK exceeds the maximum accepted size".equals(message) ||
+            "Downloaded update APK is unexpectedly small".equals(message)) {
+            return message;
+        }
+        return "Update installation failed";
     }
 
     private static String toHex(byte[] bytes) {
