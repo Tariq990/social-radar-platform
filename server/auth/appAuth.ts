@@ -268,8 +268,8 @@ export async function requireAppAuth(req: Request, res: Response, next: NextFunc
     res.locals.appUser = identity.user;
     res.locals.appSessionId = identity.sessionId;
     return next();
-  } catch (error: any) {
-    return res.status(503).json({ error: error?.message || 'Authentication unavailable' });
+  } catch {
+    return res.status(503).json({ error: 'Authentication unavailable' });
   }
 }
 
