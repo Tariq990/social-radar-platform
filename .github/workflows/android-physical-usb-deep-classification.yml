@@ -1,0 +1,78 @@
+name: Android Physical USB Deep Classification
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-physical-usb-deep-classification.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  classify:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 4
+    steps:
+      - name: Classify connected Windows USB state using counts only
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"; test -x "$adb"
+          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-usb-deep-classification.ps1"
+          cat > "$ps1" <<'PS'
+          $ErrorActionPreference='Stop'
+          $pnp=@(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue)
+          $cim=@(Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue)
+
+          $usbClass=@($pnp | Where-Object { [string]$_.Class -eq 'USB' })
+          $usbDeviceClass=@($pnp | Where-Object { [string]$_.Class -eq 'USBDevice' })
+          $wpd=@($pnp | Where-Object { [string]$_.Class -eq 'WPD' })
+          $androidClass=@($pnp | Where-Object { [string]$_.Class -eq 'AndroidUsbDeviceClass' })
+          $androidHint=@($pnp | Where-Object {
+            ([string]$_.FriendlyName -match '(?i)\bADB\b|Android|Pixel|Samsung.*(Phone|Mobile)|Xiaomi|Redmi|OnePlus|Motorola|Huawei|Honor|Nothing Phone')
+          })
+          $fastbootHint=@($pnp | Where-Object { [string]$_.FriendlyName -match '(?i)Fastboot|Bootloader' })
+          $usbProblem=@($pnp | Where-Object {
+            ([string]$_.InstanceId -match '^USB\\') -and ([string]$_.Status -ne 'OK')
+          })
+          $unknownUsb=@($pnp | Where-Object {
+            ([string]$_.Class -eq 'Unknown' -or [string]$_.Class -eq '') -and ([string]$_.InstanceId -match '^USB\\')
+          })
+          $usbCim=@($cim | Where-Object { [string]$_.PNPDeviceID -match '^USB\\' })
+          $winUsb=@($usbCim | Where-Object { [string]$_.Service -match '^(?i)WinUSB$' })
+          $composite=@($usbCim | Where-Object { [string]$_.Service -match '^(?i)usbccgp$' })
+          $wudf=@($usbCim | Where-Object { [string]$_.Service -match '^(?i)WUDFRd$' })
+          $mtpHint=@($usbCim | Where-Object {
+            ([string]$_.PNPClass -eq 'WPD') -or ([string]$_.Service -match '(?i)MTP')
+          })
+
+          Write-Output ('HOST_USB_CLASS_PRESENT_COUNT='+$usbClass.Count)
+          Write-Output ('HOST_USBDEVICE_CLASS_PRESENT_COUNT='+$usbDeviceClass.Count)
+          Write-Output ('HOST_WPD_PRESENT_COUNT='+$wpd.Count)
+          Write-Output ('HOST_ANDROID_CLASS_PRESENT_COUNT='+$androidClass.Count)
+          Write-Output ('HOST_ANDROID_NAME_HINT_COUNT='+$androidHint.Count)
+          Write-Output ('HOST_FASTBOOT_HINT_COUNT='+$fastbootHint.Count)
+          Write-Output ('HOST_USB_PROBLEM_COUNT='+$usbProblem.Count)
+          Write-Output ('HOST_UNKNOWN_USB_COUNT='+$unknownUsb.Count)
+          Write-Output ('HOST_WINUSB_SERVICE_COUNT='+$winUsb.Count)
+          Write-Output ('HOST_USB_COMPOSITE_SERVICE_COUNT='+$composite.Count)
+          Write-Output ('HOST_WUDF_SERVICE_COUNT='+$wudf.Count)
+          Write-Output ('HOST_MTP_HINT_COUNT='+$mtpHint.Count)
+          PS
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
+          rm -f "$ps1" 2>/dev/null || true
+
+          raw="$($adb devices 2>/dev/null | tr -d '\r' || true)"
+          physical_ok="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 !~ /^emulator-/ && $2=="device" {c++} END{print c+0}')"
+          physical_unauth="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 !~ /^emulator-/ && $2=="unauthorized" {c++} END{print c+0}')"
+          physical_offline="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 !~ /^emulator-/ && $2=="offline" {c++} END{print c+0}')"
+          echo "ADB_PHYSICAL_AUTHORIZED_COUNT=$physical_ok"
+          echo "ADB_PHYSICAL_UNAUTHORIZED_COUNT=$physical_unauth"
+          echo "ADB_PHYSICAL_OFFLINE_COUNT=$physical_offline"
+          echo PHYSICAL_USB_DEEP_CLASSIFICATION_COMPLETE=1
