@@ -18,85 +18,87 @@ jobs:
     timeout-minutes: 12
     env:
       PKG: com.mrscrap.socialradar
+      BACKEND: https://mr-scrap-api-live.onrender.com
     steps:
-      - name: Prove repeated authenticated ingest is idempotent without invoking AI
+      - name: Attach to installed v159 without rebuild or reinstall
         shell: bash
         run: |
           set -euo pipefail
           win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
-          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"
-          test -x "$adb"
-          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1;exit}')"
-          test -n "$serial"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"; test -x "$adb"
+          serial="$($adb devices 2>/dev/null | tr -d '\r' | awk '$1 ~ /^emulator-/ && $2=="device" {print $1;exit}')"; test -n "$serial"
           test "$($adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | tail -n1)" = 1
-          version="$($adb -s "$serial" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"
-          echo "INSTALLED_VERSION_CODE=$version"
-          test "$version" = 159
-          marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
-          printf '%s' "$marker" | grep -q facebook_connected_at
+          version="$($adb -s "$serial" shell dumpsys package "$PKG" 2>/dev/null | tr -d '\r' | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | head -n1)"; echo "INSTALLED_VERSION_CODE=$version"; test "$version" = 159
+          marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"; printf '%s' "$marker" | grep -q facebook_connected_at
           echo FACEBOOK_SESSION_PRESENT=1
-          curl -fsS --max-time 30 https://mr-scrap-api-live.onrender.com/api/health >/dev/null || true
+          curl -fsS --max-time 30 "$BACKEND/api/health" >/dev/null || true
           $adb -s "$serial" shell am force-stop "$PKG" >/dev/null 2>&1 || true
           $adb -s "$serial" shell am start -W -n "$PKG/.MainActivity" >/dev/null
           sleep 10
-          pid="$($adb -s "$serial" shell pidof "$PKG" 2>/dev/null | tr -d '\r' | awk '{print $1}')"
-          test -n "$pid"
+          pid="$($adb -s "$serial" shell pidof "$PKG" 2>/dev/null | tr -d '\r' | awk '{print $1}')"; test -n "$pid"
           socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | grep -E "${pid}$|_${pid}($|_)" | head -n1 || true)"
-          [ -n "$socket" ] || socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | head -n1 || true)"
-          test -n "$socket"
-          port=9242
-          $adb -s "$serial" forward --remove tcp:$port >/dev/null 2>&1 || true
-          $adb -s "$serial" forward tcp:$port "localabstract:$socket" >/dev/null
-          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-v159-dedupe.ps1"
+          [ -n "$socket" ] || socket="$($adb -s "$serial" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | head -n1 || true)"; test -n "$socket"
+          $adb -s "$serial" forward --remove tcp:9242 >/dev/null 2>&1 || true
+          $adb -s "$serial" forward tcp:9242 "localabstract:$socket" >/dev/null
+          echo "ADB=$adb" >> "$GITHUB_ENV"; echo "SERIAL=$serial" >> "$GITHUB_ENV"; echo "WIN_USER=$win_user" >> "$GITHUB_ENV"
+
+      - name: Create isolated rule-free source and schedule first secure ingest
+        shell: bash
+        run: |
+          set -euo pipefail
+          ps1="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-v159-dedupe-create.ps1"
           cat > "$ps1" <<'PS'
           $ErrorActionPreference='Stop';$port=9242
           function Target { for($i=0;$i -lt 120;$i++){try{$rows=@(Invoke-RestMethod -Uri "http://127.0.0.1:$port/json/list" -TimeoutSec 2);$t=$rows|Where-Object{$_.type -eq 'page' -and [string]$_.url -like 'https://localhost*'}|Select-Object -First 1;if($t){return $t}}catch{};Start-Sleep -Milliseconds 250};throw 'app target missing' }
-          function Eval([string]$expr,[int]$seconds=420){$t=Target;$u=[Uri]$t.webSocketDebuggerUrl;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($seconds));$ws.ConnectAsync([Uri]("ws://127.0.0.1:$port"+$u.PathAndQuery),$cts.Token).GetAwaiter().GetResult()|Out-Null;$payload=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 14;$bytes=[Text.Encoding]::UTF8.GetBytes($payload);$ws.SendAsync([ArraySegment[byte]]::new($bytes),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null;$buf=New-Object byte[] 262144;$sb=[Text.StringBuilder]::new();while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id -ne 1){continue};if($m.result.exceptionDetails){throw 'runtime eval exception'};$v=$m.result.result.value;try{$ws.Abort()}catch{};return $v}}
+          function Eval([string]$expr,[int]$seconds=180){$t=Target;$u=[Uri]$t.webSocketDebuggerUrl;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($seconds));$ws.ConnectAsync([Uri]("ws://127.0.0.1:$port"+$u.PathAndQuery),$cts.Token).GetAwaiter().GetResult()|Out-Null;$p=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 10;$b=[Text.Encoding]::UTF8.GetBytes($p);$ws.SendAsync([ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null;$buf=New-Object byte[] 131072;$sb=[Text.StringBuilder]::new();while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id-ne 1){continue};if($m.result.exceptionDetails){throw 'runtime eval exception'};return $m.result.result.value}}
           $expr=@'
-          (async()=>{
-            const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-            const out={connected:false,source:false,paused:false,enabledRules:-1,posts:0,queryIdentity:0,auth:false,beforeAlerts:-1,afterAlerts:-1,first:{ok:false,accepted:-1,duplicates:-1,rejected:-1,matches:-1,errors:-1},second:{ok:false,accepted:-1,duplicates:-1,rejected:-1,matches:-1,errors:-1}};
-            const cap=globalThis.Capacitor?.Plugins?.AuthenticatedSocialSession;if(!cap)return out;
-            try{const s=await cap.status();out.connected=s?.facebookConnected===true||s?.connected===true}catch{}
-            let sources=[],rules=[],alerts=[];
-            for(let i=0;i<25;i++){
-              try{
-                const [sr,rr,ar]=await Promise.all([
-                  fetch('https://mr-scrap-api-live.onrender.com/api/sources',{credentials:'include'}),
-                  fetch('https://mr-scrap-api-live.onrender.com/api/rules',{credentials:'include'}),
-                  fetch('https://mr-scrap-api-live.onrender.com/api/alerts',{credentials:'include'})
-                ]);
-                if(sr.ok&&rr.ok&&ar.ok){sources=await sr.json();rules=await rr.json();alerts=await ar.json();break}
-              }catch{};await sleep(500)
-            }
-            const src=(Array.isArray(sources)?sources:[]).find(x=>x&&x.platform==='facebook'&&((x.connector_type||x.connectorType||'device_session')==='device_session'))||null;
-            out.source=Boolean(src);if(!src)return out;
-            out.paused=src.is_paused===true||src.isPaused===true;
-            const enabled=(Array.isArray(rules)?rules:[]).filter(r=>r&&r.enabled===true);out.enabledRules=enabled.length;
-            out.beforeAlerts=Array.isArray(alerts)?alerts.length:-1;
-            if(out.enabledRules!==0||out.paused||!out.connected)return out;
-            let collected=[];try{const c=await cap.collectSource({sourceId:src.id,url:src.url,platform:'facebook',limit:10});collected=Array.isArray(c?.posts)?c.posts:[]}catch{return out}
-            out.posts=collected.length;
-            out.queryIdentity=collected.filter(p=>{try{const u=new URL(String(p?.originalUrl||''));return u.searchParams.has('story_fbid')&&u.searchParams.has('id')}catch{return false}}).length;
-            if(!collected.length)return out;
-            const auth=await cap.getBackendAuth();const token=String(auth?.token||'');out.auth=auth?.configured===true&&token.length>=24;if(!out.auth)return out;
-            const payload=collected.map(p=>({externalPostId:p?.externalPostId,originalUrl:p?.originalUrl,authorName:p?.authorName,authorAvatar:p?.authorAvatar,text:p?.text,media:Array.isArray(p?.media)?p.media:[],publishedAt:p?.publishedAt,metadata:p?.metadata&&typeof p.metadata==='object'?p.metadata:{}}));
-            const ingest=async()=>{const r=await fetch('https://mr-scrap-api-live.onrender.com/api/device/ingest',{method:'POST',headers:{'Content-Type':'application/json','X-MR-SCRAP-CLIENT':'android-device-session','Authorization':'Bearer '+token},body:JSON.stringify({sourceId:src.id,posts:payload,locale:'ar'})});if(!r.ok)return{ok:false,accepted:-1,duplicates:-1,rejected:-1,matches:-1,errors:-1};const j=await r.json();return{ok:true,accepted:Number(j?.accepted||0),duplicates:Number(j?.duplicates||0),rejected:Number(j?.rejected||0),matches:Array.isArray(j?.matchesCreated)?j.matchesCreated.length:0,errors:Array.isArray(j?.evaluationErrors)?j.evaluationErrors.length:0}};
-            out.first=await ingest();out.second=await ingest();
-            try{const ar=await fetch('https://mr-scrap-api-live.onrender.com/api/alerts',{credentials:'include'});if(ar.ok){const a=await ar.json();out.afterAlerts=Array.isArray(a)?a.length:-1}}catch{}
-            return out;
-          })()
+          (async()=>{const base='https://mr-scrap-api-live.onrender.com';const cap=globalThis.Capacitor?.Plugins?.AuthenticatedSocialSession;if(!cap)return{stage:'plugin'};const j=async r=>{try{return await r.json()}catch{return null}};const sr0=await fetch(base+'/api/sources',{credentials:'include'});const s0=await j(sr0);if(!sr0.ok||!Array.isArray(s0))return{stage:'sources'};for(const p of s0.filter(x=>typeof x?.external_id==='string'&&x.external_id.startsWith('dedupeprobe_emulator_'))){try{await cap.cancelSource({sourceId:p.id})}catch{};await fetch(base+'/api/sources/'+encodeURIComponent(p.id),{method:'DELETE',credentials:'include'})}localStorage.removeItem('mrscrap_dedupe_probe_source_id');localStorage.removeItem('mrscrap_dedupe_first_checked');localStorage.removeItem('mrscrap_dedupe_first_count');const [sr,rr,ar]=await Promise.all([fetch(base+'/api/sources',{credentials:'include'}),fetch(base+'/api/rules',{credentials:'include'}),fetch(base+'/api/alerts',{credentials:'include'})]);const sources=await j(sr),rules=await j(rr),alerts=await j(ar);if(!sr.ok||!rr.ok||!ar.ok||!Array.isArray(sources)||!Array.isArray(rules)||!Array.isArray(alerts))return{stage:'backend'};const globalEnabled=rules.filter(r=>r&&r.enabled===true&&(!Array.isArray(r.source_ids||r.sourceIds)||(r.source_ids||r.sourceIds).length===0)).length;const real=sources.find(x=>x&&x.platform==='facebook'&&!Boolean(x.is_paused??x.isPaused)&&(x.connector_type||x.connectorType||'device_session')==='device_session');const st=await cap.status();const facebook=st?.facebookConnected===true||(st?.facebookConnected==null&&st?.connected===true);const auth=await cap.getBackendAuth();const authConfigured=auth?.configured===true;if(globalEnabled!==0||!real||!facebook||!authConfigured)return{stage:'unsafe',globalEnabled,facebook,authConfigured,real:Boolean(real),alerts:alerts.length};const externalId='dedupeprobe_emulator_'+Date.now();const cr=await fetch(base+'/api/sources',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({externalId,url:real.url,name:'Dedupe Emulator Probe',visibilityType:'authenticated',connectorType:'device_session'})});const created=await j(cr);if(!cr.ok||typeof created?.id!=='string')return{stage:'create',status:cr.status};localStorage.setItem('mrscrap_dedupe_probe_source_id',created.id);localStorage.setItem('mrscrap_dedupe_alerts_before',String(alerts.length));const sch=await cap.scheduleSource({sourceId:created.id,url:real.url,platform:'facebook',backendBaseUrl:base,locale:'en'});return{stage:'scheduled',globalEnabled,facebook,authConfigured,alerts:alerts.length,scheduled:sch?.scheduled===true,interval:Number(sch?.minimumIntervalMinutes||0)}})()
           '@
-          $r=Eval $expr 420
-          Write-Output ('FACEBOOK_CONNECTED='+$(if($r.connected){'1'}else{'0'}));Write-Output ('FACEBOOK_DEVICE_SOURCE='+$(if($r.source){'1'}else{'0'}));Write-Output ('SOURCE_PAUSED='+$(if($r.paused){'1'}else{'0'}));Write-Output ('ENABLED_RULES='+[int]$r.enabledRules);Write-Output ('COLLECTED_POSTS='+[int]$r.posts);Write-Output ('QUERY_IDENTITY_POSTS='+[int]$r.queryIdentity);Write-Output ('DEVICE_AUTH_AVAILABLE='+$(if($r.auth){'1'}else{'0'}));Write-Output ('ALERTS_BEFORE='+[int]$r.beforeAlerts);Write-Output ('FIRST_OK='+$(if($r.first.ok){'1'}else{'0'}));Write-Output ('FIRST_ACCEPTED='+[int]$r.first.accepted);Write-Output ('FIRST_DUPLICATES='+[int]$r.first.duplicates);Write-Output ('FIRST_REJECTED='+[int]$r.first.rejected);Write-Output ('FIRST_MATCHES='+[int]$r.first.matches);Write-Output ('FIRST_EVAL_ERRORS='+[int]$r.first.errors);Write-Output ('SECOND_OK='+$(if($r.second.ok){'1'}else{'0'}));Write-Output ('SECOND_ACCEPTED='+[int]$r.second.accepted);Write-Output ('SECOND_DUPLICATES='+[int]$r.second.duplicates);Write-Output ('SECOND_REJECTED='+[int]$r.second.rejected);Write-Output ('SECOND_MATCHES='+[int]$r.second.matches);Write-Output ('SECOND_EVAL_ERRORS='+[int]$r.second.errors);Write-Output ('ALERTS_AFTER='+[int]$r.afterAlerts)
-          if(!$r.connected -or !$r.source -or $r.paused -or [int]$r.enabledRules -ne 0 -or [int]$r.posts -lt 1 -or !$r.auth -or !$r.first.ok -or !$r.second.ok){exit 253}
-          if([int]$r.second.accepted -ne 0 -or [int]$r.second.duplicates -ne [int]$r.posts -or [int]$r.second.rejected -ne 0 -or [int]$r.second.matches -ne 0 -or [int]$r.second.errors -ne 0){exit 254}
-          if([int]$r.beforeAlerts -ne [int]$r.afterAlerts){exit 255}
-          Write-Output V159_DEVICE_INGEST_IDEMPOTENCY_GATE=PASS
+          $r=Eval $expr 180
+          Write-Output ('PROBE_STAGE='+[string]$r.stage);if($null-ne$r.globalEnabled){Write-Output ('GLOBAL_ENABLED_RULES='+[int]$r.globalEnabled)};if($null-ne$r.alerts){Write-Output ('ALERTS_BEFORE='+[int]$r.alerts)};Write-Output ('FACEBOOK_CONNECTED='+$(if($r.facebook){'1'}else{'0'}));Write-Output ('DEVICE_AUTH_CONFIGURED='+$(if($r.authConfigured){'1'}else{'0'}));Write-Output ('FIRST_WORK_SCHEDULED='+$(if($r.scheduled){'1'}else{'0'}));if($null-ne$r.interval){Write-Output ('WORKMANAGER_MIN_INTERVAL='+[int]$r.interval)}
+          if([string]$r.stage-ne'scheduled' -or [int]$r.globalEnabled-ne 0 -or !$r.facebook -or !$r.authConfigured -or !$r.scheduled -or [int]$r.interval-ne 15){exit 252}
+          Write-Output ISOLATED_DEDUPE_SOURCE_SCHEDULED=PASS
           PS
           /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
-          marker="$($adb -s "$serial" shell "run-as $PKG cat shared_prefs/mrscrap_device_session_meta.xml 2>/dev/null" 2>/dev/null | tr -d '\r' || true)"
-          printf '%s' "$marker" | grep -q facebook_connected_at
-          echo FACEBOOK_SESSION_AFTER_DEDUPE_PROOF=1
-          $adb -s "$serial" forward --remove tcp:$port >/dev/null 2>&1 || true
-          rm -f "$ps1" 2>/dev/null || true
+
+      - name: Prove second secure WorkManager ingest creates no duplicate posts
+        shell: bash
+        run: |
+          set -euo pipefail
+          ps1="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-v159-dedupe-run.ps1"
+          cat > "$ps1" <<'PS'
+          $ErrorActionPreference='Stop';$port=9242
+          function Target { for($i=0;$i -lt 120;$i++){try{$rows=@(Invoke-RestMethod -Uri "http://127.0.0.1:$port/json/list" -TimeoutSec 2);$t=$rows|Where-Object{$_.type -eq 'page' -and [string]$_.url -like 'https://localhost*'}|Select-Object -First 1;if($t){return $t}}catch{};Start-Sleep -Milliseconds 250};throw 'app target missing' }
+          function Eval([string]$expr,[int]$seconds=540){$t=Target;$u=[Uri]$t.webSocketDebuggerUrl;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($seconds));$ws.ConnectAsync([Uri]("ws://127.0.0.1:$port"+$u.PathAndQuery),$cts.Token).GetAwaiter().GetResult()|Out-Null;$p=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 10;$b=[Text.Encoding]::UTF8.GetBytes($p);$ws.SendAsync([ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null;$buf=New-Object byte[] 131072;$sb=[Text.StringBuilder]::new();while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id-ne 1){continue};if($m.result.exceptionDetails){throw 'runtime eval exception'};return $m.result.result.value}}
+          $expr=@'
+          (async()=>{const base='https://mr-scrap-api-live.onrender.com';const sleep=ms=>new Promise(r=>setTimeout(r,ms));const cap=globalThis.Capacitor?.Plugins?.AuthenticatedSocialSession;const id=localStorage.getItem('mrscrap_dedupe_probe_source_id')||'';if(!cap||!id)return{stage:'missing'};let first=null;for(let i=0;i<240;i++){const r=await fetch(base+'/api/sources',{credentials:'include'});if(r.ok){const a=await r.json();const s=Array.isArray(a)?a.find(x=>x?.id===id):null;const c=Number(s?.recentPostsCount||0);const t=String(s?.last_checked_at||s?.lastCheckedAt||'');if(s&&c>0&&t){first={count:c,checked:t,url:s.url};break}}await sleep(1000)}if(!first)return{stage:'first_timeout'};localStorage.setItem('mrscrap_dedupe_first_count',String(first.count));localStorage.setItem('mrscrap_dedupe_first_checked',first.checked);await cap.cancelSource({sourceId:id});const sch=await cap.scheduleSource({sourceId:id,url:first.url,platform:'facebook',backendBaseUrl:base,locale:'en'});if(sch?.scheduled!==true)return{stage:'reschedule',firstCount:first.count};let second=null;for(let i=0;i<240;i++){const r=await fetch(base+'/api/sources',{credentials:'include'});if(r.ok){const a=await r.json();const s=Array.isArray(a)?a.find(x=>x?.id===id):null;const c=Number(s?.recentPostsCount||0);const t=String(s?.last_checked_at||s?.lastCheckedAt||'');if(s&&t&&t!==first.checked){second={count:c,checked:t};break}}await sleep(1000)}if(!second)return{stage:'second_timeout',firstCount:first.count};const ar=await fetch(base+'/api/alerts',{credentials:'include'});const alerts=ar.ok?await ar.json():null;const before=Number(localStorage.getItem('mrscrap_dedupe_alerts_before')||'-1');return{stage:'done',firstCount:first.count,secondCount:second.count,markerChanged:second.checked!==first.checked,alertsBefore:before,alertsAfter:Array.isArray(alerts)?alerts.length:-1}})()
+          '@
+          $r=Eval $expr 540
+          Write-Output ('DEDUPE_STAGE='+[string]$r.stage);if($null-ne$r.firstCount){Write-Output ('FIRST_POST_COUNT='+[int]$r.firstCount)};if($null-ne$r.secondCount){Write-Output ('SECOND_POST_COUNT='+[int]$r.secondCount)};Write-Output ('SECOND_CHECK_COMPLETED='+$(if($r.markerChanged){'1'}else{'0'}));if($null-ne$r.alertsBefore){Write-Output ('ALERTS_BEFORE='+[int]$r.alertsBefore)};if($null-ne$r.alertsAfter){Write-Output ('ALERTS_AFTER='+[int]$r.alertsAfter)}
+          if([string]$r.stage-ne'done' -or [int]$r.firstCount-lt 1 -or !$r.markerChanged -or [int]$r.secondCount-ne[int]$r.firstCount -or [int]$r.alertsAfter-ne[int]$r.alertsBefore){exit 254}
+          Write-Output V159_WORKMANAGER_INGEST_IDEMPOTENCY_GATE=PASS
+          PS
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
+
+      - name: Clean isolated source and verify session
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${ADB:-}" ] || [ -z "${SERIAL:-}" ]; then exit 0; fi
+          $ADB -s "$SERIAL" shell am start -W -n "$PKG/.MainActivity" >/dev/null 2>&1 || true
+          sleep 6
+          pid="$($ADB -s "$SERIAL" shell pidof "$PKG" 2>/dev/null | tr -d '\r' | awk '{print $1}')"; test -n "$pid"
+          socket="$($ADB -s "$SERIAL" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | grep -E "${pid}$|_${pid}($|_)" | head -n1 || true)"; [ -n "$socket" ] || socket="$($ADB -s "$SERIAL" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | sed -n 's/.*@\(webview_devtools_remote[^ ]*\)$/\1/p' | head -n1 || true)"; test -n "$socket"
+          $ADB -s "$SERIAL" forward --remove tcp:9242 >/dev/null 2>&1 || true; $ADB -s "$SERIAL" forward tcp:9242 "localabstract:$socket" >/dev/null
+          ps1="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-v159-dedupe-clean.ps1"
+          cat > "$ps1" <<'PS'
+          $ErrorActionPreference='Stop';$port=9242
+          function Target { for($i=0;$i-lt 80;$i++){try{$r=@(Invoke-RestMethod -Uri "http://127.0.0.1:$port/json/list" -TimeoutSec 2);$t=$r|Where-Object{$_.type-eq'page'-and[string]$_.url-like'https://localhost*'}|Select-Object -First 1;if($t){return $t}}catch{};Start-Sleep -Milliseconds 250};throw 'target missing'}
+          function Eval([string]$e){$t=Target;$u=[Uri]$t.webSocketDebuggerUrl;$w=[System.Net.WebSockets.ClientWebSocket]::new();$c=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds(90));$w.ConnectAsync([Uri]("ws://127.0.0.1:$port"+$u.PathAndQuery),$c.Token).GetAwaiter().GetResult()|Out-Null;$p=@{id=1;method='Runtime.evaluate';params=@{expression=$e;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 8;$b=[Text.Encoding]::UTF8.GetBytes($p);$w.SendAsync([ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$c.Token).GetAwaiter().GetResult()|Out-Null;$buf=New-Object byte[] 65536;while($true){$r=$w.ReceiveAsync([ArraySegment[byte]]::new($buf),$c.Token).GetAwaiter().GetResult();$m=([Text.Encoding]::UTF8.GetString($buf,0,$r.Count)|ConvertFrom-Json);if($m.id-eq 1){return $m.result.result.value}}}
+          $r=Eval "(async()=>{const b='https://mr-scrap-api-live.onrender.com';const c=globalThis.Capacitor?.Plugins?.AuthenticatedSocialSession;const id=localStorage.getItem('mrscrap_dedupe_probe_source_id')||'';if(id&&c){try{await c.cancelSource({sourceId:id})}catch{};await fetch(b+'/api/sources/'+encodeURIComponent(id),{method:'DELETE',credentials:'include'})}localStorage.removeItem('mrscrap_dedupe_probe_source_id');localStorage.removeItem('mrscrap_dedupe_first_checked');localStorage.removeItem('mrscrap_dedupe_first_count');localStorage.removeItem('mrscrap_dedupe_alerts_before');const sr=await fetch(b+'/api/sources',{credentials:'include'});const s=sr.ok?await sr.json():[];const left=Array.isArray(s)?s.filter(x=>typeof x?.external_id==='string'&&x.external_id.startsWith('dedupeprobe_emulator_')).length:-1;const st=c?await c.status():null;return{left,facebook:st?.facebookConnected===true||(st?.facebookConnected==null&&st?.connected===true)}})()"
+          Write-Output ('DEDUPE_PROBE_LEFTOVERS='+[int]$r.left);Write-Output ('FACEBOOK_SESSION_AFTER='+$(if($r.facebook){'1'}else{'0'}));if([int]$r.left-ne 0 -or !$r.facebook){exit 255};Write-Output DEDUPE_PROBE_CLEANUP=PASS
+          PS
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
+          $ADB -s "$SERIAL" forward --remove tcp:9242 >/dev/null 2>&1 || true
+          rm -f "/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/mrscrap-v159-dedupe-"*.ps1 2>/dev/null || true
