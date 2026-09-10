@@ -1,0 +1,64 @@
+name: Android Physical USB Diagnostics
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-physical-usb-diagnostics.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 4
+    steps:
+      - name: Classify Windows USB Android visibility without exposing identifiers
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"; test -x "$adb"
+          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-physical-usb-diag.ps1"
+          cat > "$ps1" <<'PS'
+          $ErrorActionPreference='Stop'
+          $present=@(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue)
+          $adb=@($present | Where-Object {
+            ([string]$_.Class -match 'AndroidUsbDeviceClass') -or
+            ([string]$_.FriendlyName -match '(?i)\bADB\b|Android.*Interface|Composite ADB')
+          })
+          $mtp=@($present | Where-Object {
+            ([string]$_.Class -eq 'WPD') -and
+            (([string]$_.FriendlyName -match '(?i)MTP|Android|Phone|Pixel|Samsung|Xiaomi|Redmi|OnePlus|Motorola|Huawei|Honor|Nothing') -or ([string]$_.InstanceId -match '^USB\\VID_'))
+          })
+          $androidNamed=@($present | Where-Object {
+            ([string]$_.FriendlyName -match '(?i)Android|Pixel|Samsung.*(Phone|Mobile|ADB)|Xiaomi|Redmi|OnePlus|Motorola|Huawei|Honor|Nothing Phone')
+          })
+          $problem=@($present | Where-Object {
+            ([string]$_.InstanceId -match '^USB\\VID_') -and
+            ([string]$_.Status -ne 'OK') -and
+            (([string]$_.FriendlyName -match '(?i)Android|ADB|MTP|Phone|Pixel|Samsung|Xiaomi|Redmi|OnePlus|Motorola|Huawei|Honor|Nothing') -or ([string]$_.Class -match 'AndroidUsbDeviceClass|WPD'))
+          })
+          Write-Output ('WINDOWS_ADB_INTERFACE_COUNT='+$adb.Count)
+          Write-Output ('WINDOWS_MTP_PHONE_LIKE_COUNT='+$mtp.Count)
+          Write-Output ('WINDOWS_ANDROID_NAMED_DEVICE_COUNT='+$androidNamed.Count)
+          Write-Output ('WINDOWS_ANDROID_USB_PROBLEM_COUNT='+$problem.Count)
+          PS
+          /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r'
+          rm -f "$ps1" 2>/dev/null || true
+
+          raw="$($adb devices 2>/dev/null | tr -d '\r' || true)"
+          emulator="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 ~ /^emulator-/ && $2=="device" {c++} END{print c+0}')"
+          authorized="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 !~ /^emulator-/ && $2=="device" {c++} END{print c+0}')"
+          unauthorized="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 !~ /^emulator-/ && $2=="unauthorized" {c++} END{print c+0}')"
+          offline="$(printf '%s\n' "$raw" | awk 'NR>1 && $1 !~ /^emulator-/ && $2=="offline" {c++} END{print c+0}')"
+          echo "ADB_EMULATOR_AUTHORIZED_COUNT=$emulator"
+          echo "ADB_PHYSICAL_AUTHORIZED_COUNT=$authorized"
+          echo "ADB_PHYSICAL_UNAUTHORIZED_COUNT=$unauthorized"
+          echo "ADB_PHYSICAL_OFFLINE_COUNT=$offline"
+          echo PHYSICAL_USB_DIAGNOSTIC_COMPLETE=1
