@@ -25,6 +25,12 @@ jobs:
           adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"
           test -x "$adb"
 
+          # Confirm the ADB mDNS discovery engine itself is available. Print classification only.
+          mdns_check="$($adb mdns check 2>&1 | tr -d '\r' || true)"
+          mdns_engine=0
+          if printf '%s' "$mdns_check" | grep -Eqi 'version|mdns.*(available|running)|openscreen|bonjour'; then mdns_engine=1; fi
+          echo "ADB_MDNS_ENGINE_AVAILABLE=$mdns_engine"
+
           # Refresh mDNS discovery only; never print service names, IPs, ports, serials or hardware IDs.
           mdns="$($adb mdns services 2>/dev/null | tr -d '\r' || true)"
           connect_count="$(printf '%s\n' "$mdns" | awk '/_adb-tls-connect\._tcp/ {c++} END{print c+0}')"
@@ -55,6 +61,8 @@ jobs:
 
           if [ "$physical_ok" -gt 0 ]; then
             echo PHYSICAL_WIRELESS_ADB_RECOVERED=1
+          elif [ "$mdns_engine" -ne 1 ]; then
+            echo PHYSICAL_WIRELESS_ADB_DISCOVERY=ENGINE_UNAVAILABLE
           elif [ "$connect_count" -eq 0 ] && [ "$pairing_count" -eq 0 ]; then
             echo PHYSICAL_WIRELESS_ADB_DISCOVERY=NONE
           elif [ "$pairing_count" -gt 0 ] && [ "$connect_count" -eq 0 ]; then
