@@ -29,17 +29,19 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Apply exact product patch
+      - name: Apply exact product patch and refresh proven regression assertions
         shell: bash
         run: |
           set -euo pipefail
           python3 .github/scripts/v155-product-patch.py
+          python3 .github/scripts/refresh-proven-android-regressions.py
           git diff --check
           grep -q 'btn-extracted-posts-home' src/screens/RadarHomeScreen.tsx
           grep -q 'data-extracted-video' src/components/ExtractedPostsModal.tsx
           grep -q 'INCOMPLETE_SOURCE_METADATA' src/components/AddSourceModal.tsx
           grep -q 'includeMedia' src/connectors/deviceSessionConnector.ts
           grep -q 'ForegroundWebViewHost.attachIfPossible' android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSourceMetadataResolver.java
+          grep -q 'SURFACE_FALLBACK_ATTEMPT\\s\*=\\s\*20' server/tests/architectureRegression.test.ts || grep -q 'SURFACE_FALLBACK_ATTEMPT.*20' server/tests/architectureRegression.test.ts
           echo PRODUCT_PATCH_GATE=PASS
 
       - name: Install dependencies if needed
@@ -64,7 +66,15 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/connectors/deviceSessionConnector.ts src/components/AddSourceModal.tsx src/components/ExtractedPostsModal.tsx src/screens/RadarHomeScreen.tsx android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSourceMetadataResolver.java android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSocialSessionPlugin.java
+          git add \
+            src/connectors/deviceSessionConnector.ts \
+            src/components/AddSourceModal.tsx \
+            src/components/ExtractedPostsModal.tsx \
+            src/screens/RadarHomeScreen.tsx \
+            android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSourceMetadataResolver.java \
+            android/app/src/main/java/com/mrscrap/socialradar/AuthenticatedSocialSessionPlugin.java \
+            server/tests/androidPhysicalRegression.test.ts \
+            server/tests/architectureRegression.test.ts
           git diff --cached --check
           git diff --cached --quiet && { echo 'NO_PRODUCT_CHANGES=1'; exit 1; }
           git commit -m 'fix: show extracted media and require real source identity'
