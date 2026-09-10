@@ -2,6 +2,7 @@ import { Capacitor, registerPlugin } from '@capacitor/core';
 import { Source, WatchRule, AlertMatch, NormalizedPost, ConnectorStatus, ConnectorType, SourcePlatform } from '../types';
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
+const DEFAULT_ANDROID_API_BASE_URL = 'https://mr-scrap-api-live.onrender.com';
 const DEVICE_AUTH_STORAGE_KEY = 'mrscrap_backend_device_auth_v1';
 
 interface NativeBackendAuthPlugin {
@@ -46,16 +47,21 @@ function isNativeAndroid(): boolean {
   return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
 }
 
+function resolvedApiBaseUrl(): string {
+  return API_BASE_URL || (isNativeAndroid() ? DEFAULT_ANDROID_API_BASE_URL : '');
+}
+
 export function getApiBaseUrl(): string {
-  return API_BASE_URL;
+  return resolvedApiBaseUrl();
 }
 
 function apiUrl(path: string): string {
   if (!path.startsWith('/')) path = `/${path}`;
-  if (isNativeAndroid() && !API_BASE_URL) {
-    throw new Error('Android build is missing VITE_API_BASE_URL. Rebuild the app with the public HTTPS backend origin.');
+  const baseUrl = resolvedApiBaseUrl();
+  if (isNativeAndroid() && !baseUrl) {
+    throw new Error('Android build is missing a public HTTPS backend origin.');
   }
-  return `${API_BASE_URL}${path}`;
+  return `${baseUrl}${path}`;
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -146,7 +152,8 @@ async function clearStoredDeviceAuth(): Promise<void> {
 export async function apiGetAuthSession(): Promise<AppAuthSessionResponse> {
   if (authSessionPromise) return authSessionPromise;
   const controller = new AbortController();
-  const timeout = globalThis.setTimeout(() => controller.abort(), 6_000);
+  const timeoutMs = isNativeAndroid() ? 15_000 : 6_000;
+  const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
   authSessionPromise = requestJson<AppAuthSessionResponse>('/api/auth/me', { signal: controller.signal })
     .catch(error => {
       if (error instanceof ApiRequestError && error.status === 401) {

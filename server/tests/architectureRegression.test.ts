@@ -69,6 +69,16 @@ test('a successful empty initial device scan still updates source health', () =>
   assert.match(radar, /apiIngestDevicePosts\(persistedSource\.id, posts, locale\)/);
 });
 
+test('native Android bootstrap has a deterministic public API origin and retries one transient cold-start failure', () => {
+  const api = read('src/services/api.ts');
+  const radar = read('src/context/RadarContext.tsx');
+  assert.match(api, /DEFAULT_ANDROID_API_BASE_URL = 'https:\/\/mr-scrap-api-live\.onrender\.com'/);
+  assert.match(api, /API_BASE_URL \|\| \(isNativeAndroid\(\) \? DEFAULT_ANDROID_API_BASE_URL : ''\)/);
+  assert.match(api, /isNativeAndroid\(\) \? 15_000 : 6_000/);
+  assert.match(radar, /loadDatabaseState = async \(attempt: number = 0\)/);
+  assert.match(radar, /if \(attempt < 1\)[\s\S]*loadDatabaseState\(attempt \+ 1\)/);
+});
+
 test('device session status is reconciled after persisted source hydration', () => {
   const radar = read('src/context/RadarContext.tsx');
   assert.match(radar, /await loadDatabaseState\(\);\s*await refreshDeviceSession\(\)/s);
