@@ -4,6 +4,7 @@ import { DeviceSessionConnector } from '../connectors/deviceSessionConnector';
 import { useRadar } from '../context/RadarContext';
 import { NormalizedPost, Source } from '../types';
 import { SourceAvatar } from './SourceAvatar';
+import { apiFetchSources } from '../services/api';
 
 interface ExtractedPostsModalProps { onClose: () => void; }
 
@@ -19,21 +20,35 @@ export const ExtractedPostsModal: React.FC<ExtractedPostsModalProps> = ({ onClos
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sourceFilter, setSourceFilter] = useState<string>('all');
+  const [runtimeSources, setRuntimeSources] = useState<Source[]>(sources);
 
-  const deviceSources = useMemo(() => sources.filter(source => source.connectorType === 'device_session' && !source.isPaused), [sources]);
-  const sourceMap = useMemo(() => new Map(sources.map(source => [source.id, source])), [sources]);
+  useEffect(() => { if (sources.length > 0) setRuntimeSources(sources); }, [sources]);
+  const sourceMap = useMemo(() => new Map(runtimeSources.map(source => [source.id, source])), [runtimeSources]);
 
   const load = useCallback(async () => {
     setLoading(true); setError(null);
     try {
       if (!DeviceSessionConnector.isNativeAvailable()) throw new Error(locale === 'ar' ? 'عرض المنشورات المستخرجة متاح داخل تطبيق Android.' : 'Extracted posts are available in the Android app.');
       const status = await DeviceSessionConnector.getLocalSession();
-      const eligible = deviceSources.filter(source => DeviceSessionConnector.isPlatformConnected(status, source.platform));
+      let availableSources = sources;
+      try {
+        const fresh = await apiFetchSources();
+        if (Array.isArray(fresh) && fresh.length > 0) availableSources = fresh;
+      } catch { /* use hydrated context as a fallback */ }
+      if (availableSources.length === 0) {
+        await new Promise(resolve => window.setTimeout(resolve, 800));
+        try {
+          const retry = await apiFetchSources();
+          if (Array.isArray(retry) && retry.length > 0) availableSources = retry;
+        } catch { /* final fallback remains the context snapshot */ }
+      }
+      setRuntimeSources(availableSources);
+      const eligible = availableSources.filter(source => source.connectorType === 'device_session' && !source.isPaused && DeviceSessionConnector.isPlatformConnected(status, source.platform));
       if (eligible.length === 0) throw new Error(locale === 'ar' ? 'اربط Facebook أو Instagram للمصادر المطلوبة أولًا.' : 'Connect Facebook or Instagram for the monitored sources first.');
       const collected: NormalizedPost[] = [];
       for (const source of eligible) {
         try {
-          const rows = await connector.fetchLatest(source, 10, { commentsMode: 'none', includeMedia: true });
+          const rows = await connector.fetchLatest(source, 10, { commentsMode: 'none' });
           collected.push(...rows);
         } catch (sourceError) {
           console.warn(`[ExtractedPosts] Collection failed for ${source.id}`, sourceError);
@@ -47,12 +62,12 @@ export const ExtractedPostsModal: React.FC<ExtractedPostsModalProps> = ({ onClos
       setPosts([]);
       setError(loadError instanceof Error ? loadError.message : (locale === 'ar' ? 'تعذر استخراج المنشورات.' : 'Could not extract posts.'));
     } finally { setLoading(false); }
-  }, [connector, deviceSources, locale]);
+  }, [connector, sources, locale]);
 
   useEffect(() => { void load(); }, [load]);
 
   const visible = sourceFilter === 'all' ? posts : posts.filter(post => post.sourceId === sourceFilter);
-  const sourcesWithPosts = deviceSources.filter(source => posts.some(post => post.sourceId === source.id));
+  const sourcesWithPosts = runtimeSources.filter(source => source.connectorType === 'device_session' && posts.some(post => post.sourceId === source.id));
   const displaySource = (post: NormalizedPost): Source | undefined => sourceMap.get(post.sourceId);
 
   return (

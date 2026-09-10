@@ -76,6 +76,13 @@ test('device session status is reconciled after persisted source hydration', () 
   assert.match(radar, /connectorStatus:[\s\S]*'authenticated_monitoring'[\s\S]*'needs_relogin'/);
 });
 
+test('persisted device sources with placeholder identity are visibly enriched from the authenticated device session', () => {
+  const radar = read('src/context/RadarContext.tsx');
+  assert.match(radar, /sourceNeedsVisibleMetadata/);
+  assert.match(radar, /deviceConnector\.resolveSource\(\{ url: source\.url \}\)/);
+  assert.match(radar, /void enrichVisibleSourceMetadata\(hydratedSources\)/);
+});
+
 test('PostgreSQL match conflicts return the persisted winner instead of the losing candidate', () => {
   const database = read('server/db/database.ts');
   assert.match(database, /ON CONFLICT \(rule_id, post_id\) DO NOTHING RETURNING \*/);
@@ -167,6 +174,8 @@ test('metadata resolver can recover the source profile from a shared post URL', 
   assert.match(resolver, /rawMetaTitle\.match/);
   assert.match(resolver, /profileUrl/);
   assert.match(resolver, /profileImage/);
+  assert.match(resolver, /hasRealDisplayName/);
+  assert.match(resolver, /webView\.loadUrl\(preferDesktopFacebookUrl\(sourceUrl\)\)/);
 });
 
 test('alpha brand configuration does not advertise unimplemented paid capabilities', () => {
@@ -226,7 +235,17 @@ test('on-demand authenticated detail collection supports bounded comments and me
   assert.match(extractor, /Math\.min\(200/);
   assert.match(connector, /commentsMode/);
   assert.match(connector, /maxDetailedPosts = commentsMode === 'all' \? 5 : 20/);
+  assert.match(connector, /successfulDetails === 0 && commentsMode !== 'none'/);
   assert.doesNotMatch(collector, /getCookie\(|document\.cookie|CookieManager.*getCookie/);
+});
+
+test('extracted posts modal refreshes persisted sources and renders feed media without blocking on detail pages', () => {
+  const modal = read('src/components/ExtractedPostsModal.tsx');
+  assert.match(modal, /apiFetchSources/);
+  assert.match(modal, /fetchLatest\(source, 10, \{ commentsMode: 'none' \}\)/);
+  assert.match(modal, /data-extracted-image=\"1\"/);
+  assert.match(modal, /data-extracted-video=\"1\"/);
+  assert.doesNotMatch(modal, /includeMedia: true/);
 });
 
 test('Smart Grab forwards transient comments to AI without turning them into monitoring alerts', () => {
