@@ -10,3 +10,11 @@ coverage/
 android/.gradle/
 android/local.properties
 android/app/build/
+
+# Signing/provider material must not be newly committed.
+# The already-tracked alpha test keystore on the validation lane remains tracked
+# only for sideload signature continuity and must not be promoted to main.
+*.jks
+*.keystore
+google-services.json
+key.properties
