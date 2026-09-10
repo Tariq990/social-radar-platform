@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - test/android-headless-emulator-20260909
+    paths-ignore:
+      - '.github/workflows/**'
   workflow_dispatch:
 
 permissions:
