@@ -1,0 +1,77 @@
+name: Android Physical USB Driver Probe
+
+on:
+  push:
+    branches: [test/android-headless-emulator-20260909]
+    paths: [.github/workflows/android-physical-usb-driver-probe.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrap-app-android-live-emulator
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 5
+    steps:
+      - name: Probe Windows USB and Android driver visibility without identifiers
+        shell: bash
+        run: |
+          set -euo pipefail
+          win_user="$(/mnt/c/Windows/System32/cmd.exe /d /c echo %USERNAME% 2>/dev/null | tr -d '\r' | tail -n1)"
+          adb="/mnt/c/Users/${win_user}/AppData/Local/MRSCRAP/AndroidSdk/platform-tools/adb.exe"
+          test -s "$adb"
+
+          out="$RUNNER_TEMP/mrscrap-adb-usb-probe.txt"
+          "$adb" devices 2>/dev/null | tr -d '\r' > "$out"
+          authorized="$(awk '$1 !~ /^emulator-/ && $2=="device" {n++} END{print n+0}' "$out")"
+          unauthorized="$(awk '$1 !~ /^emulator-/ && $2=="unauthorized" {n++} END{print n+0}' "$out")"
+          offline="$(awk '$1 !~ /^emulator-/ && $2=="offline" {n++} END{print n+0}' "$out")"
+          emulator="$(awk '$1 ~ /^emulator-/ && $2=="device" {n++} END{print n+0}' "$out")"
+
+          ps1="/mnt/c/Users/${win_user}/AppData/Local/Temp/mrscrap-physical-usb-driver-probe.ps1"
+          cat > "$ps1" <<'PS'
+          $ErrorActionPreference='Stop'
+          $present=@(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue)
+          $android=@($present | Where-Object {
+            $_.Class -match 'Android|ADB' -or
+            [string]$_.FriendlyName -match '(?i)android|adb interface|bootloader interface'
+          })
+          $portable=@($present | Where-Object {
+            $_.Class -match 'WPD|Portable' -or
+            [string]$_.FriendlyName -match '(?i)mtp|portable device'
+          })
+          $androidOk=@($android | Where-Object {$_.Status -eq 'OK'})
+          $androidProblem=@($android | Where-Object {$_.Status -ne 'OK'})
+          $portableOk=@($portable | Where-Object {$_.Status -eq 'OK'})
+          $usbProblem=@($present | Where-Object {$_.Class -eq 'USB' -and $_.Status -ne 'OK'})
+          Write-Output ('PNP_ANDROID_PRESENT='+$android.Count)
+          Write-Output ('PNP_ANDROID_OK='+$androidOk.Count)
+          Write-Output ('PNP_ANDROID_PROBLEM='+$androidProblem.Count)
+          Write-Output ('PNP_PORTABLE_PRESENT='+$portable.Count)
+          Write-Output ('PNP_PORTABLE_OK='+$portableOk.Count)
+          Write-Output ('PNP_USB_PROBLEM='+$usbProblem.Count)
+          PS
+          pnp="$(/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" | tr -d '\r')"
+          rm -f "$ps1"
+
+          echo "PHYSICAL_ADB_AUTHORIZED=$authorized"
+          echo "PHYSICAL_ADB_UNAUTHORIZED=$unauthorized"
+          echo "PHYSICAL_ADB_OFFLINE=$offline"
+          echo "EMULATOR_ADB_AUTHORIZED=$emulator"
+          printf '%s\n' "$pnp"
+          if [ "$authorized" -gt 0 ]; then
+            echo PHYSICAL_PATH=ADB_READY
+          elif [ "$unauthorized" -gt 0 ]; then
+            echo PHYSICAL_PATH=ADB_UNAUTHORIZED
+          elif [ "$offline" -gt 0 ]; then
+            echo PHYSICAL_PATH=ADB_OFFLINE
+          elif printf '%s\n' "$pnp" | grep -Eq 'PNP_ANDROID_PRESENT=[1-9][0-9]*|PNP_PORTABLE_PRESENT=[1-9][0-9]*'; then
+            echo PHYSICAL_PATH=USB_VISIBLE_ADB_MISSING
+          else
+            echo PHYSICAL_PATH=NO_ANDROID_USB_EVIDENCE
+          fi
