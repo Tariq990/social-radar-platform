@@ -65,6 +65,25 @@ test('Android updater validates bounded metadata and pins APK downloads to the b
   assert.ok(update.includes("url.origin !== backendOrigin.origin || url.protocol !== 'https:'"));
 });
 
+test('Android login WebViews reject non-HTTPS navigation and disable local content access', () => {
+  for (const file of [
+    'android/app/src/main/java/com/mrscrap/socialradar/FacebookSessionActivity.java',
+    'android/app/src/main/java/com/mrscrap/socialradar/InstagramSessionActivity.java'
+  ]) {
+    const activity = read(file);
+    assert.match(activity, /if \(!"https"\.equalsIgnoreCase\(scheme\)\) return true;/);
+    assert.match(activity, /settings\.setAllowFileAccess\(false\)/);
+    assert.match(activity, /settings\.setAllowContentAccess\(false\)/);
+    assert.match(activity, /settings\.setMixedContentMode\(WebSettings\.MIXED_CONTENT_NEVER_ALLOW\)/);
+    assert.match(activity, /WebView\.setWebContentsDebuggingEnabled\(false\)/);
+  }
+
+  const manifest = read('android/app/src/main/AndroidManifest.xml');
+  assert.match(manifest, /android:usesCleartextTraffic="false"/);
+  assert.match(manifest, /android:name="\.FacebookSessionActivity"[\s\S]*android:exported="false"/);
+  assert.match(manifest, /android:name="\.InstagramSessionActivity"[\s\S]*android:exported="false"/);
+});
+
 test('device ingestion and explore persistence upgrade cleartext media and strip secret-shaped metadata', () => {
   for (const file of ['server/worker/deviceIngestion.ts', 'server/worker/deviceExplore.ts']) {
     const source = read(file);
