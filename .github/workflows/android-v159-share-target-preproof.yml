@@ -46,13 +46,14 @@ jobs:
           function Target { for($i=0;$i-lt 120;$i++){try{$rows=@(Invoke-RestMethod -Uri "http://127.0.0.1:$Port/json/list" -TimeoutSec 2);$hits=@($rows|Where-Object{$_.type-eq'page'-and[string]$_.url-like'https://localhost*'});if($hits.Count-gt 0){return $hits[0]}}catch{};Start-Sleep -Milliseconds 250};throw 'app target missing'}
           function Eval([string]$expr,[int]$seconds=90){$t=Target;$raw=[string](@($t)[0].webSocketDebuggerUrl);$u=[Uri]$raw;$ws=[System.Net.WebSockets.ClientWebSocket]::new();$cts=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($seconds));$ws.ConnectAsync([Uri]("ws://127.0.0.1:$Port"+$u.PathAndQuery),$cts.Token).GetAwaiter().GetResult()|Out-Null;$p=@{id=1;method='Runtime.evaluate';params=@{expression=$expr;returnByValue=$true;awaitPromise=$true}}|ConvertTo-Json -Compress -Depth 10;$b=[Text.Encoding]::UTF8.GetBytes($p);$ws.SendAsync([ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$cts.Token).GetAwaiter().GetResult()|Out-Null;$buf=New-Object byte[] 131072;$sb=[Text.StringBuilder]::new();while($true){$r=$ws.ReceiveAsync([ArraySegment[byte]]::new($buf),$cts.Token).GetAwaiter().GetResult();[void]$sb.Append([Text.Encoding]::UTF8.GetString($buf,0,$r.Count));if(!$r.EndOfMessage){continue};$m=$sb.ToString()|ConvertFrom-Json;$sb.Clear()|Out-Null;if($m.id-ne 1){continue};if($m.result.exceptionDetails){throw 'runtime eval exception'};return $m.result.result.value}}
           if($Action-eq'cold'){$r=Eval "(()=>({modal:Boolean(document.querySelector('#modal-add-source'))}))()";Write-Output ('COLD_START_ADD_SOURCE_MODAL='+$(if($r.modal){'1'}else{'0'}));if(!$r.modal){exit 252};exit 0}
-          if($Action-eq'arm'){$r=Eval "(()=>{window.__mrscrapShareProbe=[];if(!window.__mrscrapShareProbeInstalled){window.addEventListener('mrscrap:share',e=>{const t=e?.detail?.text;window.__mrscrapShareProbe.push(typeof t==='string'?t:'')});window.__mrscrapShareProbeInstalled=true}return true})()";Write-Output SHARE_EVENT_OBSERVER_ARMED=1;exit 0}
+          if($Action-eq'arm'){$null=Eval "(()=>{window.__mrscrapShareProbe=[];if(!window.__mrscrapShareProbeInstalled){window.addEventListener('mrscrap:share',e=>{const t=e?.detail?.text;window.__mrscrapShareProbe.push(typeof t==='string'?t:'')});window.__mrscrapShareProbeInstalled=true}return true})()";Write-Output SHARE_EVENT_OBSERVER_ARMED=1;exit 0}
+          if($Action-eq'reset'){$r=Eval "(()=>{const modal=document.querySelector('#modal-add-source');const close=modal?.querySelector('button');if(close)close.click();try{sessionStorage.removeItem('mrscrap_pending_share')}catch{};window.__mrscrapShareProbe=[];return{closed:Boolean(close)}})()";Write-Output ('SHARE_PROBE_MODAL_CLOSED='+$(if($r.closed){'1'}else{'0'}));exit 0}
           if($Action-eq'cleanup'){$null=Eval "(()=>{try{sessionStorage.removeItem('mrscrap_pending_share')}catch{};window.__mrscrapShareProbe=[];return true})()";exit 0}
           $expected=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($ExpectedB64));$q=$expected|ConvertTo-Json -Compress
           $expr="(()=>{const expected=$q,a=Array.isArray(window.__mrscrapShareProbe)?window.__mrscrapShareProbe:[],text=a.length?a[a.length-1]:'';const modal=Boolean(document.querySelector('#modal-add-source'));const input=document.querySelector('#input-source-url');const value=input&&typeof input.value==='string'?input.value:'';const exact=text===expected;let identity=true;try{const e=new URL(expected),x=new URL(text);for(const k of ['story_fbid','id','fbid']){if(e.searchParams.has(k)&&x.searchParams.get(k)!==e.searchParams.get(k))identity=false}}catch{identity=false}return{exact,identity,modal,count:a.length,inputExact:!input||value===expected}})()"
           $r=Eval $expr 90
           Write-Output ($Label+'_EVENT_CAPTURED_EXACT='+$(if($r.exact){'1'}else{'0'}));Write-Output ($Label+'_IDENTITY_QUERY_PRESERVED='+$(if($r.identity){'1'}else{'0'}));Write-Output ($Label+'_ADD_SOURCE_MODAL='+$(if($r.modal){'1'}else{'0'}));Write-Output ($Label+'_INPUT_EXACT_OR_RESOLVING='+$(if($r.inputExact){'1'}else{'0'}));Write-Output ($Label+'_EVENT_COUNT='+[int]$r.count)
-          if(!$r.exact -or !$r.identity -or !$r.modal -or !$r.inputExact){exit 253}
+          if(!$r.exact -or !$r.identity -or !$r.modal -or !$r.inputExact -or [int]$r.count-ne 1){exit 253}
           PS
 
           page='https://www.facebook.com/NASA/'
@@ -71,6 +72,8 @@ jobs:
 
           probe_warm() {
             label="$1"; url="$2"
+            /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps1")" -Port 9251 -Action reset | tr -d '\r'
+            sleep 2
             "$adb" -s "$serial" shell am start -W -a android.intent.action.SEND -t text/plain --es android.intent.extra.TEXT "$url" -n "$PKG/.MainActivity" >/dev/null
             sleep 2
             b64="$(printf '%s' "$url" | base64 -w0)"
