@@ -10,6 +10,48 @@ import {
   RuleSuggestionInput
 } from './types';
 
+function sanitizeExtracted(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const blocked = ['cookie', 'cookies', 'password', 'passwd', 'session', 'sessionid', 'token', 'access_token', 'authorization'];
+  const output: Record<string, unknown> = {};
+  let kept = 0;
+
+  for (const [rawKey, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (kept >= 32) break;
+    const key = rawKey.trim().slice(0, 80);
+    if (!key || blocked.some(part => key.toLowerCase().includes(part))) continue;
+
+    if (typeof entry === 'string') {
+      output[key] = entry.slice(0, 1000);
+      kept++;
+      continue;
+    }
+    if (typeof entry === 'number' && Number.isFinite(entry)) {
+      output[key] = entry;
+      kept++;
+      continue;
+    }
+    if (typeof entry === 'boolean' || entry === null) {
+      output[key] = entry;
+      kept++;
+      continue;
+    }
+    if (Array.isArray(entry)) {
+      const compact = entry.slice(0, 20).flatMap(item => {
+        if (typeof item === 'string') return [item.slice(0, 500)];
+        if (typeof item === 'number' && Number.isFinite(item)) return [item];
+        if (typeof item === 'boolean' || item === null) return [item];
+        return [];
+      });
+      if (compact.length > 0) {
+        output[key] = compact;
+        kept++;
+      }
+    }
+  }
+  return output;
+}
+
 function assertRuleMatchResult(value: any): RuleMatchResult {
   if (!value || typeof value !== 'object') throw new Error('AI response must be an object');
   if (typeof value.matched !== 'boolean') throw new Error('AI response matched must be boolean');
@@ -21,7 +63,7 @@ function assertRuleMatchResult(value: any): RuleMatchResult {
     confidence: Math.max(0, Math.min(1, value.confidence)),
     category: value.category.trim().slice(0, 100),
     reason: value.reason.trim().slice(0, 1500),
-    extracted: value.extracted && typeof value.extracted === 'object' && !Array.isArray(value.extracted) ? value.extracted : {}
+    extracted: sanitizeExtracted(value.extracted)
   };
 }
 
