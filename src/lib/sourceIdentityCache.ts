@@ -21,7 +21,9 @@ function safeAvatarUrl(value?: string): string {
   if (!value?.trim()) return '';
   try {
     const parsed = new URL(value.trim());
-    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.toString() : '';
+    if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+    if (parsed.protocol === 'http:') parsed.protocol = 'https:';
+    return parsed.toString();
   } catch {
     return '';
   }
