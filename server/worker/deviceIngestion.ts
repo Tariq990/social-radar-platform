@@ -32,6 +32,7 @@ function safeHttpUrl(value: unknown, maxLength: number = 4096): string | undefin
   try {
     const parsed = new URL(value.trim());
     if (!['http:', 'https:'].includes(parsed.protocol)) return undefined;
+    if (parsed.protocol === 'http:') parsed.protocol = 'https:';
     return parsed.toString().slice(0, maxLength);
   } catch {
     return undefined;
@@ -41,10 +42,13 @@ function safeHttpUrl(value: unknown, maxLength: number = 4096): string | undefin
 function sanitizeMedia(value: unknown): { type: 'image' | 'video'; url: string }[] {
   if (!Array.isArray(value)) return [];
   const result: { type: 'image' | 'video'; url: string }[] = [];
+  const seen = new Set<string>();
   for (const item of value.slice(0, 20)) {
     if (!item || (item.type !== 'image' && item.type !== 'video')) continue;
     const url = safeHttpUrl(item.url);
-    if (url) result.push({ type: item.type, url });
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    result.push({ type: item.type, url });
   }
   return result;
 }
@@ -52,7 +56,7 @@ function sanitizeMedia(value: unknown): { type: 'image' | 'video'; url: string }
 function sanitizeMetadata(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   const input = value as Record<string, unknown>;
-  const blocked = ['cookie', 'cookies', 'password', 'passwd', 'session', 'sessionid', 'xs', 'c_user', 'token', 'access_token'];
+  const blocked = ['cookie', 'cookies', 'password', 'passwd', 'session', 'sessionid', 'xs', 'c_user', 'token', 'access_token', 'authorization'];
   const result: Record<string, unknown> = {};
 
   for (const [key, entry] of Object.entries(input)) {
@@ -186,18 +190,27 @@ async function evaluateAndPersistMatches(
 
       knownMatchKeys.add(matchKey);
       match.source_name = source.name;
-      match.source_avatar = source.avatar_url;
+      match.source_avatar = safeHttpUrl(source.avatar_url);
       match.source_platform = source.platform;
       match.rule_name = rule.name;
       match.post = post;
       result.matchesCreated.push(match);
 
-      await notificationService.dispatchMatchNotification(match);
+      try {
+        await notificationService.dispatchMatchNotification(match);
+      } catch {
+        await db.logConnectorEvent(
+          source.id,
+          'notification',
+          'error',
+          'Match persisted but in-app notification persistence failed.'
+        ).catch(() => {});
+      }
     } catch (error: any) {
       result.evaluationErrors.push({
         postId: post.id,
         ruleId: rule.id,
-        error: error?.message || 'AI evaluation failed'
+        error: String(error?.message || 'AI evaluation failed').slice(0, 500)
       });
     }
   }
@@ -231,13 +244,10 @@ export async function ingestDevicePosts(
   }
 
   const incoming = posts.slice(0, 50);
-  // Source onboarding can deliberately move ahead after a short resolver budget so the user is
-  // never stuck behind Meta's lazy DOM. The first successful authenticated collection therefore
-  // doubles as a trusted metadata repair pass for placeholder @handles and missing avatars.
   source = await healSourceMetadataFromPosts(source, incoming);
   result.sourceMetadata = {
     displayName: source.name,
-    avatarUrl: source.avatar_url,
+    avatarUrl: safeHttpUrl(source.avatar_url),
     handle: source.handle
   };
 
@@ -279,8 +289,8 @@ export async function ingestDevicePosts(
       platform: source.platform,
       external_id: externalId,
       canonical_url: canonicalUrl,
-      author_name: typeof raw.authorName === 'string' ? raw.authorName.slice(0, 255) : source.name,
-      author_avatar: safeHttpUrl(raw.authorAvatar) || source.avatar_url,
+      author_name: typeof raw.authorName === 'string' && raw.authorName.trim() ? raw.authorName.trim().slice(0, 255) : source.name,
+      author_avatar: safeHttpUrl(raw.authorAvatar) || safeHttpUrl(source.avatar_url),
       text,
       media: sanitizeMedia(raw.media),
       published_at: sanitizePublishedAt(raw.publishedAt),
