@@ -109,7 +109,7 @@ Compare the output with the digest in `MR-SCRAP-android-alpha.apk.sha256`.
 
 ## 4. Alpha is not production
 
-The current alpha APK is a **debug build** signed with a dedicated alpha key materialized from GitHub Actions secrets.
+The current alpha APK is a **debug build** using Android's standard debug signing. The pre-publication repository alpha key is retired and is not used by current builds.
 
 It must not be presented as:
 
@@ -145,9 +145,9 @@ A future production release workflow should require all of the following before 
 
 ## 6. Signing keys
 
-Do not commit signing material to the repository. The alpha workflow reads its dedicated signing key and passwords from GitHub Actions secrets and materializes the keystore only on the runner.
+Do not commit signing material to the repository. Current alpha/debug builds use standard Android debug signing only.
 
-Production signing must use a separate key and secret set from the alpha channel.
+The pre-publication alpha signing key is retired and must not be trusted for current or future distribution. Production signing must use a separate protected key and release process.
 
 Future release signing secrets should be stored in an appropriate CI secret manager/GitHub Actions secrets and materialized only during the release job.
 

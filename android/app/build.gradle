@@ -1,13 +1,5 @@
 apply plugin: 'com.android.application'
 
-def alphaKeystorePath = System.getenv('ANDROID_ALPHA_KEYSTORE_PATH')
-def alphaStorePassword = System.getenv('ANDROID_ALPHA_STORE_PASSWORD')
-def alphaKeyAlias = System.getenv('ANDROID_ALPHA_KEY_ALIAS')
-def alphaKeyPassword = System.getenv('ANDROID_ALPHA_KEY_PASSWORD')
-def alphaSigningConfigured = [alphaKeystorePath, alphaStorePassword, alphaKeyAlias, alphaKeyPassword].every {
-    it != null && !it.trim().isEmpty()
-}
-
 android {
     namespace = 'com.mrscrap.socialradar'
     compileSdk = rootProject.ext.compileSdkVersion
@@ -24,24 +16,9 @@ android {
         }
     }
 
-    signingConfigs {
-        if (alphaSigningConfigured) {
-            alphaDebug {
-                // Alpha-only material is supplied at build time from CI/local environment.
-                // Production/Play Store signing must use a separate key and release process.
-                storeFile file(alphaKeystorePath)
-                storePassword alphaStorePassword
-                keyAlias alphaKeyAlias
-                keyPassword alphaKeyPassword
-            }
-        }
-    }
-
     buildTypes {
         debug {
-            if (alphaSigningConfigured) {
-                signingConfig signingConfigs.alphaDebug
-            }
+            // Uses the standard ephemeral Android debug signing key.
         }
         release {
             minifyEnabled false
