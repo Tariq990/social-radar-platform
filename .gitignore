@@ -10,3 +10,7 @@ coverage/
 android/.gradle/
 android/local.properties
 android/app/build/
+*.keystore
+*.jks
+*.p12
+*.pfx

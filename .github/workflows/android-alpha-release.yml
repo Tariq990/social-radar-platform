@@ -28,6 +28,10 @@ jobs:
       VITE_API_BASE_URL: ${{ inputs.backend_base_url || vars.ALPHA_API_BASE_URL || 'https://mr-scrap-api-live.onrender.com' }}
       ANDROID_VERSION_CODE: ${{ github.run_number }}
       ANDROID_VERSION_NAME: 0.1.${{ github.run_number }}
+      ANDROID_ALPHA_KEYSTORE_B64: ${{ secrets.ANDROID_ALPHA_KEYSTORE_B64 }}
+      ANDROID_ALPHA_STORE_PASSWORD: ${{ secrets.ANDROID_ALPHA_STORE_PASSWORD }}
+      ANDROID_ALPHA_KEY_ALIAS: ${{ secrets.ANDROID_ALPHA_KEY_ALIAS }}
+      ANDROID_ALPHA_KEY_PASSWORD: ${{ secrets.ANDROID_ALPHA_KEY_PASSWORD }}
 
     steps:
       - name: Checkout
@@ -86,6 +90,21 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.13'
+
+      - name: Materialize alpha signing key
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in ANDROID_ALPHA_KEYSTORE_B64 ANDROID_ALPHA_STORE_PASSWORD ANDROID_ALPHA_KEY_ALIAS ANDROID_ALPHA_KEY_PASSWORD; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Required alpha signing secret is not configured: $name"
+              exit 1
+            fi
+          done
+          key_path="$RUNNER_TEMP/mr-scrap-alpha.keystore"
+          printf '%s' "$ANDROID_ALPHA_KEYSTORE_B64" | base64 --decode > "$key_path"
+          chmod 600 "$key_path"
+          echo "ANDROID_ALPHA_KEYSTORE_PATH=$key_path" >> "$GITHUB_ENV"
 
       - name: Build Android debug APK
         run: gradle -p android :app:assembleDebug --stacktrace
