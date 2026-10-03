@@ -1,92 +1,118 @@
-# MR SCRAP — Personal Social Radar
+# Social Radar Platform
 
-MR SCRAP monitors selected Facebook/Instagram sources and alerts the user only when a post matches a natural-language watch rule.
+**MR SCRAP** is a full-stack social monitoring application for watching selected Facebook and Instagram sources and evaluating new content against natural-language rules.
 
-> **Core promise:** Share once → Watch automatically → Get alerted only when something you care about happens.
+The repository combines a React product UI, an Express/PostgreSQL backend, tenant-scoped authentication, provider-neutral AI evaluation, and a Capacitor Android client that keeps authenticated social-session state on the device.
 
-## Current status
+> **Current status:** alpha / production-architecture implementation. The software has substantial automated coverage and a real web/API/Android architecture, but physical-device social-session acceptance and several launch gates remain intentionally open.
 
-This repository is in **alpha / production-architecture implementation**. The current `main` branch contains the hardened web/API/Android architecture. Physical Android Facebook-session acceptance and the final launch gates remain explicitly open.
+## What this project demonstrates
 
-### What is real now
+- End-to-end TypeScript application development across browser, backend, database, and Android layers.
+- React/Vite product UI backed by a real Express API.
+- PostgreSQL persistence with tenant-aware ownership constraints and deduplication.
+- Application authentication using scrypt password hashing and opaque server sessions.
+- Cross-tenant authorization tests for private CRUD and device-ingestion boundaries.
+- A separate Android device credential with hash-only server persistence.
+- AndroidKeyStore-backed protection for the device bearer on-device.
+- Capacitor Android integration, share targets, WebView session handling, and WorkManager background jobs.
+- Provider-neutral AI adapters instead of hard-wiring business logic to one model vendor.
+- Production fail-closed behavior when required database or AI dependencies are missing.
+- Explicit security/trust-boundary documentation and launch-readiness tracking.
 
-- React/Vite application UI.
-- MR SCRAP application signup/login with email/password.
-- Passwords hashed with scrypt and random salt.
-- Opaque application sessions with hash-only server persistence and HttpOnly cookies.
-- Tenant-isolated sources, rules, alerts, scans and device registration.
-- Cross-tenant integration tests proving user B cannot access or mutate user A resources.
-- Capacitor Android project and Android Share Target.
-- Dedicated Facebook WebView login surface.
-- Facebook WebView cookies remain local to Android's `CookieManager`.
-- Android authenticated collector extracts normalized post metadata.
-- WorkManager schedules best-effort background checks.
-- Backend device ingestion uses a user-bound bearer credential; only its SHA-256 digest is stored server-side.
-- Android stores the backend device bearer using AndroidKeyStore-backed AES-GCM.
-- PostgreSQL persistence for users, app sessions, devices, sources, rules, posts, matches, notifications and connector events.
-- Deterministic, race-safe source-scoped post/match deduplication.
-- Provider-neutral AI architecture controlled by the application operator.
-- Production mode does not silently fall back to fake posts/matches/local JSON persistence.
-- The verification workflow typechecks, runs unit/integration tests, bundles web/server, syncs Capacitor, and is configured to compile an Android APK when GitHub-hosted runners are available.
+## Stack
 
-### Not production-ready yet
+| Layer | Technology |
+|---|---|
+| Web UI | React 19, Vite, TypeScript, Tailwind CSS |
+| Backend | Node.js 22, Express, TypeScript |
+| Database | PostgreSQL (`pg`) |
+| Mobile | Capacitor 8, Android, Java 21, WorkManager |
+| Authentication | scrypt passwords, opaque sessions, HttpOnly cookies |
+| AI integration | OpenAI-compatible Chat, Responses API, Gemini-native adapter |
+| Build | TypeScript, Vite, esbuild |
+| Testing | Node test runner via `tsx --test` |
 
-- Facebook WebView login + collector still requires acceptance testing on physical Android hardware.
-- Real FCM/Web Push delivery is not finished; alerts are currently in-app only.
-- Instagram authenticated-session behavior is not independently validated.
-- Meta DOM changes can break local extraction and require maintenance.
-- Email verification/password reset are not implemented yet.
-- Play Store release signing, store metadata/privacy declarations and production release configuration remain outstanding.
-- Production distributed rate limiting/observability is still follow-up work before horizontal scale.
-
-See [`PRODUCTION_STATUS.md`](./PRODUCTION_STATUS.md) for the launch gate and [`docs/SECURITY.md`](./docs/SECURITY.md) for trust boundaries.
-
----
-
-## Architecture
+## Product flow
 
 ```text
-MR SCRAP account
-        │
-        │ authenticated application session
-        ▼
-Tenant-scoped backend APIs
-        │
-        ├─ user-bound Android device credential
-        │
-        ▼
-Facebook / Instagram
-        │
-        │ user-authenticated WebView session (Android only)
-        ▼
-AuthenticatedWebCollector
-        │
-        │ normalized post metadata only
-        ▼
-MR SCRAP Backend
-        │
-        ├─ PostgreSQL persistence
-        ├─ deterministic dedupe
-        ├─ rule selection
-        ▼
-Operator-configured AI Provider
-        │
-        ▼
-Match
-        │
-        ├─ in-app notification record
-        └─ future FCM/Web Push delivery
+User account
+    |
+    v
+Tenant-scoped web/API session
+    |
+    +--> sources
+    +--> natural-language rules
+    +--> alerts
+    +--> device registration
+            |
+            v
+      Android device
+            |
+            +--> Facebook/Instagram WebView session stays local
+            +--> AuthenticatedWebCollector
+            +--> normalized post metadata
+            |
+            v
+      HTTPS /api/device/ingest
+            |
+            v
+      Express backend
+            |
+            +--> tenant/source authorization
+            +--> validation + sanitization
+            +--> PostgreSQL persistence
+            +--> deterministic deduplication
+            +--> AI rule evaluation
+            +--> durable match/notification records
 ```
 
-The MR SCRAP application session, MR SCRAP backend device bearer and Facebook WebView session are three separate credential boundaries. Raw Facebook passwords and raw Facebook cookies are not part of the backend ingestion contract.
+The application session, Android backend credential, and Facebook WebView session are deliberately separate trust boundaries. Raw Facebook passwords and raw social cookies are not part of the backend ingestion contract.
 
-Detailed design: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
+## Architecture highlights
 
----
+### Tenant isolation
 
-## AI provider configuration
+Private resources are scoped to the authenticated application user. Automated integration coverage exercises negative cases such as one user attempting to list, mutate, bind rules to, or ingest into another user's resources.
 
-The AI provider is configured centrally by the application operator. End users do not enter API keys or choose models.
+### Application authentication
+
+The backend implements:
+
+- normalized email/password registration and login;
+- scrypt password hashing with random salt;
+- opaque random application-session tokens;
+- SHA-256 session-token hashes in PostgreSQL;
+- HttpOnly session cookies;
+- explicit credentialed CORS rules;
+- logout/session revocation.
+
+### Device authentication
+
+Android background ingestion uses a credential distinct from the application cookie and the Facebook session:
+
+1. an authenticated application user registers a device;
+2. the backend generates an opaque device bearer;
+3. only the SHA-256 token digest is stored server-side;
+4. the device row is bound to the authenticated `user_id`;
+5. Android stores the bearer under AndroidKeyStore-backed AES-GCM;
+6. `/api/device/ingest` derives tenant identity from the validated device credential.
+
+### Social-session boundary
+
+For authenticated Facebook monitoring, the social session stays inside the Android WebView/CookieManager boundary. The collector sends normalized post/source metadata to the backend rather than exporting raw session credentials.
+
+The project does not claim to bypass CAPTCHA, access controls, anti-bot systems, or platform restrictions.
+
+### Provider-neutral AI
+
+Business logic talks to an internal AI provider abstraction rather than a vendor-specific SDK. Supported formats are:
+
+- `openai_chat`
+- `openai_responses`
+- `gemini_native`
+
+Example operator configuration:
 
 ```env
 AI_BASE_URL=https://provider.example/v1
@@ -96,17 +122,73 @@ AI_API_FORMAT=openai_chat
 AI_PROVIDER_NAME=Configured AI
 ```
 
-Supported `AI_API_FORMAT` values:
+Remote AI endpoints must use HTTPS in production. Provider failure does not become a fabricated successful match.
 
-- `openai_chat`
-- `openai_responses`
-- `gemini_native`
+## Persistence model
 
-Remote AI endpoints must use HTTPS in production.
+The PostgreSQL implementation includes application entities such as:
 
----
+- users
+- app sessions
+- devices
+- sources
+- rules and rule-source bindings
+- posts
+- matches
+- notifications
+- connector events
 
-## Required production environment
+Important integrity rules include case-insensitive unique application email, unique token hashes, user-scoped source identity, source-scoped post fingerprints, and unique rule/post matches.
+
+## Deduplication
+
+Post identity is resolved in this order:
+
+1. external platform post ID;
+2. canonical social post URL;
+3. normalized content hash fallback.
+
+The persisted fingerprint is source-scoped so identical public content monitored by different users/sources cannot suppress another tenant's processing.
+
+## Repository map
+
+```text
+src/                         React/Vite application
+server.ts                    HTTP/API entry point
+server/
+  auth/                      app and device authentication
+  db/                        PostgreSQL persistence
+  worker/                    ingestion and monitoring workers
+  tests/                     backend/integration regression tests
+android/                     Capacitor Android application
+  app/src/main/              native activities, stores, collectors, workers
+docs/
+  ARCHITECTURE.md            detailed system design
+  SECURITY.md                trust boundaries and known risks
+  ANDROID_ACCEPTANCE_TEST.md physical-device protocol
+  OPERATIONS.md              runtime/deployment checks
+  RELEASES.md                Android release process
+PRODUCTION_STATUS.md         authoritative launch-gate status
+```
+
+## Local development
+
+Requirements:
+
+- Node.js 22
+- PostgreSQL for production-mode persistence paths
+- Android Studio / Java 21 only when building the Android project
+
+Install and run:
+
+```bash
+npm install
+npm run dev
+```
+
+Use `.env.example` as the configuration reference.
+
+### Production-mode essentials
 
 ```env
 APP_MODE=production
@@ -123,26 +205,13 @@ CORS_ALLOWED_ORIGINS=
 ADMIN_API_TOKEN=<long-random-operator-secret>
 ```
 
-For Android builds, compile in the public backend origin:
+For Android builds, the public backend origin is compiled through:
 
 ```env
 VITE_API_BASE_URL=https://api.example.com
 ```
 
-The production Capacitor topology uses an HttpOnly Secure application-session cookie between the bundled `https://localhost` origin and the explicitly allowed hosted HTTPS API origin.
-
-See [`.env.example`](./.env.example).
-
----
-
-## Local development
-
-```bash
-npm install
-npm run dev
-```
-
-Validation:
+## Verification
 
 ```bash
 npm run lint
@@ -150,123 +219,91 @@ npm test
 npm run build
 ```
 
-Or:
+`npm run build` performs TypeScript validation, runs the server test suite, builds the Vite frontend, and bundles the Node server.
 
-```bash
-npm run verify
-```
+The current verified local state includes:
 
-Development/demo mode may use:
+- 46/46 automated tests passing;
+- TypeScript validation passing;
+- Vite production build passing;
+- Node server bundle passing;
+- production dependency audit reporting zero known vulnerabilities at the time of verification.
 
-```env
-APP_MODE=demo
-```
-
-Demo data must remain isolated from production execution paths.
-
----
+Hosted GitHub Actions definitions are present, but account-level runner startup availability is external to this codebase; local test/build results are the current implementation verification source.
 
 ## Android
 
-Build/sync:
+Sync/build the Capacitor project:
 
 ```bash
 npm run android:sync
 npm run android:open
 ```
 
-Debug APK:
+Debug APK path:
 
 ```bash
 npm run android:build:debug
 ```
 
-The Android build must have a real HTTPS `VITE_API_BASE_URL` for end-to-end testing.
+The Android end-to-end flow requires a real HTTPS `VITE_API_BASE_URL` and physical-device testing for WebView/session behavior.
 
-Physical-device test checklist: [`docs/ANDROID_ACCEPTANCE_TEST.md`](./docs/ANDROID_ACCEPTANCE_TEST.md).
+See [`docs/ANDROID_ACCEPTANCE_TEST.md`](./docs/ANDROID_ACCEPTANCE_TEST.md).
 
----
+## Current implementation status
 
-## APKs and releases
+### Implemented and tested in code
 
-### CI artifact
+- React/Vite product UI.
+- Email/password application authentication.
+- Tenant-scoped API authorization.
+- User-bound Android device authentication.
+- Logout/revocation paths.
+- PostgreSQL production persistence.
+- Source/rule/alert CRUD.
+- Source-scoped post and match deduplication.
+- Provider-neutral AI evaluation.
+- Capacitor Android project and share target.
+- Dedicated Facebook WebView login surface.
+- Android local authenticated collector.
+- WorkManager periodic monitoring path.
+- In-app notification persistence.
 
-Every PR verification run compiles a debug APK and uploads it as a short-lived GitHub Actions artifact when the workflow is green.
+### Explicitly not claimed as complete
 
-### Android Alpha Release
+- physical Android Facebook-session acceptance;
+- independently validated Instagram authenticated-session behavior;
+- real FCM/Web Push delivery;
+- email verification and password recovery;
+- Play Store production signing/release;
+- distributed rate limiting/observability for horizontal scale.
 
-`.github/workflows/android-alpha-release.yml` can publish/update a mutable prerelease named:
+The authoritative launch checklist is [`PRODUCTION_STATUS.md`](./PRODUCTION_STATUS.md).
 
-`MR SCRAP Android Alpha`
+## Security model
 
-Tag:
+Key design rules:
 
-`android-alpha`
+- plaintext application passwords are not persisted;
+- server application/device tokens are stored by digest rather than plaintext;
+- social credentials/cookies stay device-local;
+- production PostgreSQL failure is fatal instead of silently falling back to local JSON;
+- production AI credentials are server-only;
+- remote AI providers require TLS;
+- internal AI probe endpoints require operator authorization in production;
+- production code prefers an honest unavailable/empty state over fabricated activity.
 
-The release contains:
+For the detailed threat/trust-boundary discussion, see [`docs/SECURITY.md`](./docs/SECURITY.md).
 
-- `MR-SCRAP-android-alpha.apk`
-- `MR-SCRAP-android-alpha.apk.sha256`
-- `COMMIT_SHA.txt`
+## Known platform risk
 
-For automatic branch publishing, configure:
-
-`ALPHA_API_BASE_URL=https://your-real-backend.example`
-
-The alpha release is intentionally a **debug build**, not a Play Store production release.
-
-Release process: [`docs/RELEASES.md`](./docs/RELEASES.md).
-
----
-
-## Monitoring behavior
-
-Authenticated Android sources use WorkManager. Android controls scheduling; this is best-effort periodic monitoring, not guaranteed exact real-time delivery. The minimum current periodic interval is 15 minutes.
-
-A future foreground-service mode could reduce latency but would require a persistent notification and higher battery usage.
-
----
-
-## Security summary
-
-- MR SCRAP application passwords are scrypt-hashed; plaintext passwords are not persisted.
-- Application sessions use opaque random tokens with hash-only server persistence and HttpOnly cookies.
-- Private CRUD is tenant-scoped and cross-tenant negative tests are part of CI.
-- Android backend device credentials are bound to the authenticated MR SCRAP user.
-- Facebook credentials are entered only into Facebook's real WebView page.
-- Raw Facebook cookies do not leave the Android device.
-- Backend device tokens are hashed server-side.
-- Android stores its backend device token using AndroidKeyStore-backed AES-GCM encryption.
-- App-data backup is disabled for the Android package.
-- Production PostgreSQL failure is fatal; there is no silent JSON fallback.
-- Production AI credentials stay server-side and remote AI endpoints require TLS.
-- Internal AI health/probe routes are protected with `ADMIN_API_TOKEN` in production.
-- The app does not claim to bypass CAPTCHA, access controls or platform restrictions.
-
-The remaining P0 gate is physical Android acceptance of the application-session, Facebook WebView and live collector flows.
-
----
+Authenticated social collection is inherently sensitive to platform behavior. Facebook/Instagram can change login policies, WebView behavior, DOM structure, or access rules. This project treats those conditions as runtime compatibility constraints rather than attempting to evade them.
 
 ## Documentation
 
-- [`PRODUCTION_STATUS.md`](./PRODUCTION_STATUS.md) — current launch gate and blockers
-- [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) — system architecture and data flow
-- [`docs/SECURITY.md`](./docs/SECURITY.md) — security/trust boundaries and known risks
-- [`docs/ANDROID_ACCEPTANCE_TEST.md`](./docs/ANDROID_ACCEPTANCE_TEST.md) — physical-device test protocol
+- [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) — end-to-end architecture and data flow
+- [`docs/SECURITY.md`](./docs/SECURITY.md) — credential boundaries and security properties
+- [`docs/ANDROID_ACCEPTANCE_TEST.md`](./docs/ANDROID_ACCEPTANCE_TEST.md) — physical-device acceptance protocol
 - [`docs/OPERATIONS.md`](./docs/OPERATIONS.md) — deployment/runtime checks
 - [`docs/RELEASES.md`](./docs/RELEASES.md) — APK/release process
-
----
-
-## Product rule
-
-Production code must prefer an honest empty/error state over fabricated activity.
-
-No production path may silently invent:
-
-- source metadata
-- posts
-- matches
-- connector health
-- notification delivery
-- AI success
+- [`PRODUCTION_STATUS.md`](./PRODUCTION_STATUS.md) — current launch blockers and readiness state
