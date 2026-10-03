@@ -3,7 +3,7 @@ import crypto from 'crypto';
 const ISSUER = 'https://token.actions.githubusercontent.com';
 const JWKS_URL = `${ISSUER}/.well-known/jwks`;
 const AUDIENCE = 'mrscrap-render-release';
-const EXPECTED_REPOSITORY = 'Tariq990/SCRAP-APP';
+const EXPECTED_REPOSITORY = 'Tariq990/social-radar-platform';
 const EXPECTED_REF = 'refs/heads/work/real-session-ai-provider';
 const EXPECTED_WORKFLOW_REF = `${EXPECTED_REPOSITORY}/.github/workflows/android-alpha-release.yml@${EXPECTED_REF}`;
 const CLOCK_SKEW_MS = 60_000;
