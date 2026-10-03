@@ -171,20 +171,46 @@ docs/
 PRODUCTION_STATUS.md         authoritative launch-gate status
 ```
 
-## Local development
+## Getting started
 
-Requirements:
+### Prerequisites
 
+- Git
 - Node.js 22
 - PostgreSQL for production-mode persistence paths
 - Android Studio / Java 21 only when building the Android project
 
-Install and run:
+Clone the repository:
+
+```bash
+git clone https://github.com/Tariq990/social-radar-platform.git
+cd social-radar-platform
+```
+
+Install dependencies and create your local environment file:
 
 ```bash
 npm install
+cp .env.example .env
+```
+
+On Windows PowerShell, use `Copy-Item .env.example .env` instead of `cp`.
+
+For the simplest local evaluation, edit `.env` and set:
+
+```env
+APP_MODE=demo
+```
+
+Demo mode may use the local development store and does not require PostgreSQL or a configured AI provider just to start the application. Then run:
+
+```bash
 npm run dev
 ```
+
+Open `http://localhost:3000` in your browser. The server binds to port `3000` by default unless `PORT` is set.
+
+## Local configuration
 
 Use `.env.example` as the configuration reference.
 
