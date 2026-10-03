@@ -307,3 +307,11 @@ Authenticated social collection is inherently sensitive to platform behavior. Fa
 - [`docs/OPERATIONS.md`](./docs/OPERATIONS.md) — deployment/runtime checks
 - [`docs/RELEASES.md`](./docs/RELEASES.md) — APK/release process
 - [`PRODUCTION_STATUS.md`](./PRODUCTION_STATUS.md) — current launch blockers and readiness state
+
+## License
+
+This repository is **source-available for personal, non-commercial use only** under the [Personal Non-Commercial Software License 1.0](LICENSE).
+
+You may inspect, clone, run, and privately modify the project for your own personal non-commercial use. Commercial use, client work, paid services, resale, SaaS/hosting, redistribution, sublicensing, or inclusion in a commercial product requires prior written permission from the copyright holder.
+
+This is not an OSI-approved open-source license.
