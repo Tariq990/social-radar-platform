@@ -6,11 +6,7 @@ MR SCRAP monitors selected Facebook/Instagram sources and alerts the user only w
 
 ## Current status
 
-This repository is in **alpha / production-architecture implementation**. The active integration branch is:
-
-`work/real-session-ai-provider`
-
-Draft PR #1 remains intentionally unmerged until the physical Android acceptance flow and final launch gates are closed.
+This repository is in **alpha / production-architecture implementation**. The current `main` branch contains the hardened web/API/Android architecture. Physical Android Facebook-session acceptance and the final launch gates remain explicitly open.
 
 ### What is real now
 
@@ -31,7 +27,7 @@ Draft PR #1 remains intentionally unmerged until the physical Android acceptance
 - Deterministic, race-safe source-scoped post/match deduplication.
 - Provider-neutral AI architecture controlled by the application operator.
 - Production mode does not silently fall back to fake posts/matches/local JSON persistence.
-- CI typechecks, runs unit/integration tests, bundles web/server, syncs Capacitor and compiles an Android APK.
+- The verification workflow typechecks, runs unit/integration tests, bundles web/server, syncs Capacitor, and is configured to compile an Android APK when GitHub-hosted runners are available.
 
 ### Not production-ready yet
 
